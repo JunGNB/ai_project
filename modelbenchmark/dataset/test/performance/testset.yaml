@@ -1,0 +1,21 @@
+# Default performance test set: 8 scenarios over the pre-built samples
+# (dataset/test/performance/testset.jsonl).
+#
+# 8 scenarios × 1K/8K/32K × 20 = 480 measured requests (no separate warmup).
+# Each (scenario, bucket) is one cell; samples in the three buckets share target_id.
+name: performance
+title: 性能测试（8 场景 × 1K/8K/32K × 20）
+description: >-
+  默认性能测试集：knowledge_qa / instruction_following / long_context / math_logic /
+  coding / general_agent / search_agent / chinese_long_context。
+  样本来自 dataset/test/performance/testset.jsonl，按 scenario 过滤；
+  每个 (scenario, bucket) 形成独立 cell，同 target_id 的三条为同题不同长。
+scenarios:
+  knowledge_qa: {}
+  instruction_following: {}
+  long_context: {}
+  math_logic: {}
+  coding: {}
+  general_agent: {}
+  search_agent: {}
+  chinese_long_context: {}

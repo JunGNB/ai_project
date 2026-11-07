@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>模型性能基准测试 · oMLX Console</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">MB</div>
+      <div class="brand-text">
+        <h1>模型性能基准测试</h1>
+        <p class="sub">oMLX · 逐样本 TTFT / TG TPS / 峰值内存 / 输入上下文</p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <span id="server-pill" class="pill muted">检测服务中…</span>
+      <span id="catalog-pill" class="pill muted" title="运行目录索引">索引</span>
+      <button id="refresh" class="btn ghost" title="刷新数据">刷新</button>
+      <button id="open-output" class="btn ghost" title="在 Finder 中打开 output 目录">打开输出目录</button>
+      <button id="rebuild-index" class="btn ghost" title="重建 output/index.json">重建索引</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <section class="card">
+        <div class="card-head">
+          <div>
+            <h2>测试集</h2>
+            <p class="hint"><code>dataset/test/</code> 下的测试集，勾选后开始测试；样本数在下方统一设置</p>
+          </div>
+          <button id="open-testset" class="btn ghost" title="在 Finder 中打开 dataset/test 目录">打开目录</button>
+        </div>
+        <div id="testsets" class="testset-list" aria-label="测试集列表"></div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <div>
+            <h2>测试模型</h2>
+            <p class="hint">清单来自 <code>models.yaml</code>；「刷新模型」实时检索 oMLX</p>
+          </div>
+          <div class="row model-actions">
+            <button id="refresh-models" class="btn ghost mini" title="重新检索 oMLX 最新模型列表">刷新模型</button>
+            <button id="sync-models" class="btn ghost mini" title="把服务端模型差异写回 models.yaml">同步清单</button>
+            <span id="model-count" class="pill soft">已选 0</span>
+          </div>
+        </div>
+        <div id="models" class="model-list"></div>
+        <div id="model-sync" class="model-sync"></div>
+        <div class="row mini-actions">
+          <button class="link" data-models="all">全选</button>
+          <button class="link" data-models="none">清空</button>
+          <span class="hint">仅 MoE 模型会启用 expert offload</span>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><h2>运行参数</h2><span class="pill soft">perf</span></div>
+        <div class="grid2">
+          <label class="field" title="对所选测试集下的每个场景分别生效">每个场景样本数
+            <input id="samples" type="number" min="1" placeholder="留空 = 全部" />
+          </label>
+          <label class="field">生成长度 max_tokens
+            <input id="max-tokens" type="number" min="1" placeholder="默认 50（OSL，可配置）" />
+          </label>
+          <label class="field">重复轮数
+            <input id="repeats" type="number" min="1" placeholder="默认 1" />
+          </label>
+          <label class="field">缓存模式
+            <select id="cache-mode">
+              <option value="cold">cold（推荐）</option>
+              <option value="warm">warm（诊断）</option>
+              <option value="none">none（诊断）</option>
+            </select>
+          </label>
+          <label class="field" title="默认开启：每个模型加载后发送 1 条丢弃短请求（短 prompt、max_tokens=8，仿 oMLX QUICK）以触发 JIT/Metal 编译。关闭后首个 measured 样本会包含冷启动，属非默认口径，结果不可与默认口径混算。">预热（丢弃）
+            <span class="check-line"><input id="warmup-enabled" type="checkbox" checked /> 模型加载后预热 1 次</span>
+          </label>
+          <label class="field span2">思考模式
+            <select id="thinking-mode">
+              <option value="disabled">disabled（默认）</option>
+              <option value="auto">auto（oMLX 默认）</option>
+              <option value="enabled">enabled</option>
+            </select>
+          </label>
+          <div class="field span2">上下文档位（可多选；不勾选 = 全部档位）
+            <div id="context-windows" class="ctx-windows"></div>
+          </div>
+        </div>
+        <p class="hint">「每个场景样本数」对所选测试集下的每个场景分别生效（留空 = 全部可用样本；预构造样本按档位×语言分层抽取），总测量数见下方计划。
+          上下文档位只筛选样本，且只列出数据集实际存在的档位（performance 为 1K/8K/32K）；cell 始终按场景×数据集×档位聚合；默认冷缓存。</p>
+      </section>
+
+      <section class="card start-card">
+        <p id="estimate" class="estimate">请选择模型与数据集</p>
+        <button id="start" class="btn primary block">开始测试</button>
+      </section>
+    </aside>
+
+    <section class="main-col">
+      <section id="job-card" class="card job-card hidden">
+        <div class="card-head">
+          <div class="card-head-title">
+            <h2>运行状态</h2>
+            <span id="job-pill" class="pill muted">空闲</span>
+          </div>
+          <div class="row">
+            <span class="hint">run <code id="job-run">-</code></span>
+            <span class="hint">已测 <b id="job-records">0</b></span>
+            <button id="cancel" class="btn danger ghost hidden">取消</button>
+          </div>
+        </div>
+        <div id="job-stats" class="job-stats"></div>
+        <div id="job-current" class="job-current">等待开始…</div>
+        <div class="progress"><div id="job-progress" class="progress-bar"></div></div>
+        <div id="job-results" class="job-results hidden"></div>
+        <details class="log-details">
+          <summary>运行日志</summary>
+          <pre id="job-log" class="log"></pre>
+        </details>
+      </section>
+
+      <section class="card runs-card">
+        <div class="card-head">
+          <div>
+            <h2>历史运行</h2>
+            <p class="hint">点击行查看整体/逐样本结果；可打开原始输出文件或目录</p>
+          </div>
+          <div class="row">
+            <span id="catalog-info" class="hint">output/index.json</span>
+          </div>
+        </div>
+        <div id="runs" class="runs-list"></div>
+      </section>
+    </section>
+  </main>
+
+  <div id="modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-body">
+      <div class="modal-head">
+        <div>
+          <h2 id="modal-title">Run 详情</h2>
+          <p id="modal-sub" class="hint"></p>
+        </div>
+        <div class="row">
+          <button id="modal-finder" class="btn ghost">在 Finder 中打开</button>
+          <button id="modal-copy" class="btn ghost">复制目录</button>
+          <button id="modal-close" class="btn ghost">关闭</button>
+        </div>
+      </div>
+      <div id="modal-skipped" class="banner warn hidden"></div>
+      <div id="modal-warnings" class="banner warn hidden"></div>
+      <div id="modal-files" class="file-bar"></div>
+      <div class="tabs" id="modal-tabs">
+        <button class="tab active" data-tab="overall">整体结果</button>
+        <button class="tab" data-tab="cells">数据集</button>
+        <button class="tab" data-tab="samples">逐样本</button>
+        <button class="tab" data-tab="environment">环境与配置</button>
+        <button class="tab" data-tab="report">报告</button>
+      </div>
+      <div id="tab-overall" class="tab-panel">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>模型</th><th>档位</th><th>数据集</th><th>样本</th><th>有效</th><th title="finish_reason=length（达到 max_tokens）的样本数；这些样本正常参与 TTFT/TG TPS/内存平均，TG TPS 按实际生成 token 计算">触顶</th><th>TTFT ms</th><th title="每个档位单独平均；括号为 TG TPS 参与统计样本数/有效样本数">TG TPS</th><th title="oMLX 服务进程树 phys_footprint 峰值（含 Metal 分配）；oMLX 自带 benchmark 的 PeakMem 是 mlx.get_peak_memory() 的 Metal 峰值，通常低 0.4–0.9GB">峰值内存 GB</th><th>输入 token</th><th>状态</th></tr></thead>
+            <tbody id="overall-body"></tbody>
+          </table>
+        </div>
+      </div>
+      <div id="tab-cells" class="tab-panel hidden">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>模型</th><th>数据集</th><th>档位</th><th>有效/样本</th><th title="finish_reason=length（达到 max_tokens）的样本数；正常参与平均">触顶</th><th>TTFT ms</th><th>TG TPS</th><th title="oMLX 服务进程树 phys_footprint 峰值（含 Metal 分配）；oMLX 自带 benchmark 的 PeakMem 是 mlx.get_peak_memory() 的 Metal 峰值，通常低 0.4–0.9GB">峰值内存 GB</th><th>输入 token</th></tr></thead>
+            <tbody id="cells-body"></tbody>
+          </table>
+        </div>
+      </div>
+      <div id="tab-samples" class="tab-panel hidden">
+        <div class="filters">
+          <input id="sample-search" type="search" placeholder="搜索样本 id / 数据集" />
+          <select id="sample-model"><option value="">全部模型</option></select>
+          <select id="sample-dataset"><option value="">全部数据集</option></select>
+          <select id="sample-status">
+            <option value="">全部状态</option>
+            <option value="ok">ok</option>
+            <option value="error">error</option>
+            <option value="timeout">timeout</option>
+            <option value="contaminated">contaminated</option>
+          </select>
+          <span id="sample-count" class="hint"></span>
+        </div>
+        <div class="table-wrap tall">
+          <table>
+            <thead><tr><th>模型</th><th>数据集</th><th>样本</th><th>输入 token</th><th>输入字符</th><th>TTFT ms</th><th>TG TPS</th><th title="oMLX 服务进程树 phys_footprint 峰值（含 Metal 分配）；oMLX 自带 benchmark 的 PeakMem 是 mlx.get_peak_memory() 的 Metal 峰值，通常低 0.4–0.9GB">峰值内存 GB</th><th title="length=达到 max_tokens；stop=模型自然结束。两者都保留并参与平均">finish</th><th>状态</th></tr></thead>
+            <tbody id="samples-body"></tbody>
+          </table>
+        </div>
+        <div class="pager">
+          <button id="sample-prev" class="btn ghost">上一页</button>
+          <span id="sample-page" class="hint"></span>
+          <button id="sample-next" class="btn ghost">下一页</button>
+        </div>
+      </div>
+      <div id="tab-environment" class="tab-panel hidden">
+        <div id="environment-body" class="env-grid"></div>
+      </div>
+      <div id="tab-report" class="tab-panel hidden">
+        <pre id="modal-report" class="log report"></pre>
+      </div>
+    </div>
+  </div>
+
+  <div id="sample-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-body sample-modal-body">
+      <div class="modal-head">
+        <div>
+          <h2 id="sample-modal-title">样本浏览</h2>
+          <p id="sample-modal-sub" class="hint"></p>
+        </div>
+        <div class="row">
+          <button id="sample-modal-close" class="btn ghost">关闭</button>
+        </div>
+      </div>
+      <div class="filters sample-filters">
+        <input id="sample-modal-search" type="search" placeholder="搜索样本 id / 问题 / 子任务" />
+        <button id="sample-modal-all" class="btn mini ghost">全选</button>
+        <button id="sample-modal-none" class="btn mini ghost">全部不选</button>
+        <span id="sample-modal-count" class="hint"></span>
+      </div>
+      <div class="table-wrap tall sample-table-wrap">
+        <table>
+          <thead><tr>
+            <th class="check-col"><input id="sample-modal-checkall" type="checkbox" title="全选当前筛选结果"></th>
+            <th>样本 id</th><th>问题</th><th>上下文字符</th>
+          </tr></thead>
+          <tbody id="sample-modal-list"></tbody>
+        </table>
+      </div>
+      <div class="modal-foot">
+        <span id="sample-modal-selected" class="hint"></span>
+        <button id="sample-modal-done" class="btn primary">完成</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

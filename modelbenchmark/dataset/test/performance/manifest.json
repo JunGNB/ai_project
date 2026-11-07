@@ -1,0 +1,2122 @@
+{
+  "schema_version": 3,
+  "generator_version": "tool/dataset/build_perf.py v4",
+  "seed": 20261106,
+  "tokenizer": {
+    "model": "MiniCPM5-1B",
+    "mode": "local",
+    "tokenizer_dir": "/Users/huawei/.omlx/models/openbmb/MiniCPM5-1B",
+    "semantics": "messages: chat_template(add_generation_prompt=True, enable_thinking=True) + special tokens; text: encode(add_special_tokens=True); validated against oMLX /v1/tokenize cache"
+  },
+  "tokenizer_cache": {
+    "calls": 0,
+    "cache_hits": 11086
+  },
+  "buckets": {
+    "1k": 1024,
+    "8k": 8192,
+    "32k": 32768
+  },
+  "accept_range": [
+    0.95,
+    1.05
+  ],
+  "accept_bounds": {
+    "1k": {
+      "low": 972,
+      "high": 1075
+    },
+    "8k": {
+      "low": 7782,
+      "high": 8601
+    },
+    "32k": {
+      "low": 31129,
+      "high": 34406
+    }
+  },
+  "accept_rule": "integer token counts: floor(0.95*target) <= tokens <= floor(1.05*target) (1K lower bound is 972, not 972.8; fixes the previous 0.8-token false rejection)",
+  "osl": 50,
+  "run_defaults": {
+    "max_tokens": 50,
+    "decode_guard": true,
+    "warmup_per_model": 1,
+    "warmup_requests": 0,
+    "repeats": 1
+  },
+  "tokens_semantics": "tokens = messages + tools (messages_tokens + tools_tokens); messages use the reference chat template, tools are counted as their JSON text",
+  "bucket_basis": "total prompt tokens (messages + tools)",
+  "files": [
+    "testset.jsonl"
+  ],
+  "construction_rules": {
+    "document_prefix": "one LongBench v2 document per target; 1K/8K/32K take a prefix slice of that document; question/options are appended unchanged. Workload-shape probe, not answerability-guaranteed.",
+    "document_prefix_with_search_tools": "same as document_prefix, plus fixed search/lookup tool schemas counted in tokens; one request, tools are not executed in performance mode.",
+    "target_document_first": "1K slices the target's own dureader document; 8K/32K concatenate the target document first, then other same-task documents, and slice to the target length.",
+    "instruction_pool": "target IFEval instruction is appended after a reference block built from other IFEval prompts (same dataset, target excluded).",
+    "solved_examples": "target GSM8K problem is appended after solved examples drawn from the same split, excluding the 20 target problems.",
+    "function_catalog": "target BFCL request plus a catalogue of complete, JSON-Schema-normalised function definitions ordered target-functions-first, then same-category, then the rest; filled by whole functions only (never truncated mid-JSON). The catalogue is a prefix of a shared 642-function pool, not the full pool."
+  },
+  "workloads": {
+    "knowledge_qa": "longbench_v2:Single-Document QA (open-book long-doc MCQ)",
+    "long_context": "longbench_v2:Long Structured Data Understanding",
+    "coding": "longbench_v2:Code Repository Understanding (reading, not generation)",
+    "search_agent": "longbench_v2:Multi-Document QA (single request; tool schemas only)",
+    "chinese_long_context": "longbench_v1:dureader",
+    "instruction_following": "ifeval:target instruction + same-set reference pool",
+    "math_logic": "gsm8k:target problem + solved examples",
+    "general_agent": "bfcl:single request + whole-function catalogue prefix (target functions first)"
+  },
+  "scenarios": {
+    "knowledge_qa": {
+      "dataset": "longbench_v2",
+      "workload": "longbench_v2:Single-Document QA (open-book long-doc MCQ)",
+      "construction": "document_prefix",
+      "domain": "Single-Document QA",
+      "task": null
+    },
+    "long_context": {
+      "dataset": "longbench_v2",
+      "workload": "longbench_v2:Long Structured Data Understanding",
+      "construction": "document_prefix",
+      "domain": "Long Structured Data Understanding",
+      "task": null
+    },
+    "coding": {
+      "dataset": "longbench_v2",
+      "workload": "longbench_v2:Code Repository Understanding (reading, not generation)",
+      "construction": "document_prefix",
+      "domain": "Code Repository Understanding",
+      "task": null
+    },
+    "search_agent": {
+      "dataset": "longbench_v2",
+      "workload": "longbench_v2:Multi-Document QA (single request; tool schemas only)",
+      "construction": "document_prefix_with_search_tools",
+      "domain": "Multi-Document QA",
+      "task": null
+    },
+    "chinese_long_context": {
+      "dataset": "longbench_v1",
+      "workload": "longbench_v1:dureader",
+      "construction": "target_document_first",
+      "domain": null,
+      "task": "dureader"
+    },
+    "instruction_following": {
+      "dataset": "ifeval",
+      "workload": "ifeval:target instruction + same-set reference pool",
+      "construction": "instruction_pool",
+      "domain": null,
+      "task": null
+    },
+    "math_logic": {
+      "dataset": "gsm8k",
+      "workload": "gsm8k:target problem + solved examples",
+      "construction": "solved_examples",
+      "domain": null,
+      "task": null
+    },
+    "general_agent": {
+      "dataset": "bfcl",
+      "workload": "bfcl:single request + whole-function catalogue prefix (target functions first)",
+      "construction": "function_catalog",
+      "domain": null,
+      "task": null
+    }
+  },
+  "window_requirements": {
+    "declared_32k_tokens": {
+      "min": 32455,
+      "max": 32779
+    },
+    "per_request_reserve": {
+      "max_tokens": 50,
+      "context_safety_margin_tokens": 128,
+      "decode_guard_token_reserve": 64,
+      "total": 242
+    },
+    "required_model_window_tokens": {
+      "min": 32697,
+      "max": 33021
+    },
+    "window_32768": {
+      "of": 160,
+      "testable": 1,
+      "not_testable": 159,
+      "max_testable_declared_tokens": 32526
+    },
+    "note": "Runtime window check is declared_tokens + max_tokens + context_safety_margin + decode_guard_reserve. A 32,768-token window can only host declared tokens <= 32526; the remaining 32K rows are reported as not-testable (summary.skipped), never truncated. Declared tokens exclude the decode guard."
+  },
+  "provenance": {
+    "longbench_v1": {
+      "source_url": "https://huggingface.co/datasets/zai-org/LongBench",
+      "license": "research use (see upstream repo)",
+      "files": [
+        {
+          "logical_path": "data.zip",
+          "bytes": 113932529,
+          "sha256": "cb45b11a4133c6bc1d6a44b0f8e701335ff1e543195db1103472e575857f7f64"
+        }
+      ]
+    },
+    "bfcl": {
+      "source_url": "https://github.com/ShishirPatil/gorilla",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "logical_path": "BFCL_v4_simple_python.json",
+          "bytes": 283274,
+          "sha256": "82dd63ba502eb2520c6b5d1d9a5c4b590e03ff261565175561f6228a367d1991"
+        },
+        {
+          "logical_path": "BFCL_v4_multiple.json",
+          "bytes": 316583,
+          "sha256": "aef168155ebd74b7ac2401198b201343bc7d16d7a3d7e0d4e6d8ee82c6969b2a"
+        },
+        {
+          "logical_path": "BFCL_v4_parallel.json",
+          "bytes": 171896,
+          "sha256": "19f51a82eff42e5d62541aa500115a056eb78f437c2ba1f10415fd7c8e5dda84"
+        }
+      ]
+    },
+    "longbench_v2": {
+      "source_url": "https://huggingface.co/datasets/zai-org/LongBench-v2",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "logical_path": "data.json",
+          "bytes": 465490535,
+          "sha256": "15d61c22d92c96900b3c4948b6aeea218d3214b676a65df48e7b8555604c7fe2"
+        }
+      ]
+    },
+    "ifeval": {
+      "source_url": "https://huggingface.co/datasets/google/IFEval",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "logical_path": "ifeval_input_data.jsonl",
+          "bytes": 207111,
+          "sha256": "6a85310ca8ce15eff755aa08a3a4ff931c7e273e7515ebb3c492ea85fd8288f2"
+        }
+      ]
+    },
+    "gsm8k": {
+      "source_url": "https://huggingface.co/datasets/openai/gsm8k",
+      "license": "MIT",
+      "files": [
+        {
+          "logical_path": "main/test.parquet",
+          "bytes": 419088,
+          "sha256": "ee7b8da9e381df27b9e3f7758a159ab2bdaa4dbaa910546cbbc47e0cb44e4f59"
+        }
+      ]
+    }
+  },
+  "sampling": {
+    "knowledge_qa": {
+      "dataset": "longbench_v2:Single-Document QA",
+      "workload": "longbench_v2:Single-Document QA (open-book long-doc MCQ)",
+      "seed": 20261106,
+      "pool_filter": "raw context >= 120000 characters",
+      "domain_rows": 175,
+      "source_rows": 116,
+      "dedup": {
+        "context_duplicates_removed": 9,
+        "question_duplicates_removed": 1,
+        "context_duplicates": [
+          {
+            "pool_rank": 24,
+            "sha1": "c9a8a6617502018f",
+            "kept_pool_rank": 22
+          },
+          {
+            "pool_rank": 25,
+            "sha1": "7f1e6c944374fac2",
+            "kept_pool_rank": 18
+          },
+          {
+            "pool_rank": 50,
+            "sha1": "7f1e6c944374fac2",
+            "kept_pool_rank": 18
+          },
+          {
+            "pool_rank": 54,
+            "sha1": "c9a8a6617502018f",
+            "kept_pool_rank": 22
+          },
+          {
+            "pool_rank": 88,
+            "sha1": "7f1e6c944374fac2",
+            "kept_pool_rank": 18
+          },
+          {
+            "pool_rank": 94,
+            "sha1": "b533153bb7544362",
+            "kept_pool_rank": 35
+          },
+          {
+            "pool_rank": 106,
+            "sha1": "b533153bb7544362",
+            "kept_pool_rank": 35
+          },
+          {
+            "pool_rank": 107,
+            "sha1": "c9a8a6617502018f",
+            "kept_pool_rank": 22
+          },
+          {
+            "pool_rank": 115,
+            "sha1": "23718d70dae23cf4",
+            "kept_pool_rank": 5
+          }
+        ],
+        "question_duplicates": [
+          {
+            "pool_rank": 102,
+            "question": "According to the report, which of the following statements are correct?",
+            "kept_pool_rank": 62
+          }
+        ]
+      },
+      "candidates": 106,
+      "selected": 20,
+      "selected_targets": [
+        {
+          "target_id": "tgt-knowledge_qa-000",
+          "pool_rank": 10,
+          "context_sha1": "8baaa4f3a024f888"
+        },
+        {
+          "target_id": "tgt-knowledge_qa-001",
+          "pool_rank": 7,
+          "context_sha1": "4019c253299d329e"
+        },
+        {
+          "target_id": "tgt-knowledge_qa-002",
+          "pool_rank": 67,
+          "context_sha1": "bdaac022b6b32b49"
+        },
+        {
+          "target_id": "tgt-knowledge_qa-003",
+          "pool_rank": 26,
+          "context_sha1": "bee86e7fe9188be9"
+        },
+        {
+          "target_id": "tgt-knowledge_qa-004",
+          "pool_rank": 104,
+          "context_sha1": "11ce99b89a869c63"
+        },
+        {
+          "target_id": "tgt-knowledge_qa-005",
+          "pool_rank": 35,
+          "context_sha1": "b533153bb7544362"
+        },
+        {
+          "target_id": "tgt-knowledge_qa-006",
+          "pool_rank": 69,
+          "context_sha1": "40c2a8bf89015032"
+        },
+        {
+          "target_id": "tgt-knowledge_qa-007",
+          "pool_rank": 92,
+          "context_sha1": "89b91ab35741010f"
+        },
+        {
+          "target_id": "tgt-knowledge_qa-008",
+          "pool_rank": 89,
+          "context_sha1": "e0b8499d049adf9a"
+        },
+        {
+          "target_id": "tgt-knowledge_qa-009",
+          "pool_rank": 4,
+          "context_sha1": "c1ec3888bc21f572"
+        },
+        {
+          "target_id": "tgt-knowledge_qa-010",
+          "pool_rank": 64,
+          "context_sha1": "3b709d440b95b7d4"
+        },
+        {
+          "target_id": "tgt-knowledge_qa-011",
+          "pool_rank": 5,
+          "context_sha1": "23718d70dae23cf4"
+        },
+        {
+          "target_id": "tgt-knowledge_qa-012",
+          "pool_rank": 58,
+          "context_sha1": "885552466393ab67"
+        },
+        {
+          "target_id": "tgt-knowledge_qa-013",
+          "pool_rank": 52,
+          "context_sha1": "a32cfe702d58ff7e"
+        },
+        {
+          "target_id": "tgt-knowledge_qa-014",
+          "pool_rank": 99,
+          "context_sha1": "7083612c3937a0ed"
+        },
+        {
+          "target_id": "tgt-knowledge_qa-015",
+          "pool_rank": 16,
+          "context_sha1": "ed75a8a1a2ff5e85"
+        },
+        {
+          "target_id": "tgt-knowledge_qa-016",
+          "pool_rank": 22,
+          "context_sha1": "c9a8a6617502018f"
+        },
+        {
+          "target_id": "tgt-knowledge_qa-017",
+          "pool_rank": 28,
+          "context_sha1": "ac562461c78ea7a4"
+        },
+        {
+          "target_id": "tgt-knowledge_qa-018",
+          "pool_rank": 71,
+          "context_sha1": "64fcdd2078aff2f4"
+        },
+        {
+          "target_id": "tgt-knowledge_qa-019",
+          "pool_rank": 34,
+          "context_sha1": "5abe3c27b29ed821"
+        }
+      ],
+      "skipped": [
+        {
+          "pool_rank": 105,
+          "reason": "question_too_long",
+          "detail": "question+options+prefix=855 tokens > 614 (1K context would not fit)"
+        },
+        {
+          "pool_rank": 81,
+          "reason": "32k_unreachable",
+          "detail": "best total=28462 tokens; document too short for 32K"
+        }
+      ],
+      "skip_reasons": {
+        "32k_unreachable": 1,
+        "question_too_long": 1
+      },
+      "unique_1k_bodies": 20
+    },
+    "long_context": {
+      "dataset": "longbench_v2:Long Structured Data Understanding",
+      "workload": "longbench_v2:Long Structured Data Understanding",
+      "seed": 20261106,
+      "pool_filter": "raw context >= 120000 characters",
+      "domain_rows": 33,
+      "source_rows": 32,
+      "dedup": {
+        "context_duplicates_removed": 1,
+        "question_duplicates_removed": 0,
+        "context_duplicates": [
+          {
+            "pool_rank": 9,
+            "sha1": "dbd1b8d5fcec4da5",
+            "kept_pool_rank": 6
+          }
+        ],
+        "question_duplicates": []
+      },
+      "candidates": 31,
+      "selected": 20,
+      "selected_targets": [
+        {
+          "target_id": "tgt-long_context-000",
+          "pool_rank": 30,
+          "context_sha1": "28e8dd79c0f3a384"
+        },
+        {
+          "target_id": "tgt-long_context-001",
+          "pool_rank": 18,
+          "context_sha1": "162f4e3dd68ba4b3"
+        },
+        {
+          "target_id": "tgt-long_context-002",
+          "pool_rank": 12,
+          "context_sha1": "e3b8148b1abaf790"
+        },
+        {
+          "target_id": "tgt-long_context-003",
+          "pool_rank": 17,
+          "context_sha1": "a1c6a11b90b04ef6"
+        },
+        {
+          "target_id": "tgt-long_context-004",
+          "pool_rank": 24,
+          "context_sha1": "034e67e6257c42fa"
+        },
+        {
+          "target_id": "tgt-long_context-005",
+          "pool_rank": 14,
+          "context_sha1": "46057dcd424fdfe1"
+        },
+        {
+          "target_id": "tgt-long_context-006",
+          "pool_rank": 19,
+          "context_sha1": "2e512e2ac93dcb98"
+        },
+        {
+          "target_id": "tgt-long_context-007",
+          "pool_rank": 5,
+          "context_sha1": "fe0490ab1f742ee5"
+        },
+        {
+          "target_id": "tgt-long_context-008",
+          "pool_rank": 15,
+          "context_sha1": "8ad0fac0e73bf506"
+        },
+        {
+          "target_id": "tgt-long_context-009",
+          "pool_rank": 10,
+          "context_sha1": "5a3d8dd8e0e5fdd3"
+        },
+        {
+          "target_id": "tgt-long_context-010",
+          "pool_rank": 16,
+          "context_sha1": "af21ae0b26c70547"
+        },
+        {
+          "target_id": "tgt-long_context-011",
+          "pool_rank": 29,
+          "context_sha1": "4153251cbc067578"
+        },
+        {
+          "target_id": "tgt-long_context-012",
+          "pool_rank": 28,
+          "context_sha1": "6859b5679a27dcbf"
+        },
+        {
+          "target_id": "tgt-long_context-013",
+          "pool_rank": 22,
+          "context_sha1": "1f52d8826ac708a3"
+        },
+        {
+          "target_id": "tgt-long_context-014",
+          "pool_rank": 6,
+          "context_sha1": "dbd1b8d5fcec4da5"
+        },
+        {
+          "target_id": "tgt-long_context-015",
+          "pool_rank": 3,
+          "context_sha1": "76b063d1af7d8b6f"
+        },
+        {
+          "target_id": "tgt-long_context-016",
+          "pool_rank": 31,
+          "context_sha1": "e94539451a24e3cc"
+        },
+        {
+          "target_id": "tgt-long_context-017",
+          "pool_rank": 26,
+          "context_sha1": "3e9b12a7c180c8f1"
+        },
+        {
+          "target_id": "tgt-long_context-018",
+          "pool_rank": 8,
+          "context_sha1": "61e3de3d1fe6cda9"
+        },
+        {
+          "target_id": "tgt-long_context-019",
+          "pool_rank": 13,
+          "context_sha1": "91bd618bf65d1e7e"
+        }
+      ],
+      "skipped": [
+        {
+          "pool_rank": 27,
+          "reason": "1k_low_token_density",
+          "detail": "best total=1886 tokens; document slicing cannot reach 1K"
+        },
+        {
+          "pool_rank": 23,
+          "reason": "1k_low_token_density",
+          "detail": "best total=711 tokens; document slicing cannot reach 1K"
+        },
+        {
+          "pool_rank": 25,
+          "reason": "question_too_long",
+          "detail": "question+options+prefix=1014 tokens > 614 (1K context would not fit)"
+        }
+      ],
+      "skip_reasons": {
+        "1k_low_token_density": 2,
+        "question_too_long": 1
+      },
+      "unique_1k_bodies": 15,
+      "known_1k_prefix_collisions": {
+        "unique_1k_bodies": 15,
+        "selected_targets": 20,
+        "reason": "upstream LongBench v2 Long Structured Data documents share a 2,651-character boilerplate prefix; the eligible pool (33 rows, 31 after dedupe) cannot supply 20 distinct 1K bodies, so 5 of the 20 1K bodies are byte-identical. This is an upstream property, not a sampling bug; the target count stays 20 by design."
+      }
+    },
+    "coding": {
+      "dataset": "longbench_v2:Code Repository Understanding",
+      "workload": "longbench_v2:Code Repository Understanding (reading, not generation)",
+      "seed": 20261106,
+      "pool_filter": "raw context >= 120000 characters",
+      "domain_rows": 50,
+      "source_rows": 48,
+      "dedup": {
+        "context_duplicates_removed": 1,
+        "question_duplicates_removed": 0,
+        "context_duplicates": [
+          {
+            "pool_rank": 30,
+            "sha1": "053bf8c4025ba4f4",
+            "kept_pool_rank": 29
+          }
+        ],
+        "question_duplicates": []
+      },
+      "candidates": 47,
+      "selected": 20,
+      "selected_targets": [
+        {
+          "target_id": "tgt-coding-000",
+          "pool_rank": 14,
+          "context_sha1": "c1600b9a31c44c0a"
+        },
+        {
+          "target_id": "tgt-coding-001",
+          "pool_rank": 29,
+          "context_sha1": "053bf8c4025ba4f4"
+        },
+        {
+          "target_id": "tgt-coding-002",
+          "pool_rank": 27,
+          "context_sha1": "b5afeaa4a0bd30d3"
+        },
+        {
+          "target_id": "tgt-coding-003",
+          "pool_rank": 19,
+          "context_sha1": "3cbc5af73f1f4c9e"
+        },
+        {
+          "target_id": "tgt-coding-004",
+          "pool_rank": 41,
+          "context_sha1": "5ed9fa2025c3264d"
+        },
+        {
+          "target_id": "tgt-coding-005",
+          "pool_rank": 34,
+          "context_sha1": "2a160eb48de944d2"
+        },
+        {
+          "target_id": "tgt-coding-006",
+          "pool_rank": 33,
+          "context_sha1": "7918e2b5687f9eea"
+        },
+        {
+          "target_id": "tgt-coding-007",
+          "pool_rank": 12,
+          "context_sha1": "df8c863213ca3f69"
+        },
+        {
+          "target_id": "tgt-coding-008",
+          "pool_rank": 26,
+          "context_sha1": "d94c465f1e786f40"
+        },
+        {
+          "target_id": "tgt-coding-009",
+          "pool_rank": 32,
+          "context_sha1": "b9d110c63be9f530"
+        },
+        {
+          "target_id": "tgt-coding-010",
+          "pool_rank": 6,
+          "context_sha1": "cf4b22412160ee27"
+        },
+        {
+          "target_id": "tgt-coding-011",
+          "pool_rank": 31,
+          "context_sha1": "964a1ee154b3574a"
+        },
+        {
+          "target_id": "tgt-coding-012",
+          "pool_rank": 36,
+          "context_sha1": "bfd7927fd53bb4bf"
+        },
+        {
+          "target_id": "tgt-coding-013",
+          "pool_rank": 46,
+          "context_sha1": "a9d1084eb3043c91"
+        },
+        {
+          "target_id": "tgt-coding-014",
+          "pool_rank": 11,
+          "context_sha1": "2aa275b04617b104"
+        },
+        {
+          "target_id": "tgt-coding-015",
+          "pool_rank": 23,
+          "context_sha1": "a2279e786ca6b0f1"
+        },
+        {
+          "target_id": "tgt-coding-016",
+          "pool_rank": 43,
+          "context_sha1": "6cdaa6789804457c"
+        },
+        {
+          "target_id": "tgt-coding-017",
+          "pool_rank": 39,
+          "context_sha1": "f08795aba1064459"
+        },
+        {
+          "target_id": "tgt-coding-018",
+          "pool_rank": 28,
+          "context_sha1": "a5ac57208195c745"
+        },
+        {
+          "target_id": "tgt-coding-019",
+          "pool_rank": 2,
+          "context_sha1": "387df3c5982199ee"
+        }
+      ],
+      "skipped": [],
+      "skip_reasons": {},
+      "unique_1k_bodies": 20
+    },
+    "search_agent": {
+      "dataset": "longbench_v2:Multi-Document QA",
+      "workload": "longbench_v2:Multi-Document QA (single request; tool schemas only)",
+      "seed": 20261106,
+      "pool_filter": "raw context >= 120000 characters",
+      "domain_rows": 125,
+      "source_rows": 94,
+      "dedup": {
+        "context_duplicates_removed": 0,
+        "question_duplicates_removed": 0,
+        "context_duplicates": [],
+        "question_duplicates": []
+      },
+      "candidates": 94,
+      "selected": 20,
+      "selected_targets": [
+        {
+          "target_id": "tgt-search_agent-000",
+          "pool_rank": 54,
+          "context_sha1": "710e96f39392e38d"
+        },
+        {
+          "target_id": "tgt-search_agent-001",
+          "pool_rank": 22,
+          "context_sha1": "f31820f6f3e0f516"
+        },
+        {
+          "target_id": "tgt-search_agent-002",
+          "pool_rank": 77,
+          "context_sha1": "36ee3fa277e58f85"
+        },
+        {
+          "target_id": "tgt-search_agent-003",
+          "pool_rank": 16,
+          "context_sha1": "2861b01441b3bdb0"
+        },
+        {
+          "target_id": "tgt-search_agent-004",
+          "pool_rank": 48,
+          "context_sha1": "968290f946ba4451"
+        },
+        {
+          "target_id": "tgt-search_agent-005",
+          "pool_rank": 62,
+          "context_sha1": "54574f2fb3f31921"
+        },
+        {
+          "target_id": "tgt-search_agent-006",
+          "pool_rank": 53,
+          "context_sha1": "6f2ba887f176ce90"
+        },
+        {
+          "target_id": "tgt-search_agent-007",
+          "pool_rank": 19,
+          "context_sha1": "854efc7abdc53b21"
+        },
+        {
+          "target_id": "tgt-search_agent-008",
+          "pool_rank": 33,
+          "context_sha1": "72b9a37d48de763b"
+        },
+        {
+          "target_id": "tgt-search_agent-009",
+          "pool_rank": 65,
+          "context_sha1": "72ca8abececb07ac"
+        },
+        {
+          "target_id": "tgt-search_agent-010",
+          "pool_rank": 24,
+          "context_sha1": "96dcb3859e8b7ea1"
+        },
+        {
+          "target_id": "tgt-search_agent-011",
+          "pool_rank": 55,
+          "context_sha1": "80d26667bf22afd4"
+        },
+        {
+          "target_id": "tgt-search_agent-012",
+          "pool_rank": 52,
+          "context_sha1": "54557cd4ad30a4e1"
+        },
+        {
+          "target_id": "tgt-search_agent-013",
+          "pool_rank": 60,
+          "context_sha1": "b43127e7ef7d6f5f"
+        },
+        {
+          "target_id": "tgt-search_agent-014",
+          "pool_rank": 85,
+          "context_sha1": "6824e07867a40858"
+        },
+        {
+          "target_id": "tgt-search_agent-015",
+          "pool_rank": 71,
+          "context_sha1": "bb57f36830240c55"
+        },
+        {
+          "target_id": "tgt-search_agent-016",
+          "pool_rank": 92,
+          "context_sha1": "6e625ddbee1a74ca"
+        },
+        {
+          "target_id": "tgt-search_agent-017",
+          "pool_rank": 86,
+          "context_sha1": "7951ce1b2c13ae23"
+        },
+        {
+          "target_id": "tgt-search_agent-018",
+          "pool_rank": 47,
+          "context_sha1": "dbc7647ad233167f"
+        },
+        {
+          "target_id": "tgt-search_agent-019",
+          "pool_rank": 37,
+          "context_sha1": "759f58a72c612f3d"
+        }
+      ],
+      "skipped": [
+        {
+          "pool_rank": 31,
+          "reason": "question_too_long",
+          "detail": "question+options+prefix=667 tokens > 614 (1K context would not fit)"
+        }
+      ],
+      "skip_reasons": {
+        "question_too_long": 1
+      },
+      "unique_1k_bodies": 20
+    },
+    "chinese_long_context": {
+      "dataset": "longbench_v1:dureader",
+      "workload": "longbench_v1:dureader",
+      "seed": 20261111,
+      "pool_filter": "all dureader rows (200)",
+      "domain_rows": 200,
+      "source_rows": 200,
+      "dedup": {
+        "context_duplicates_removed": 0,
+        "question_duplicates_removed": 0,
+        "context_duplicates": [],
+        "question_duplicates": []
+      },
+      "candidates": 200,
+      "selected": 20,
+      "selected_targets": [
+        {
+          "target_id": "tgt-chinese_long_context-000",
+          "pool_rank": 196,
+          "context_sha1": "66e130e331b8899d"
+        },
+        {
+          "target_id": "tgt-chinese_long_context-001",
+          "pool_rank": 164,
+          "context_sha1": "e097de5345c97014"
+        },
+        {
+          "target_id": "tgt-chinese_long_context-002",
+          "pool_rank": 150,
+          "context_sha1": "c151d4be4804c47f"
+        },
+        {
+          "target_id": "tgt-chinese_long_context-003",
+          "pool_rank": 151,
+          "context_sha1": "5ee3ee19f29611da"
+        },
+        {
+          "target_id": "tgt-chinese_long_context-004",
+          "pool_rank": 6,
+          "context_sha1": "d2de560c7c044235"
+        },
+        {
+          "target_id": "tgt-chinese_long_context-005",
+          "pool_rank": 187,
+          "context_sha1": "658ee0b06945af2d"
+        },
+        {
+          "target_id": "tgt-chinese_long_context-006",
+          "pool_rank": 110,
+          "context_sha1": "aed6a7a5688a4c4c"
+        },
+        {
+          "target_id": "tgt-chinese_long_context-007",
+          "pool_rank": 62,
+          "context_sha1": "31143541c5ecc3b6"
+        },
+        {
+          "target_id": "tgt-chinese_long_context-008",
+          "pool_rank": 38,
+          "context_sha1": "ca97bd9bab45405f"
+        },
+        {
+          "target_id": "tgt-chinese_long_context-009",
+          "pool_rank": 5,
+          "context_sha1": "54a09bfe7beca3d3"
+        },
+        {
+          "target_id": "tgt-chinese_long_context-010",
+          "pool_rank": 98,
+          "context_sha1": "803a04dd2643f9c1"
+        },
+        {
+          "target_id": "tgt-chinese_long_context-011",
+          "pool_rank": 181,
+          "context_sha1": "8314ed395d166db9"
+        },
+        {
+          "target_id": "tgt-chinese_long_context-012",
+          "pool_rank": 58,
+          "context_sha1": "b4abb4352da39cd6"
+        },
+        {
+          "target_id": "tgt-chinese_long_context-013",
+          "pool_rank": 3,
+          "context_sha1": "30ac16a7684946b0"
+        },
+        {
+          "target_id": "tgt-chinese_long_context-014",
+          "pool_rank": 118,
+          "context_sha1": "f5eaf4da1b0b87eb"
+        },
+        {
+          "target_id": "tgt-chinese_long_context-015",
+          "pool_rank": 146,
+          "context_sha1": "f74b5433364bc34b"
+        },
+        {
+          "target_id": "tgt-chinese_long_context-016",
+          "pool_rank": 43,
+          "context_sha1": "6475739b2e1562e5"
+        },
+        {
+          "target_id": "tgt-chinese_long_context-017",
+          "pool_rank": 148,
+          "context_sha1": "9a94f135f36e59f1"
+        },
+        {
+          "target_id": "tgt-chinese_long_context-018",
+          "pool_rank": 45,
+          "context_sha1": "443116ab1a34ac1e"
+        },
+        {
+          "target_id": "tgt-chinese_long_context-019",
+          "pool_rank": 30,
+          "context_sha1": "245c485207728dfc"
+        }
+      ],
+      "skipped": [],
+      "skip_reasons": {}
+    },
+    "instruction_following": {
+      "dataset": "ifeval",
+      "workload": "ifeval:target instruction + same-set reference pool",
+      "seed": 20261108,
+      "pool_filter": null,
+      "domain_rows": 541,
+      "source_rows": 541,
+      "dedup": {
+        "context_duplicates_removed": 0,
+        "question_duplicates_removed": 0,
+        "context_duplicates": [],
+        "question_duplicates": []
+      },
+      "candidates": 541,
+      "selected": 20,
+      "selected_targets": [
+        {
+          "target_id": "tgt-instruction_following-000",
+          "pool_rank": 520,
+          "reference_rotation_start": 0,
+          "reference_pool_cycles": 2
+        },
+        {
+          "target_id": "tgt-instruction_following-001",
+          "pool_rank": 349,
+          "reference_rotation_start": 37,
+          "reference_pool_cycles": 2
+        },
+        {
+          "target_id": "tgt-instruction_following-002",
+          "pool_rank": 170,
+          "reference_rotation_start": 74,
+          "reference_pool_cycles": 2
+        },
+        {
+          "target_id": "tgt-instruction_following-003",
+          "pool_rank": 74,
+          "reference_rotation_start": 111,
+          "reference_pool_cycles": 2
+        },
+        {
+          "target_id": "tgt-instruction_following-004",
+          "pool_rank": 373,
+          "reference_rotation_start": 148,
+          "reference_pool_cycles": 2
+        },
+        {
+          "target_id": "tgt-instruction_following-005",
+          "pool_rank": 287,
+          "reference_rotation_start": 185,
+          "reference_pool_cycles": 2
+        },
+        {
+          "target_id": "tgt-instruction_following-006",
+          "pool_rank": 310,
+          "reference_rotation_start": 222,
+          "reference_pool_cycles": 2
+        },
+        {
+          "target_id": "tgt-instruction_following-007",
+          "pool_rank": 412,
+          "reference_rotation_start": 259,
+          "reference_pool_cycles": 2
+        },
+        {
+          "target_id": "tgt-instruction_following-008",
+          "pool_rank": 495,
+          "reference_rotation_start": 296,
+          "reference_pool_cycles": 2
+        },
+        {
+          "target_id": "tgt-instruction_following-009",
+          "pool_rank": 143,
+          "reference_rotation_start": 333,
+          "reference_pool_cycles": 2
+        },
+        {
+          "target_id": "tgt-instruction_following-010",
+          "pool_rank": 189,
+          "reference_rotation_start": 370,
+          "reference_pool_cycles": 2
+        },
+        {
+          "target_id": "tgt-instruction_following-011",
+          "pool_rank": 529,
+          "reference_rotation_start": 407,
+          "reference_pool_cycles": 2
+        },
+        {
+          "target_id": "tgt-instruction_following-012",
+          "pool_rank": 264,
+          "reference_rotation_start": 444,
+          "reference_pool_cycles": 2
+        },
+        {
+          "target_id": "tgt-instruction_following-013",
+          "pool_rank": 453,
+          "reference_rotation_start": 481,
+          "reference_pool_cycles": 2
+        },
+        {
+          "target_id": "tgt-instruction_following-014",
+          "pool_rank": 71,
+          "reference_rotation_start": 518,
+          "reference_pool_cycles": 2
+        },
+        {
+          "target_id": "tgt-instruction_following-015",
+          "pool_rank": 148,
+          "reference_rotation_start": 15,
+          "reference_pool_cycles": 2
+        },
+        {
+          "target_id": "tgt-instruction_following-016",
+          "pool_rank": 42,
+          "reference_rotation_start": 52,
+          "reference_pool_cycles": 2
+        },
+        {
+          "target_id": "tgt-instruction_following-017",
+          "pool_rank": 19,
+          "reference_rotation_start": 89,
+          "reference_pool_cycles": 2
+        },
+        {
+          "target_id": "tgt-instruction_following-018",
+          "pool_rank": 433,
+          "reference_rotation_start": 126,
+          "reference_pool_cycles": 2
+        },
+        {
+          "target_id": "tgt-instruction_following-019",
+          "pool_rank": 266,
+          "reference_rotation_start": 163,
+          "reference_pool_cycles": 2
+        }
+      ],
+      "skipped": [],
+      "skip_reasons": {}
+    },
+    "math_logic": {
+      "dataset": "gsm8k",
+      "workload": "gsm8k:target problem + solved examples",
+      "seed": 20261109,
+      "pool_filter": null,
+      "domain_rows": 1319,
+      "source_rows": 1319,
+      "dedup": {
+        "context_duplicates_removed": 0,
+        "question_duplicates_removed": 0,
+        "context_duplicates": [],
+        "question_duplicates": []
+      },
+      "candidates": 1319,
+      "selected": 20,
+      "selected_targets": [
+        {
+          "target_id": "tgt-math_logic-000",
+          "pool_rank": 231,
+          "example_rotation_start": 0
+        },
+        {
+          "target_id": "tgt-math_logic-001",
+          "pool_rank": 229,
+          "example_rotation_start": 41
+        },
+        {
+          "target_id": "tgt-math_logic-002",
+          "pool_rank": 610,
+          "example_rotation_start": 82
+        },
+        {
+          "target_id": "tgt-math_logic-003",
+          "pool_rank": 776,
+          "example_rotation_start": 123
+        },
+        {
+          "target_id": "tgt-math_logic-004",
+          "pool_rank": 1235,
+          "example_rotation_start": 164
+        },
+        {
+          "target_id": "tgt-math_logic-005",
+          "pool_rank": 10,
+          "example_rotation_start": 205
+        },
+        {
+          "target_id": "tgt-math_logic-006",
+          "pool_rank": 392,
+          "example_rotation_start": 246
+        },
+        {
+          "target_id": "tgt-math_logic-007",
+          "pool_rank": 949,
+          "example_rotation_start": 287
+        },
+        {
+          "target_id": "tgt-math_logic-008",
+          "pool_rank": 565,
+          "example_rotation_start": 328
+        },
+        {
+          "target_id": "tgt-math_logic-009",
+          "pool_rank": 1274,
+          "example_rotation_start": 369
+        },
+        {
+          "target_id": "tgt-math_logic-010",
+          "pool_rank": 1148,
+          "example_rotation_start": 410
+        },
+        {
+          "target_id": "tgt-math_logic-011",
+          "pool_rank": 233,
+          "example_rotation_start": 451
+        },
+        {
+          "target_id": "tgt-math_logic-012",
+          "pool_rank": 1169,
+          "example_rotation_start": 492
+        },
+        {
+          "target_id": "tgt-math_logic-013",
+          "pool_rank": 1012,
+          "example_rotation_start": 533
+        },
+        {
+          "target_id": "tgt-math_logic-014",
+          "pool_rank": 543,
+          "example_rotation_start": 574
+        },
+        {
+          "target_id": "tgt-math_logic-015",
+          "pool_rank": 934,
+          "example_rotation_start": 615
+        },
+        {
+          "target_id": "tgt-math_logic-016",
+          "pool_rank": 907,
+          "example_rotation_start": 656
+        },
+        {
+          "target_id": "tgt-math_logic-017",
+          "pool_rank": 221,
+          "example_rotation_start": 697
+        },
+        {
+          "target_id": "tgt-math_logic-018",
+          "pool_rank": 258,
+          "example_rotation_start": 738
+        },
+        {
+          "target_id": "tgt-math_logic-019",
+          "pool_rank": 1178,
+          "example_rotation_start": 779
+        }
+      ],
+      "skipped": [],
+      "skip_reasons": {}
+    },
+    "general_agent": {
+      "dataset": "bfcl",
+      "workload": "bfcl:single request + whole-function catalogue prefix (target functions first)",
+      "seed": 20261110,
+      "pool_filter": "BFCL v4 single-turn request files (simple_python/multiple/parallel)",
+      "domain_rows": 800,
+      "source_rows": 800,
+      "dedup": {
+        "context_duplicates_removed": 0,
+        "question_duplicates_removed": 0,
+        "context_duplicates": [],
+        "question_duplicates": []
+      },
+      "candidates": 800,
+      "selected": 20,
+      "selected_targets": [
+        {
+          "target_id": "tgt-general_agent-000",
+          "pool_rank": 251,
+          "bfcl_id": "simple_python_251",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "body_catalog_functions": {
+            "1k": 7,
+            "8k": 58,
+            "32k": 229
+          },
+          "own_functions_visible": {
+            "1k": 1,
+            "8k": 1,
+            "32k": 1
+          }
+        },
+        {
+          "target_id": "tgt-general_agent-001",
+          "pool_rank": 167,
+          "bfcl_id": "simple_python_167",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "body_catalog_functions": {
+            "1k": 7,
+            "8k": 58,
+            "32k": 229
+          },
+          "own_functions_visible": {
+            "1k": 1,
+            "8k": 1,
+            "32k": 1
+          }
+        },
+        {
+          "target_id": "tgt-general_agent-002",
+          "pool_rank": 82,
+          "bfcl_id": "simple_python_82",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "body_catalog_functions": {
+            "1k": 7,
+            "8k": 59,
+            "32k": 229
+          },
+          "own_functions_visible": {
+            "1k": 1,
+            "8k": 1,
+            "32k": 1
+          }
+        },
+        {
+          "target_id": "tgt-general_agent-003",
+          "pool_rank": 334,
+          "bfcl_id": "simple_python_334",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "body_catalog_functions": {
+            "1k": 6,
+            "8k": 57,
+            "32k": 228
+          },
+          "own_functions_visible": {
+            "1k": 1,
+            "8k": 1,
+            "32k": 1
+          }
+        },
+        {
+          "target_id": "tgt-general_agent-004",
+          "pool_rank": 80,
+          "bfcl_id": "simple_python_80",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "body_catalog_functions": {
+            "1k": 6,
+            "8k": 57,
+            "32k": 228
+          },
+          "own_functions_visible": {
+            "1k": 1,
+            "8k": 1,
+            "32k": 1
+          }
+        },
+        {
+          "target_id": "tgt-general_agent-005",
+          "pool_rank": 11,
+          "bfcl_id": "simple_python_11",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "body_catalog_functions": {
+            "1k": 7,
+            "8k": 58,
+            "32k": 229
+          },
+          "own_functions_visible": {
+            "1k": 1,
+            "8k": 1,
+            "32k": 1
+          }
+        },
+        {
+          "target_id": "tgt-general_agent-006",
+          "pool_rank": 197,
+          "bfcl_id": "simple_python_197",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "body_catalog_functions": {
+            "1k": 7,
+            "8k": 58,
+            "32k": 229
+          },
+          "own_functions_visible": {
+            "1k": 1,
+            "8k": 1,
+            "32k": 1
+          }
+        },
+        {
+          "target_id": "tgt-general_agent-007",
+          "pool_rank": 324,
+          "bfcl_id": "simple_python_324",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "body_catalog_functions": {
+            "1k": 7,
+            "8k": 58,
+            "32k": 229
+          },
+          "own_functions_visible": {
+            "1k": 1,
+            "8k": 1,
+            "32k": 1
+          }
+        },
+        {
+          "target_id": "tgt-general_agent-008",
+          "pool_rank": 72,
+          "bfcl_id": "simple_python_72",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "body_catalog_functions": {
+            "1k": 6,
+            "8k": 57,
+            "32k": 228
+          },
+          "own_functions_visible": {
+            "1k": 1,
+            "8k": 1,
+            "32k": 1
+          }
+        },
+        {
+          "target_id": "tgt-general_agent-009",
+          "pool_rank": 137,
+          "bfcl_id": "simple_python_137",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "body_catalog_functions": {
+            "1k": 6,
+            "8k": 57,
+            "32k": 228
+          },
+          "own_functions_visible": {
+            "1k": 1,
+            "8k": 1,
+            "32k": 1
+          }
+        },
+        {
+          "target_id": "tgt-general_agent-010",
+          "pool_rank": 9,
+          "bfcl_id": "multiple_9",
+          "category": "multiple",
+          "category_detail": "multiple",
+          "body_catalog_functions": {
+            "1k": 5,
+            "8k": 60,
+            "32k": 248
+          },
+          "own_functions_visible": {
+            "1k": 3,
+            "8k": 3,
+            "32k": 3
+          }
+        },
+        {
+          "target_id": "tgt-general_agent-011",
+          "pool_rank": 110,
+          "bfcl_id": "multiple_110",
+          "category": "multiple",
+          "category_detail": "multiple",
+          "body_catalog_functions": {
+            "1k": 4,
+            "8k": 60,
+            "32k": 247
+          },
+          "own_functions_visible": {
+            "1k": 2,
+            "8k": 2,
+            "32k": 2
+          }
+        },
+        {
+          "target_id": "tgt-general_agent-012",
+          "pool_rank": 97,
+          "bfcl_id": "multiple_97",
+          "category": "multiple",
+          "category_detail": "multiple",
+          "body_catalog_functions": {
+            "1k": 4,
+            "8k": 60,
+            "32k": 248
+          },
+          "own_functions_visible": {
+            "1k": 2,
+            "8k": 2,
+            "32k": 2
+          }
+        },
+        {
+          "target_id": "tgt-general_agent-013",
+          "pool_rank": 29,
+          "bfcl_id": "multiple_29",
+          "category": "multiple",
+          "category_detail": "multiple",
+          "body_catalog_functions": {
+            "1k": 5,
+            "8k": 61,
+            "32k": 248
+          },
+          "own_functions_visible": {
+            "1k": 2,
+            "8k": 2,
+            "32k": 2
+          }
+        },
+        {
+          "target_id": "tgt-general_agent-014",
+          "pool_rank": 117,
+          "bfcl_id": "multiple_117",
+          "category": "multiple",
+          "category_detail": "multiple",
+          "body_catalog_functions": {
+            "1k": 3,
+            "8k": 58,
+            "32k": 246
+          },
+          "own_functions_visible": {
+            "1k": 3,
+            "8k": 3,
+            "32k": 3
+          }
+        },
+        {
+          "target_id": "tgt-general_agent-015",
+          "pool_rank": 58,
+          "bfcl_id": "parallel_58",
+          "category": "parallel",
+          "category_detail": "parallel",
+          "body_catalog_functions": {
+            "1k": 7,
+            "8k": 59,
+            "32k": 231
+          },
+          "own_functions_visible": {
+            "1k": 1,
+            "8k": 1,
+            "32k": 1
+          }
+        },
+        {
+          "target_id": "tgt-general_agent-016",
+          "pool_rank": 25,
+          "bfcl_id": "parallel_25",
+          "category": "parallel",
+          "category_detail": "parallel",
+          "body_catalog_functions": {
+            "1k": 7,
+            "8k": 59,
+            "32k": 231
+          },
+          "own_functions_visible": {
+            "1k": 1,
+            "8k": 1,
+            "32k": 1
+          }
+        },
+        {
+          "target_id": "tgt-general_agent-017",
+          "pool_rank": 18,
+          "bfcl_id": "parallel_18",
+          "category": "parallel",
+          "category_detail": "parallel",
+          "body_catalog_functions": {
+            "1k": 6,
+            "8k": 58,
+            "32k": 231
+          },
+          "own_functions_visible": {
+            "1k": 1,
+            "8k": 1,
+            "32k": 1
+          }
+        },
+        {
+          "target_id": "tgt-general_agent-018",
+          "pool_rank": 147,
+          "bfcl_id": "parallel_147",
+          "category": "parallel",
+          "category_detail": "parallel",
+          "body_catalog_functions": {
+            "1k": 6,
+            "8k": 58,
+            "32k": 230
+          },
+          "own_functions_visible": {
+            "1k": 1,
+            "8k": 1,
+            "32k": 1
+          }
+        },
+        {
+          "target_id": "tgt-general_agent-019",
+          "pool_rank": 101,
+          "bfcl_id": "parallel_101",
+          "category": "parallel",
+          "category_detail": "parallel",
+          "body_catalog_functions": {
+            "1k": 6,
+            "8k": 58,
+            "32k": 230
+          },
+          "own_functions_visible": {
+            "1k": 1,
+            "8k": 1,
+            "32k": 1
+          }
+        }
+      ],
+      "skipped": [
+        {
+          "pool_rank": 316,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=1119 tokens (bucket bounds (972, 1075))",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "bfcl_id": "simple_python_316"
+        },
+        {
+          "pool_rank": 81,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=1117 tokens (bucket bounds (972, 1075))",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "bfcl_id": "simple_python_81"
+        },
+        {
+          "pool_rank": 77,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=1108 tokens (bucket bounds (972, 1075))",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "bfcl_id": "simple_python_77"
+        },
+        {
+          "pool_rank": 390,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=1077 tokens (bucket bounds (972, 1075))",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "bfcl_id": "simple_python_390"
+        },
+        {
+          "pool_rank": 279,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=1088 tokens (bucket bounds (972, 1075))",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "bfcl_id": "simple_python_279"
+        },
+        {
+          "pool_rank": 30,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=939 tokens (bucket bounds (972, 1075))",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "bfcl_id": "simple_python_30"
+        },
+        {
+          "pool_rank": 308,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=1125 tokens (bucket bounds (972, 1075))",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "bfcl_id": "simple_python_308"
+        },
+        {
+          "pool_rank": 194,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=1172 tokens (bucket bounds (972, 1075))",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "bfcl_id": "simple_python_194"
+        },
+        {
+          "pool_rank": 127,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=969 tokens (bucket bounds (972, 1075))",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "bfcl_id": "simple_python_127"
+        },
+        {
+          "pool_rank": 98,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=1109 tokens (bucket bounds (972, 1075))",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "bfcl_id": "simple_python_98"
+        },
+        {
+          "pool_rank": 294,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=1107 tokens (bucket bounds (972, 1075))",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "bfcl_id": "simple_python_294"
+        },
+        {
+          "pool_rank": 378,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=1109 tokens (bucket bounds (972, 1075))",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "bfcl_id": "simple_python_378"
+        },
+        {
+          "pool_rank": 71,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=1114 tokens (bucket bounds (972, 1075))",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "bfcl_id": "simple_python_71"
+        },
+        {
+          "pool_rank": 83,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=955 tokens (bucket bounds (972, 1075))",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "bfcl_id": "simple_python_83"
+        },
+        {
+          "pool_rank": 57,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=952 tokens (bucket bounds (972, 1075))",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "bfcl_id": "simple_python_57"
+        },
+        {
+          "pool_rank": 170,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=954 tokens (bucket bounds (972, 1075))",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "bfcl_id": "simple_python_170"
+        },
+        {
+          "pool_rank": 365,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=1118 tokens (bucket bounds (972, 1075))",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "bfcl_id": "simple_python_365"
+        },
+        {
+          "pool_rank": 122,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=1117 tokens (bucket bounds (972, 1075))",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "bfcl_id": "simple_python_122"
+        },
+        {
+          "pool_rank": 16,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=1113 tokens (bucket bounds (972, 1075))",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "bfcl_id": "simple_python_16"
+        },
+        {
+          "pool_rank": 204,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=1117 tokens (bucket bounds (972, 1075))",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "bfcl_id": "simple_python_204"
+        },
+        {
+          "pool_rank": 209,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=923 tokens (bucket bounds (972, 1075))",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "bfcl_id": "simple_python_209"
+        },
+        {
+          "pool_rank": 234,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=951 tokens (bucket bounds (972, 1075))",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "bfcl_id": "simple_python_234"
+        },
+        {
+          "pool_rank": 309,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=1115 tokens (bucket bounds (972, 1075))",
+          "category": "simple",
+          "category_detail": "simple_python",
+          "bfcl_id": "simple_python_309"
+        },
+        {
+          "pool_rank": 6,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=1228 tokens (bucket bounds (972, 1075))",
+          "category": "multiple",
+          "category_detail": "multiple",
+          "bfcl_id": "multiple_6"
+        },
+        {
+          "pool_rank": 26,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=1145 tokens (bucket bounds (972, 1075))",
+          "category": "multiple",
+          "category_detail": "multiple",
+          "bfcl_id": "multiple_26"
+        },
+        {
+          "pool_rank": 125,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=936 tokens (bucket bounds (972, 1075))",
+          "category": "multiple",
+          "category_detail": "multiple",
+          "bfcl_id": "multiple_125"
+        },
+        {
+          "pool_rank": 36,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=944 tokens (bucket bounds (972, 1075))",
+          "category": "parallel",
+          "category_detail": "parallel",
+          "bfcl_id": "parallel_36"
+        },
+        {
+          "pool_rank": 71,
+          "reason": "1k_infeasible",
+          "detail": "tools+request best total=952 tokens (bucket bounds (972, 1075))",
+          "category": "parallel",
+          "category_detail": "parallel",
+          "bfcl_id": "parallel_71"
+        }
+      ],
+      "skip_reasons": {
+        "1k_infeasible": 28
+      },
+      "category_pool": {
+        "simple_python": 400,
+        "multiple": 200,
+        "parallel": 200
+      },
+      "category_quota": {
+        "simple_python": 10,
+        "multiple": 5,
+        "parallel": 5
+      },
+      "category_catalog_functions": {
+        "simple_python": 370,
+        "multiple": 443,
+        "parallel": 186
+      },
+      "catalog_universe_functions": 642,
+      "category_skipped": {
+        "multiple": 3,
+        "parallel": 2,
+        "simple": 23
+      },
+      "category_selected": {
+        "multiple": 5,
+        "parallel": 5,
+        "simple": 10
+      }
+    }
+  },
+  "stats": {
+    "chinese_long_context|1k": {
+      "n": 20,
+      "constructed": 0,
+      "dataset": "longbench_v1:dureader",
+      "tokens_min": 1000,
+      "tokens_median": 1017,
+      "tokens_max": 1032,
+      "tokens_mean": 1016.2,
+      "langs": [
+        "zh"
+      ]
+    },
+    "chinese_long_context|8k": {
+      "n": 20,
+      "constructed": 20,
+      "dataset": "longbench_v1:dureader",
+      "tokens_min": 8149,
+      "tokens_median": 8184,
+      "tokens_max": 8201,
+      "tokens_mean": 8182.3,
+      "langs": [
+        "zh"
+      ]
+    },
+    "chinese_long_context|32k": {
+      "n": 20,
+      "constructed": 20,
+      "dataset": "longbench_v1:dureader",
+      "tokens_min": 32746,
+      "tokens_median": 32761,
+      "tokens_max": 32779,
+      "tokens_mean": 32761.0,
+      "langs": [
+        "zh"
+      ]
+    },
+    "coding|1k": {
+      "n": 20,
+      "constructed": 0,
+      "dataset": "longbench_v2:Code Repository Understanding",
+      "tokens_min": 1005,
+      "tokens_median": 1016,
+      "tokens_max": 1030,
+      "tokens_mean": 1016.5,
+      "langs": [
+        "en"
+      ]
+    },
+    "coding|8k": {
+      "n": 20,
+      "constructed": 0,
+      "dataset": "longbench_v2:Code Repository Understanding",
+      "tokens_min": 8168,
+      "tokens_median": 8185,
+      "tokens_max": 8196,
+      "tokens_mean": 8184.2,
+      "langs": [
+        "en"
+      ]
+    },
+    "coding|32k": {
+      "n": 20,
+      "constructed": 0,
+      "dataset": "longbench_v2:Code Repository Understanding",
+      "tokens_min": 32752,
+      "tokens_median": 32761,
+      "tokens_max": 32763,
+      "tokens_mean": 32759.7,
+      "langs": [
+        "en"
+      ]
+    },
+    "general_agent|1k": {
+      "n": 20,
+      "constructed": 20,
+      "dataset": "bfcl",
+      "tokens_min": 978,
+      "tokens_median": 1025,
+      "tokens_max": 1072,
+      "tokens_mean": 1024.0,
+      "langs": [
+        "en"
+      ]
+    },
+    "general_agent|8k": {
+      "n": 20,
+      "constructed": 20,
+      "dataset": "bfcl",
+      "tokens_min": 8023,
+      "tokens_median": 8087,
+      "tokens_max": 8167,
+      "tokens_mean": 8092.6,
+      "langs": [
+        "en"
+      ]
+    },
+    "general_agent|32k": {
+      "n": 20,
+      "constructed": 20,
+      "dataset": "bfcl",
+      "tokens_min": 32617,
+      "tokens_median": 32699,
+      "tokens_max": 32759,
+      "tokens_mean": 32692.5,
+      "langs": [
+        "en"
+      ]
+    },
+    "instruction_following|1k": {
+      "n": 20,
+      "constructed": 20,
+      "dataset": "ifeval",
+      "tokens_min": 1015,
+      "tokens_median": 1016,
+      "tokens_max": 1017,
+      "tokens_mean": 1016.0,
+      "langs": [
+        "en"
+      ]
+    },
+    "instruction_following|8k": {
+      "n": 20,
+      "constructed": 20,
+      "dataset": "ifeval",
+      "tokens_min": 8183,
+      "tokens_median": 8184,
+      "tokens_max": 8185,
+      "tokens_mean": 8183.9,
+      "langs": [
+        "en"
+      ]
+    },
+    "instruction_following|32k": {
+      "n": 20,
+      "constructed": 20,
+      "dataset": "ifeval",
+      "tokens_min": 32759,
+      "tokens_median": 32760,
+      "tokens_max": 32762,
+      "tokens_mean": 32760.1,
+      "langs": [
+        "en"
+      ]
+    },
+    "knowledge_qa|1k": {
+      "n": 20,
+      "constructed": 0,
+      "dataset": "longbench_v2:Single-Document QA",
+      "tokens_min": 1015,
+      "tokens_median": 1017,
+      "tokens_max": 1019,
+      "tokens_mean": 1017.0,
+      "langs": [
+        "en"
+      ]
+    },
+    "knowledge_qa|8k": {
+      "n": 20,
+      "constructed": 0,
+      "dataset": "longbench_v2:Single-Document QA",
+      "tokens_min": 8183,
+      "tokens_median": 8185,
+      "tokens_max": 8185,
+      "tokens_mean": 8184.4,
+      "langs": [
+        "en"
+      ]
+    },
+    "knowledge_qa|32k": {
+      "n": 20,
+      "constructed": 0,
+      "dataset": "longbench_v2:Single-Document QA",
+      "tokens_min": 32758,
+      "tokens_median": 32761,
+      "tokens_max": 32762,
+      "tokens_mean": 32760.8,
+      "langs": [
+        "en"
+      ]
+    },
+    "long_context|1k": {
+      "n": 20,
+      "constructed": 0,
+      "dataset": "longbench_v2:Long Structured Data Understanding",
+      "tokens_min": 1008,
+      "tokens_median": 1017,
+      "tokens_max": 1019,
+      "tokens_mean": 1016.5,
+      "langs": [
+        "en"
+      ]
+    },
+    "long_context|8k": {
+      "n": 20,
+      "constructed": 0,
+      "dataset": "longbench_v2:Long Structured Data Understanding",
+      "tokens_min": 8166,
+      "tokens_median": 8185,
+      "tokens_max": 8189,
+      "tokens_mean": 8184.2,
+      "langs": [
+        "en"
+      ]
+    },
+    "long_context|32k": {
+      "n": 20,
+      "constructed": 0,
+      "dataset": "longbench_v2:Long Structured Data Understanding",
+      "tokens_min": 32743,
+      "tokens_median": 32761,
+      "tokens_max": 32763,
+      "tokens_mean": 32760.0,
+      "langs": [
+        "en"
+      ]
+    },
+    "math_logic|1k": {
+      "n": 20,
+      "constructed": 20,
+      "dataset": "gsm8k",
+      "tokens_min": 1012,
+      "tokens_median": 1016,
+      "tokens_max": 1018,
+      "tokens_mean": 1015.9,
+      "langs": [
+        "en"
+      ]
+    },
+    "math_logic|8k": {
+      "n": 20,
+      "constructed": 20,
+      "dataset": "gsm8k",
+      "tokens_min": 8181,
+      "tokens_median": 8184,
+      "tokens_max": 8189,
+      "tokens_mean": 8184.1,
+      "langs": [
+        "en"
+      ]
+    },
+    "math_logic|32k": {
+      "n": 20,
+      "constructed": 20,
+      "dataset": "gsm8k",
+      "tokens_min": 32753,
+      "tokens_median": 32760,
+      "tokens_max": 32766,
+      "tokens_mean": 32759.8,
+      "langs": [
+        "en"
+      ]
+    },
+    "search_agent|1k": {
+      "n": 20,
+      "constructed": 0,
+      "dataset": "longbench_v2:Multi-Document QA",
+      "tokens_min": 1014,
+      "tokens_median": 1017,
+      "tokens_max": 1022,
+      "tokens_mean": 1016.6,
+      "langs": [
+        "en"
+      ]
+    },
+    "search_agent|8k": {
+      "n": 20,
+      "constructed": 0,
+      "dataset": "longbench_v2:Multi-Document QA",
+      "tokens_min": 8183,
+      "tokens_median": 8185,
+      "tokens_max": 8188,
+      "tokens_mean": 8184.9,
+      "langs": [
+        "en"
+      ]
+    },
+    "search_agent|32k": {
+      "n": 20,
+      "constructed": 0,
+      "dataset": "longbench_v2:Multi-Document QA",
+      "tokens_min": 32455,
+      "tokens_median": 32761,
+      "tokens_max": 32765,
+      "tokens_mean": 32745.6,
+      "langs": [
+        "en"
+      ]
+    }
+  },
+  "tokens_mean": 13980.0,
+  "totals": {
+    "rows": 480,
+    "cells": 24,
+    "per_cell": 20,
+    "measured_requests": 480,
+    "targets": 160
+  },
+  "default_run": {
+    "measured_requests": 480,
+    "cells": 24
+  },
+  "sets": {
+    "performance": {
+      "file": "testset.jsonl",
+      "per_bucket": 20,
+      "rows": 480
+    },
+    "performance_10": {
+      "file": "testset_10.jsonl",
+      "per_bucket": 10,
+      "rows": 240,
+      "selection": "per scenario: sorted target_id[::2] (10 of 20), all three buckets kept"
+    }
+  }
+}

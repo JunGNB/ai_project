@@ -1,0 +1,49 @@
+# Models available in the local oMLX instance.
+# `id` must match GET /v1/models exactly. `alias` is a short label used in
+# results and CLI filters. `max_context` optionally caps the server-reported
+# context window.
+#
+# IMPORTANT: models are loaded with oMLX default settings (as downloaded).
+# The ONLY allowed load setting is `moe_expert_offload_enabled` for MoE models
+# that need streamed experts to fit in memory.  TurboQuant / DFlash / MTP /
+# SpecPrefill / ANE acceleration must NOT be configured here.
+#
+# Keep this list in sync with `GET /v1/models`; `modelbench validate` warns on
+# any configured/server-only difference.  Last synced 2026-11-07 (12 models).
+models:
+  - id: MiniCPM5-1B
+    alias: minicpm5-1b
+    notes: "1B dense; fast smoke-test target"
+  - id: MiniCPM5-2B
+    alias: minicpm5-2b
+  - id: MiniCPM-V-4.6
+    alias: minicpm-v-4.6
+    notes: "vision-language model, text-only benchmark"
+  - id: MiniCPM-V-4.7-1B
+    alias: minicpm-v-4.7-1b
+  - id: MiniCPM-o-4_5-4bit
+    alias: minicpm-o-4.5
+  - id: Qwen3.5-9B-MLX-4bit
+    alias: qwen3.5-9b
+    notes: "recommended default comparison model"
+  - id: qwen3.6-35B-A3B
+    alias: qwen3.6-35b-a3b
+    notes: "MoE 35B (3B active); streamed experts so it fits in 24GB"
+    load:
+      optional: true
+      settings:
+        moe_expert_offload_enabled: true
+  - id: Qwen3.8-27B-4bit
+    alias: qwen3.8-27b
+    notes: "heavy, enable selectively"
+  - id: gemma-4-E4B-it
+    alias: gemma-4-e4b-full
+    notes: "16.8GB full-weight gemma 4 E4B"
+  - id: gemma-4-E4B-it-MLX-4bit
+    alias: gemma-4-e4b
+    notes: "MLX 4-bit quantization"
+  - id: gemma-4-E4B-it-oQ4
+    alias: gemma-4-e4b-oq4
+    notes: "oQ4 quantization"
+  - id: qwen3.6-35B-A3B-oQ4
+    alias: qwen3.6-35b-a3b-oq4

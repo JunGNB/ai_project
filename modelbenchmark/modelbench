@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Unified entry point for the benchmark project.
+#
+#   ./modelbench setup                 # create .venv and install dependencies
+#   ./modelbench web [--port 8765]     # local web console
+#   ./modelbench run --models minicpm5-1b   # CLI benchmark
+#   ./modelbench validate | list | hardware | download | analyze ...
+#
+# .venv is only the isolated Python environment created by `setup`; it is not
+# another entry point and should not be copied between machines.
+set -euo pipefail
+ROOT="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+VENV="$ROOT/.venv"
+cmd="${1:-help}"
+
+if [ "$#" -eq 0 ] || [ "$cmd" = "help" ] || [ "$cmd" = "--help" ] || [ "$cmd" = "-h" ]; then
+  set -- --help
+  cmd="help"
+fi
+
+if [ "$cmd" = "setup" ]; then
+  shift || true
+  cd "$ROOT"
+  mkdir -p output/build
+  export UV_CACHE_DIR="${UV_CACHE_DIR:-$ROOT/.uv-cache}"
+  export UV_DEFAULT_INDEX="${UV_DEFAULT_INDEX:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+  PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
+  UV="${UV:-}"
+  if [ -z "$UV" ]; then
+    if command -v uv >/dev/null 2>&1; then UV="$(command -v uv)";
+    elif [ -x "$HOME/.local/bin/uv" ]; then UV="$HOME/.local/bin/uv"; fi
+  fi
+  if [ ! -x "$VENV/bin/python" ]; then
+    if [ -n "$UV" ]; then
+      "$UV" venv --python "$PYTHON_VERSION" .venv
+    else
+      PYTHON="${PYTHON:-python3.12}"
+      command -v "$PYTHON" >/dev/null 2>&1 || {
+        echo "python $PYTHON_VERSION not found; set PYTHON=/path/to/python3.12" >&2
+        exit 1
+      }
+      "$PYTHON" -m venv .venv
+      "$VENV/bin/python" -m pip install --upgrade pip
+    fi
+  fi
+  if [ -n "$UV" ]; then
+    "$UV" pip install --python "$VENV/bin/python" -e ".[dev]"
+  else
+    "$VENV/bin/python" -m pip install -e ".[dev]"
+  fi
+  echo
+  echo "environment ready. next:"
+  echo "  ./modelbench web"
+  echo "  ./modelbench run --models minicpm5-1b"
+  exit 0
+fi
+
+if [ ! -x "$VENV/bin/python" ]; then
+  echo "environment not ready: run ./modelbench setup" >&2
+  exit 2
+fi
+
+exec "$VENV/bin/python" -m modelbench.interfaces.cli "$@"

@@ -1,0 +1,42 @@
+[project]
+name = "omlx-modelbenchmark"
+version = "0.3.0"
+description = "Local LLM performance benchmark harness for oMLX: per-sample TTFT/TG TPS/memory with hardware and oMLX configuration snapshots"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "modelbenchmark" }]
+dependencies = [
+  "httpx>=0.27,<1.0",
+  "pydantic>=2.6,<3.0",
+  "PyYAML>=6.0",
+  "psutil>=5.9",
+  "numpy>=1.26",
+  "openpyxl>=3.1,<4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-timeout>=2.3"]
+datasets = ["pyarrow>=15.0"]
+
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+addopts = "-q"
+markers = [
+  "live: requires a running oMLX server (deselect with -m 'not live')",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["modelbench*"]
+
+[tool.setuptools.package-data]
+modelbench = [
+  "resources/config/*.yaml",
+  "interfaces/web/static/*",
+]

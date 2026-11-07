@@ -1,0 +1,107 @@
+# 项目结构清单（自动生成）
+
+> 由 `python -m harness.gen_structure --write` 生成，**请勿手改**。
+> 检查：`python -m harness.gate --only docs_contract`。
+
+```text
+src/modelbench/
+__init__.py
+adapters/
+  __init__.py
+  config/
+    __init__.py
+    settings.py
+    testsets.py
+  datasets/
+    __init__.py
+    _download.py
+    base.py
+    bfcl.py
+    custom.py
+    gsm8k.py
+    hotpotqa.py
+    humaneval.py
+    ifeval.py
+    longbench_v2.py
+    mmlu.py
+    mmmlu.py
+    perf_jsonl.py
+    registry.py
+    synthetic.py
+  host/
+    __init__.py
+    hardware.py
+    process_memory.py
+    sampler.py
+  omlx/
+    __init__.py
+    backend.py
+    cache.py
+    client.py
+    environment.py
+  storage/
+    __init__.py
+    catalog.py
+    excel_report.py
+    writer.py
+application/
+  __init__.py
+  batch.py
+  benchmark.py
+  locking.py
+  plan.py
+  ports.py
+domain/
+  __init__.py
+  context_windows.py
+  evaluators/
+    __init__.py
+    agent.py
+    base.py
+    code.py
+    instruction.py
+    math.py
+    mc.py
+    search.py
+  metrics.py
+  models.py
+  scenarios/
+    __init__.py
+    agent.py
+    base.py
+    code.py
+    common.py
+    instruction.py
+    knowledge.py
+    long_context.py
+    math.py
+    multilingual.py
+    padding.py
+    perf.py
+    registry.py
+    search.py
+    speculative.py
+interfaces/
+  __init__.py
+  analysis/
+    __init__.py
+    __main__.py
+    cli.py
+    compare.py
+  cli.py
+  web/
+    __init__.py
+    jobs.py
+    sample_worker.py
+    server.py
+    static/
+      app.js
+      index.html
+      style.css
+paths.py
+resources/
+  config/
+    default.yaml
+    models.yaml
+    scenarios.yaml
+```

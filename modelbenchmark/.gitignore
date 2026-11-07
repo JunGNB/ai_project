@@ -1,0 +1,24 @@
+.venv/
+.uv-cache/
+__pycache__/
+*.pyc
+.pytest_cache/
+# Dataset inputs/artifacts: raw upstream files, tokenizer cache and generated
+# test-set payloads are evidence, never committed (rebuild with tool/dataset).
+
+*.log
+.DS_Store
+*.egg-info/
+.git/
+.github/
+
+output/
+build/
+reports/
+dist/
+harness/reports/
+harness/tasks/
+harness/state/journal.jsonl
+dataset/raw/
+dataset/.cache/
+dataset/test/**/testset.jsonl
