@@ -2,7 +2,7 @@
 
 The benchmark keeps its dataset handling deliberately boring: raw bytes are
 fetched over plain HTTP/S (HuggingFace mirror or GitHub raw), stored under
-``data/raw/<dataset>/`` and normalised into JSONL under ``data/processed/`` by
+``dataset/raw/<dataset>/`` and normalised into JSONL under ``data/processed/`` by
 the adapters.  No ``datasets`` / ``huggingface_hub`` dependency is involved.
 
 Design goals
@@ -15,14 +15,14 @@ Design goals
   ignores the range.
 * **Auditable** — size, SHA-256, source URL and timestamp of every file are
   recorded in ``<raw_root>/download_manifest.json`` and surfaced by
-  ``modelbenchmark download`` and ``docs/DATASETS.md``.
+  ``modelbenchmark download`` and ``docs/design/32-dataset-sources.md``.
 * **Clear failures** — exhausted retries raise :class:`DownloadError` with the
   URL, target path and the last transport error, so the CLI can report which
   dataset/file is broken instead of silently loading empty data.
 
 A manifest lives next to the dataset files, e.g.::
 
-    data/raw/mmlu/download_manifest.json
+    dataset/raw/mmlu/download_manifest.json
     {
       "schema_version": 1,
       "dataset": "mmlu",

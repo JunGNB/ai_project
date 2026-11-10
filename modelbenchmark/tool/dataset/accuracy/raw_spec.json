@@ -1,0 +1,582 @@
+{
+  "schema_version": 1,
+  "mirror_default": "https://hf-mirror.com",
+  "files": [
+    {
+      "dataset": "global_mmlu",
+      "path": "global_mmlu/en/test.parquet",
+      "url": "https://huggingface.co/datasets/CohereLabs/Global-MMLU/resolve/main/en/test.parquet",
+      "bytes": 3910925,
+      "sha256": "5baec81ba97243728cc9557b2cba2f03aaeedf8232473db9f20cf995c6b0a1a9",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "global_mmlu",
+      "path": "global_mmlu/zh/test.parquet",
+      "url": "https://huggingface.co/datasets/CohereLabs/Global-MMLU/resolve/main/zh/test.parquet",
+      "bytes": 3618771,
+      "sha256": "e1ba0c287b650043b8686fa5c506d1f2718b098a7f88f724ade55a76f0062ae7",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "global_mmlu",
+      "path": "global_mmlu/fr/test.parquet",
+      "url": "https://huggingface.co/datasets/CohereLabs/Global-MMLU/resolve/main/fr/test.parquet",
+      "bytes": 4550854,
+      "sha256": "e602201459c29c5dbacf9a3d80cfe2524496f8e0c0b51b6326ef4205bad3405e",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "global_mmlu",
+      "path": "global_mmlu/de/test.parquet",
+      "url": "https://huggingface.co/datasets/CohereLabs/Global-MMLU/resolve/main/de/test.parquet",
+      "bytes": 4543635,
+      "sha256": "b58a0d5994e756dabef96eb804693be153953052276d3e0b7d57bb2f2798854a",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "global_mmlu",
+      "path": "global_mmlu/es/test.parquet",
+      "url": "https://huggingface.co/datasets/CohereLabs/Global-MMLU/resolve/main/es/test.parquet",
+      "bytes": 4327396,
+      "sha256": "efbcc4ce1cf14f2f43f7b05be49a9a1153b2893c59d2f660c3bb58679801dccb",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "global_mmlu",
+      "path": "global_mmlu/pt/test.parquet",
+      "url": "https://huggingface.co/datasets/CohereLabs/Global-MMLU/resolve/main/pt/test.parquet",
+      "bytes": 4211041,
+      "sha256": "15dda0dd7dbd8eebbe66b6f8ce6087c1f0d29b18e48b7e3b225b6dba375c1048",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "global_mmlu",
+      "path": "global_mmlu/ru/test.parquet",
+      "url": "https://huggingface.co/datasets/CohereLabs/Global-MMLU/resolve/main/ru/test.parquet",
+      "bytes": 5884449,
+      "sha256": "9037e1aaca6aed1856fe1e427e5b3d4e3bb6563861b760a3360ef077df301bd6",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "global_mmlu",
+      "path": "global_mmlu/ja/test.parquet",
+      "url": "https://huggingface.co/datasets/CohereLabs/Global-MMLU/resolve/main/ja/test.parquet",
+      "bytes": 4363616,
+      "sha256": "b56ad153180d4368757891796dfad0e1a76ebeb3f7b2500b1ac63789d4e4dfe7",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "global_mmlu",
+      "path": "global_mmlu/ko/test.parquet",
+      "url": "https://huggingface.co/datasets/CohereLabs/Global-MMLU/resolve/main/ko/test.parquet",
+      "bytes": 4273255,
+      "sha256": "aa896380f066e8e905604bbda8c2c57818a22a7d02ab99a48edc1ad078affb27",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "global_mmlu",
+      "path": "global_mmlu/ar/test.parquet",
+      "url": "https://huggingface.co/datasets/CohereLabs/Global-MMLU/resolve/main/ar/test.parquet",
+      "bytes": 4854848,
+      "sha256": "e969c186f001c7548d54b420b2ddf7ae1d4abfce5720680eadcc4e8a48d0f61b",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "global_mmlu",
+      "path": "global_mmlu/hi/test.parquet",
+      "url": "https://huggingface.co/datasets/CohereLabs/Global-MMLU/resolve/main/hi/test.parquet",
+      "bytes": 6140551,
+      "sha256": "f0d82c7650ef47968a22058d9a83d22834d12c4f28e23738594d903ab52bcee5",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "global_mmlu",
+      "path": "global_mmlu/vi/test.parquet",
+      "url": "https://huggingface.co/datasets/CohereLabs/Global-MMLU/resolve/main/vi/test.parquet",
+      "bytes": 4435419,
+      "sha256": "5cd0840972e32c99d86cf287c7f9b1a8f594dd24fc2800169cce1ec0724abfba",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "ifeval",
+      "path": "ifeval/ifeval_input_data.jsonl",
+      "url": "https://huggingface.co/datasets/google/IFEval/resolve/main/ifeval_input_data.jsonl",
+      "bytes": 207111,
+      "sha256": "6a85310ca8ce15eff755aa08a3a4ff931c7e273e7515ebb3c492ea85fd8288f2",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "ifeval",
+      "path": "ifeval/instruction_following_eval/evaluation_lib.py",
+      "url": "https://raw.githubusercontent.com/google-research/google-research/master/instruction_following_eval/evaluation_lib.py",
+      "bytes": 6984,
+      "sha256": "35decc06000718487f44d7deafa6d3f48a8ec0886281edf40162c0265b7d248c",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "ifeval",
+      "path": "ifeval/instruction_following_eval/evaluation_main.py",
+      "url": "https://raw.githubusercontent.com/google-research/google-research/master/instruction_following_eval/evaluation_main.py",
+      "bytes": 2449,
+      "sha256": "e6df07a04d25a0e7134933ba2400c26e0129a243e449c88df55043e583fc4b4a",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "ifeval",
+      "path": "ifeval/instruction_following_eval/instructions.py",
+      "url": "https://raw.githubusercontent.com/google-research/google-research/master/instruction_following_eval/instructions.py",
+      "bytes": 55162,
+      "sha256": "60e086f5342a03ce8e18b64bbcccf86308f523c08aa826707a562150a52f3edf",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "ifeval",
+      "path": "ifeval/instruction_following_eval/instructions_registry.py",
+      "url": "https://raw.githubusercontent.com/google-research/google-research/master/instruction_following_eval/instructions_registry.py",
+      "bytes": 7240,
+      "sha256": "ec92d72c264f6d906978613085db262356174300370a3fffe6fefd5969ce9cfc",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "ifeval",
+      "path": "ifeval/instruction_following_eval/instructions_util.py",
+      "url": "https://raw.githubusercontent.com/google-research/google-research/master/instruction_following_eval/instructions_util.py",
+      "bytes": 19538,
+      "sha256": "a73797261eee5bf447e279d82a2b700b1bdd3cb1193412dbab1270a85832bc6b",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "longbench_v1",
+      "path": "longbench_v1/data.zip",
+      "url": "https://huggingface.co/datasets/zai-org/LongBench/resolve/main/data.zip",
+      "bytes": 113932529,
+      "sha256": "cb45b11a4133c6bc1d6a44b0f8e701335ff1e543195db1103472e575857f7f64",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "longbench_v1",
+      "path": "longbench_v1/prompts/dataset2prompt.json",
+      "url": "https://raw.githubusercontent.com/THUDM/LongBench/main/LongBench/config/dataset2prompt.json",
+      "bytes": 5437,
+      "sha256": "56d22ad4f382169c2b8a11ff4c982a4a1bea096c8152b0f0b85b64686b157c30",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "longbench_v1",
+      "path": "longbench_v1/prompts/dataset2maxlen.json",
+      "url": "https://raw.githubusercontent.com/THUDM/LongBench/main/LongBench/config/dataset2maxlen.json",
+      "bytes": 459,
+      "sha256": "72966b3c0933e214591637fb085798c5e687ebff4ddaab5d99bbc31120532022",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "gsm8k",
+      "path": "gsm8k/main/test-00000-of-00001.parquet",
+      "url": "https://huggingface.co/datasets/openai/gsm8k/resolve/main/main/test-00000-of-00001.parquet",
+      "bytes": 419088,
+      "sha256": "ee7b8da9e381df27b9e3f7758a159ab2bdaa4dbaa910546cbbc47e0cb44e4f59",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "cmath",
+      "path": "cmath/cmath_test.jsonl",
+      "url": "https://huggingface.co/datasets/weitianwen/cmath/resolve/main/cmath_test.jsonl",
+      "bytes": 222216,
+      "sha256": "cabe17c127c3227912b3384f4755e180f3aa0d9e5865677e7e5e223439bf15eb",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "humaneval",
+      "path": "humaneval/openai_humaneval/test-00000-of-00001.parquet",
+      "url": "https://huggingface.co/datasets/openai/openai_humaneval/resolve/main/openai_humaneval/test-00000-of-00001.parquet",
+      "bytes": 83920,
+      "sha256": "2f2871a15fbc95b6c683043359f4ed8e144c5a1c4f24f25f66bc51f598dfcfb6",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "mbpp",
+      "path": "mbpp/sanitized-mbpp.json",
+      "url": "https://raw.githubusercontent.com/google-research/google-research/master/mbpp/sanitized-mbpp.json",
+      "bytes": 255053,
+      "sha256": "ca95deaa9a01ef0a6f439f88bcf0dd3db3563d22f22aad6cae04ebb9a8d8c8e9",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "bfcl_v4",
+      "path": "bfcl/BFCL_v4_simple_python.json",
+      "url": "https://raw.githubusercontent.com/ShishirPatil/gorilla/main/berkeley-function-call-leaderboard/bfcl_eval/data/BFCL_v4_simple_python.json",
+      "bytes": 283274,
+      "sha256": "82dd63ba502eb2520c6b5d1d9a5c4b590e03ff261565175561f6228a367d1991",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "bfcl_v4",
+      "path": "bfcl/BFCL_v4_simple_java.json",
+      "url": "https://raw.githubusercontent.com/ShishirPatil/gorilla/main/berkeley-function-call-leaderboard/bfcl_eval/data/BFCL_v4_simple_java.json",
+      "bytes": 86619,
+      "sha256": "13d2303a125b08754f0e41995b9273b5005fa8ed8ebfaa24ef53b4d83c4b5c6e",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "bfcl_v4",
+      "path": "bfcl/BFCL_v4_simple_javascript.json",
+      "url": "https://raw.githubusercontent.com/ShishirPatil/gorilla/main/berkeley-function-call-leaderboard/bfcl_eval/data/BFCL_v4_simple_javascript.json",
+      "bytes": 47063,
+      "sha256": "329e67fedf79a6243d93dbda4b388d12bd2d31f1f2163d92cb6ef676d1764f44",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "bfcl_v4",
+      "path": "bfcl/BFCL_v4_multiple.json",
+      "url": "https://raw.githubusercontent.com/ShishirPatil/gorilla/main/berkeley-function-call-leaderboard/bfcl_eval/data/BFCL_v4_multiple.json",
+      "bytes": 316583,
+      "sha256": "aef168155ebd74b7ac2401198b201343bc7d16d7a3d7e0d4e6d8ee82c6969b2a",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "bfcl_v4",
+      "path": "bfcl/BFCL_v4_parallel.json",
+      "url": "https://raw.githubusercontent.com/ShishirPatil/gorilla/main/berkeley-function-call-leaderboard/bfcl_eval/data/BFCL_v4_parallel.json",
+      "bytes": 171896,
+      "sha256": "19f51a82eff42e5d62541aa500115a056eb78f437c2ba1f10415fd7c8e5dda84",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "bfcl_v4",
+      "path": "bfcl/BFCL_v4_parallel_multiple.json",
+      "url": "https://raw.githubusercontent.com/ShishirPatil/gorilla/main/berkeley-function-call-leaderboard/bfcl_eval/data/BFCL_v4_parallel_multiple.json",
+      "bytes": 347080,
+      "sha256": "8863ea8433239f55c5f016154cf0830853c89f693c6ea270396a2fa121960579",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "bfcl_v4",
+      "path": "bfcl/BFCL_v4_irrelevance.json",
+      "url": "https://raw.githubusercontent.com/ShishirPatil/gorilla/main/berkeley-function-call-leaderboard/bfcl_eval/data/BFCL_v4_irrelevance.json",
+      "bytes": 159940,
+      "sha256": "2b6ed4c2e992cdcf5f1678a701851f944bef7550ee026ed1ddb89efed5be01a6",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "bfcl_v4",
+      "path": "bfcl/BFCL_v4_live_simple.json",
+      "url": "https://raw.githubusercontent.com/ShishirPatil/gorilla/main/berkeley-function-call-leaderboard/bfcl_eval/data/BFCL_v4_live_simple.json",
+      "bytes": 260140,
+      "sha256": "1af2ac87dca47556db7b7e37e51e28b459a38b594e3c7b3c792b4903598ca0c4",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "bfcl_v4",
+      "path": "bfcl/BFCL_v4_live_multiple.json",
+      "url": "https://raw.githubusercontent.com/ShishirPatil/gorilla/main/berkeley-function-call-leaderboard/bfcl_eval/data/BFCL_v4_live_multiple.json",
+      "bytes": 3891277,
+      "sha256": "fd8ccfad4d911420d0e3341dbe2fff77d1d341da934248b9bb2bda24ab3a10c8",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "bfcl_v4",
+      "path": "bfcl/BFCL_v4_live_parallel.json",
+      "url": "https://raw.githubusercontent.com/ShishirPatil/gorilla/main/berkeley-function-call-leaderboard/bfcl_eval/data/BFCL_v4_live_parallel.json",
+      "bytes": 15649,
+      "sha256": "6c26e9fdc3350cf596e6d1ea9c179cbff834761bccf562f4141ed29a839ca421",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "bfcl_v4",
+      "path": "bfcl/BFCL_v4_live_parallel_multiple.json",
+      "url": "https://raw.githubusercontent.com/ShishirPatil/gorilla/main/berkeley-function-call-leaderboard/bfcl_eval/data/BFCL_v4_live_parallel_multiple.json",
+      "bytes": 82332,
+      "sha256": "21d4b9319c1faac431e22757b367ea28917fe467364c3a4b17f16ec06d4f6e79",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "bfcl_v4",
+      "path": "bfcl/possible_answer/BFCL_v4_simple_python.json",
+      "url": "https://raw.githubusercontent.com/ShishirPatil/gorilla/main/berkeley-function-call-leaderboard/bfcl_eval/data/possible_answer/BFCL_v4_simple_python.json",
+      "bytes": 63627,
+      "sha256": "90cd5bc653690ee8e459b5b3f3fc9458606f7f3fcbf795bb51b7dc581f8c86dc",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "bfcl_v4",
+      "path": "bfcl/possible_answer/BFCL_v4_simple_java.json",
+      "url": "https://raw.githubusercontent.com/ShishirPatil/gorilla/main/berkeley-function-call-leaderboard/bfcl_eval/data/possible_answer/BFCL_v4_simple_java.json",
+      "bytes": 16407,
+      "sha256": "78f25616084044fa05bbfcee68e03f6ececb222bdd5cb3b7783a675fb3366e35",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "bfcl_v4",
+      "path": "bfcl/possible_answer/BFCL_v4_simple_javascript.json",
+      "url": "https://raw.githubusercontent.com/ShishirPatil/gorilla/main/berkeley-function-call-leaderboard/bfcl_eval/data/possible_answer/BFCL_v4_simple_javascript.json",
+      "bytes": 7881,
+      "sha256": "e2f9f2e51d88e0c8056ffbf1a3dd3d02eb032532d2b5d98c9cc9003385bdd56b",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "bfcl_v4",
+      "path": "bfcl/possible_answer/BFCL_v4_multiple.json",
+      "url": "https://raw.githubusercontent.com/ShishirPatil/gorilla/main/berkeley-function-call-leaderboard/bfcl_eval/data/possible_answer/BFCL_v4_multiple.json",
+      "bytes": 32254,
+      "sha256": "244e00ce9395df948bcafc7bee64e8f9c87ef70887587d83cae45b13699f3047",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "bfcl_v4",
+      "path": "bfcl/possible_answer/BFCL_v4_parallel.json",
+      "url": "https://raw.githubusercontent.com/ShishirPatil/gorilla/main/berkeley-function-call-leaderboard/bfcl_eval/data/possible_answer/BFCL_v4_parallel.json",
+      "bytes": 66005,
+      "sha256": "8a6aa19c1adddc6a5a2f7e40f9dbf30cc7e95815e7b830c90589ab318229e0f0",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "bfcl_v4",
+      "path": "bfcl/possible_answer/BFCL_v4_parallel_multiple.json",
+      "url": "https://raw.githubusercontent.com/ShishirPatil/gorilla/main/berkeley-function-call-leaderboard/bfcl_eval/data/possible_answer/BFCL_v4_parallel_multiple.json",
+      "bytes": 74602,
+      "sha256": "5ebf24f458c1f16300c05505d83d6f0a1b68b79be273a033febd0d4f840507e3",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "bfcl_v4",
+      "path": "bfcl/possible_answer/BFCL_v4_live_simple.json",
+      "url": "https://raw.githubusercontent.com/ShishirPatil/gorilla/main/berkeley-function-call-leaderboard/bfcl_eval/data/possible_answer/BFCL_v4_live_simple.json",
+      "bytes": 46972,
+      "sha256": "fec9cfa9744a936f9126981e85a2023da1e63e273eafebc81923a1162fad70ce",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "bfcl_v4",
+      "path": "bfcl/possible_answer/BFCL_v4_live_multiple.json",
+      "url": "https://raw.githubusercontent.com/ShishirPatil/gorilla/main/berkeley-function-call-leaderboard/bfcl_eval/data/possible_answer/BFCL_v4_live_multiple.json",
+      "bytes": 199668,
+      "sha256": "97e90d59c5bd76c55a2920ce93e5566e9046307d3f558578f085f9d3a56c3084",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "bfcl_v4",
+      "path": "bfcl/possible_answer/BFCL_v4_live_parallel.json",
+      "url": "https://raw.githubusercontent.com/ShishirPatil/gorilla/main/berkeley-function-call-leaderboard/bfcl_eval/data/possible_answer/BFCL_v4_live_parallel.json",
+      "bytes": 4972,
+      "sha256": "8a9f189ff0e832ebbbbdade1fd95a7dbcc67406e9177df3f0aad76f59ab00350",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "bfcl_v4",
+      "path": "bfcl/possible_answer/BFCL_v4_live_parallel_multiple.json",
+      "url": "https://raw.githubusercontent.com/ShishirPatil/gorilla/main/berkeley-function-call-leaderboard/bfcl_eval/data/possible_answer/BFCL_v4_live_parallel_multiple.json",
+      "bytes": 7420,
+      "sha256": "f5b5f360556c5feb51db46fb9f56ee4b304f4b45b161599bbb14161c98a2873f",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "hotpotqa_distractor",
+      "path": "hotpotqa/distractor/validation-00000-of-00001.parquet",
+      "url": "https://huggingface.co/datasets/hotpotqa/hotpot_qa/resolve/main/distractor/validation-00000-of-00001.parquet",
+      "bytes": 27452575,
+      "sha256": "c20b638ca82b21d04fe12e14ff417ad05153d4d215a65de54497fca4e972f7c6",
+      "kind": "data",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "tokenizer",
+      "path": "tokenizer/MiniCPM5-1B/tokenizer.json",
+      "url": "https://huggingface.co/openbmb/MiniCPM5-1B/resolve/main/tokenizer.json",
+      "bytes": 9894271,
+      "sha256": "3e065a558a034185fe299917b398685c1facd0169a9eea1e629eb30c171fed81",
+      "kind": "tooling",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "nltk",
+      "path": "nltk_data/punkt.zip",
+      "url": "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/tokenizers/punkt.zip",
+      "bytes": 13905355,
+      "sha256": "51c3078994aeaf650bfc8e028be4fb42b4a0d177d41c012b6a983979653660ec",
+      "kind": "tooling",
+      "required_for": [
+        "accuracy"
+      ]
+    },
+    {
+      "dataset": "nltk",
+      "path": "nltk_data/punkt_tab.zip",
+      "url": "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/tokenizers/punkt_tab.zip",
+      "bytes": 4319076,
+      "sha256": "e57f64187974277726a3417ca6f181ec5403676c717672eef6a748a7b20e0106",
+      "kind": "tooling",
+      "required_for": [
+        "accuracy"
+      ]
+    }
+  ],
+  "extract": [
+    {
+      "dataset": "longbench_v1",
+      "archive": "longbench_v1/data.zip",
+      "dest": "longbench_v1",
+      "sentinel": "longbench_v1/data/narrativeqa.jsonl"
+    },
+    {
+      "dataset": "nltk",
+      "archive": "nltk_data/punkt.zip",
+      "dest": "nltk_data",
+      "sentinel": "nltk_data/tokenizers/punkt/english.pickle"
+    },
+    {
+      "dataset": "nltk",
+      "archive": "nltk_data/punkt_tab.zip",
+      "dest": "nltk_data",
+      "sentinel": "nltk_data/tokenizers/punkt_tab/english"
+    }
+  ],
+  "generated": [
+    {
+      "path": "ifeval/instruction_following_eval/__init__.py",
+      "content": ""
+    }
+  ]
+}

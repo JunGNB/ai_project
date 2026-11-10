@@ -11,6 +11,9 @@ const state = {
   estimate: null,
   detail: null,
   sampleFilter: { q: "", model: "", dataset: "", status: "", page: 0 },
+  samplesPage: null,      // {total, offset, limit, rows} served by /samples
+  samplesSeq: 0,          // guards against out-of-order pagination responses
+  samplesLoaded: false,
 };
 
 const PAGE_SIZE = 100;
@@ -42,6 +45,28 @@ const sampleMemGb = (sample) =>
     ? sample.peak_memory_gb
     : (sample?.peak_rss_mb != null ? sample.peak_rss_mb / 1024 : null);
 const int = (v) => (v == null || v === "" ? "-" : String(v));
+// Skipped/warning entries are structured objects in schema 3.0 (strings before).
+const skipText = (item) => {
+  if (item == null) return "";
+  if (typeof item === "string") return item;
+  const where = [item.scenario, item.dataset, item.sample_id].filter(Boolean).join(" · ");
+  const reason = item.reason || item.error || JSON.stringify(item);
+  return where ? `${where}：${reason}` : String(reason);
+};
+// oMLX feature flags may be strings or {key,...} blocks depending on schema.
+const flagsText = (value) => {
+  if (!value) return "无";
+  if (Array.isArray(value)) {
+    return value.map((flag) => (flag && flag.key) || flag).filter(Boolean).join(", ") || "无";
+  }
+  if (typeof value === "object") {
+    const keys = Object.entries(value)
+      .filter(([, enabled]) => enabled)
+      .map(([key]) => key);
+    return keys.join(", ") || "无";
+  }
+  return String(value);
+};
 
 function toast(message, isError = false) {
   const el = $("#toast");
@@ -772,11 +797,14 @@ function renderRunRow(run, inBatch = false) {
   if (run.cancelled) tags.push(`<span class="pill tag-cancel">已取消</span>`);
   if (run.legacy) tags.push(`<span class="pill tag-legacy">旧 schema</span>`);
   const modelName = run.model || (run.models_measured || []).join(", ") || "-";
+  const sizeBadge = run.model_size_gb != null
+    ? `<span class="badge" title="模型权重估算大小（oMLX estimated_size，GiB）">${fmt(run.model_size_gb, 2)} GB</span>`
+    : "";
   const created = (run.created_at || "").replace("T", " ").slice(0, 19);
   return `<div class="run ${inBatch ? "in-batch" : ""}" data-run="${esc(run.run_id)}">
     <div class="run-main" data-open>
       <div class="run-model-line">
-        <span class="run-model">${esc(modelName)}</span>
+        <span class="run-model">${esc(modelName)}</span>${sizeBadge}
         ${!inBatch ? `<span class="pill soft">${esc(run.method || run.mode || "performance")}</span>` : ""}
         ${tags.join("")}
       </div>
@@ -824,11 +852,8 @@ async function openRun(runId, focus = "overall") {
 
 function renderDetail(data) {
   const summary = data.summary || {};
-  const manifest = data.manifest || {};
   const perf = summary.perf || {};
   const run = summary.run || {};
-  const measured = (data.models_measured || []).length;
-  const selected = (data.models_selected || []).length;
   $("#modal-title").textContent = `Run ${summary.run_id || ""}`;
   const batch = summary.batch || {};
   $("#modal-sub").textContent =
@@ -837,13 +862,14 @@ function renderDetail(data) {
     `耗时 ${summary.duration_s ?? "-"}s · 样本数/数据集 ${perf.samples_per_dataset ?? "全部"} · ` +
     `max_tokens ${perf.max_tokens ?? "-"} · decode guard ${perf.decode_guard === true ? "开" : perf.decode_guard === false ? "关" : "未知"} · ` +
     `上下文 ${contextFilterLabel(perf.context_windows || [])} · ` +
-    `预热 ${run.warmup_per_model ?? "-"} 次/模型 · 缓存 ${run.cache_mode || "-"}`;
+    `预热 ${run.warmup_per_model ?? "-"} 次/模型 · 缓存 ${run.cache_mode || "-"} · ` +
+    `ISL入带 ${summary.n_isl_in_band ?? 0} · ISL出带 ${summary.n_isl_out_of_band ?? 0} · TG无效 ${summary.n_gen_tps_invalid ?? 0}`;
   const skipped = data.skipped || [];
   const banner = $("#modal-skipped");
   if (skipped.length) {
     banner.classList.remove("hidden");
     banner.innerHTML = `<b>本次有 ${skipped.length} 项被跳过/失败：</b><br>` +
-      skipped.map((item) => `<code>${esc(item)}</code>`).join("<br>");
+      skipped.map((item) => `<code>${esc(skipText(item))}</code>`).join("<br>");
   } else {
     banner.classList.add("hidden");
   }
@@ -852,7 +878,7 @@ function renderDetail(data) {
   if (warnings.length) {
     warningBanner.classList.remove("hidden");
     warningBanner.innerHTML = `<b>警告（${warnings.length}）：</b><br>` +
-      warnings.map((item) => `<code>${esc(item)}</code>`).join("<br>");
+      warnings.map((item) => `<code>${esc(skipText(item))}</code>`).join("<br>");
   } else {
     warningBanner.classList.add("hidden");
   }
@@ -868,8 +894,11 @@ function renderDetail(data) {
   renderFileBar(data);
   renderOverall(summary, data);
   renderCells(summary);
-  renderSampleFilters(summary);
-  renderSamples();
+  renderSampleFilters(data);
+  // Per-sample rows are paginated from the server (samples.csv); they load on
+  // first visit to the tab instead of bloating every run-detail response.
+  state.samplesPage = null;
+  state.samplesLoaded = false;
   renderEnvironment(data);
   $("#modal-report").textContent = data.report || "(无 report.md)";
 }
@@ -879,41 +908,40 @@ function renderFileBar(data) {
   const runId = summary.run_id;
   const files = data.files || [];
   const links = files.map((file) => {
-    const download = file.name === "records.jsonl" || file.size > 2 * 1024 * 1024;
+    const download = file.hidden === true || file.size > 2 * 1024 * 1024;
     const href = `/api/runs/${encodeURIComponent(runId)}/file?path=${encodeURIComponent(file.name)}${download ? "&download=1" : ""}`;
-    return `<a class="file-btn" href="${href}" target="_blank" rel="noopener" title="${esc(file.name)}">${esc(file.name)}<span class="size">${esc(file.size_human || "")}</span></a>`;
+    const size = file.size_human || (file.size != null ? `${file.size} B` : "");
+    return `<a class="file-btn" href="${href}" target="_blank" rel="noopener" title="${esc(file.name)}">${esc(file.name)}<span class="size">${esc(size)}</span></a>`;
   }).join("");
-  const analysis = files.filter((file) => file.name.startsWith("analysis/")).length;
   $("#modal-files").innerHTML =
-    `<span class="hint" style="align-self:center">原始输出</span>${links}` +
-    (analysis ? "" : `<span class="hint" style="align-self:center">（旧 run 无 analysis/ 目录）</span>`);
+    `<span class="hint" style="align-self:center">原始输出</span>${links}`;
 }
 
 function renderOverall(summary, data) {
+  const legacy = data.legacy === true || summary.legacy === true;
   const rows = (summary.overall || []).map((entry) => {
     const p = entry.perf || {};
     const tpsN = p.gen_tps?.n;
     const tps = fmt(p.gen_tps?.mean) + (tpsN != null && tpsN < entry.n_valid ? ` (${tpsN}/${entry.n_valid})` : "");
     return `<tr>
       <td>${esc(entry.model)}</td>
-      <td>${entry.context_length != null ? bucketLabel(entry.context_length) : `<span class="pill soft" title="无上下文档位（旧 schema 2.0 run 或 legacy 样本）：该行是跨全部上下文的合并值，不要与按档位结果混比">全部*</span>`}</td>
+      <td>${entry.context_length != null ? bucketLabel(entry.context_length) : `<span class="pill soft" title="没有声明的上下文档位：该行是跨全部上下文的合并值，不要与按档位结果混比">全部*</span>`}</td>
       <td>${int(entry.n_datasets)}</td>
       <td>${int(entry.n_samples)}</td>
       <td>${int(entry.n_valid)}</td>
       <td title="finish_reason=length（达到 max_tokens）；这些样本正常参与全部平均">${int(entry.n_length_capped)}</td>
+      <td title="TG TPS 被抑制的样本数">${int(entry.n_gen_tps_invalid)}</td>
+      <td title="target tokenizer 实际 prompt 在 ±10% 带内的样本数；只有这些进入平均">${int(entry.n_isl_in_band)}</td>
+      <td title="actual 在 ±10% 带外、仍测量但不参与平均的样本数">${int(entry.n_isl_out_of_band)}</td>
       <td>${fmt(p.ttft_ms?.mean)}</td>
       <td>${tps}</td>
       <td>${fmt(memGb(p))}</td>
       <td>${fmt(p.input_context_tokens?.mean, 0)}</td>
-      <td>${entry.unstable ? `<span class="pill warn">unstable</span>` : `<span class="pill ok">ok</span>`}</td>
+      <td title="insufficient_samples = 入带样本 <8（默认每 cell 10）；--samples<8 的冒烟 run 必然触发，不代表数据异常">${entry.insufficient_samples ? `<span class="pill warn">insufficient_samples</span>` : entry.unstable ? `<span class="pill warn">unstable</span>` : `<span class="pill ok">ok</span>`}</td>
     </tr>`;
   });
   if (!rows.length) {
-    if (data.legacy) {
-      rows.push(`<tr><td colspan="11" class="empty">旧 schema run：没有 overall 数据，请看「数据集」页</td></tr>`);
-    } else {
-      rows.push(`<tr><td colspan="11" class="empty">没有整体结果</td></tr>`);
-    }
+    rows.push(`<tr><td colspan="14" class="empty">${legacy ? "旧 schema run：没有 overall 数据" : "没有整体结果"}</td></tr>`);
   }
   $("#overall-body").innerHTML = rows.join("");
 }
@@ -927,19 +955,29 @@ function renderCells(summary) {
       <td>${bucketLabel(cell.context_length)}</td>
       <td>${int(cell.n_valid)}/${int((cell.n_samples || 0) * Math.max(cell.n_repeats || 1, 1))}</td>
       <td>${int(cell.n_length_capped)}</td>
+      <td title="TG TPS 被抑制的样本数">${int(cell.n_gen_tps_invalid)}</td>
+      <td title="in-band 样本数（进入平均）">${int(cell.n_isl_in_band)}</td>
+      <td title="out-of-band 样本数（不进入平均）">${int(cell.n_isl_out_of_band)}</td>
       <td>${fmt(p.ttft_ms?.mean)}</td>
       <td>${fmt(p.gen_tps?.mean)}</td>
       <td>${fmt(memGb(p, "max"))}</td>
       <td>${fmt(p.input_context_tokens?.mean, 0)}</td>
+      <td title="insufficient_samples = 入带样本 <8；小样本冒烟 run 会触发">${cell.insufficient_samples ? `<span class="pill warn">insufficient_samples</span>` : `<span class="pill ok">ok</span>`}</td>
     </tr>`;
   });
-  $("#cells-body").innerHTML = rows.join("") || `<tr><td colspan="9" class="empty">没有数据集结果</td></tr>`;
+  $("#cells-body").innerHTML = rows.join("") || `<tr><td colspan="13" class="empty">没有数据集结果</td></tr>`;
 }
 
-function renderSampleFilters(summary) {
-  const samples = summary.samples || [];
-  const models = [...new Set(samples.map((sample) => sample.model))].sort();
-  const datasets = [...new Set(samples.map((sample) => sample.dataset))].sort();
+function renderSampleFilters(data) {
+  // Filter options come from the samples.csv facet list (or the cell table as a
+  // fallback); the summary itself no longer carries any per-sample rows.
+  const facets = data.sample_facets || {};
+  const fromCells = (key) =>
+    [...new Set(((data.summary || {}).cells || []).map((cell) => cell[key]).filter(Boolean))];
+  const models = (facets.models && facets.models.length ? facets.models : fromCells("model"))
+    .slice().sort();
+  const datasets = (facets.datasets && facets.datasets.length ? facets.datasets : fromCells("dataset"))
+    .slice().sort();
   $("#sample-model").innerHTML = `<option value="">全部模型</option>` +
     models.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("");
   $("#sample-dataset").innerHTML = `<option value="">全部数据集</option>` +
@@ -951,63 +989,94 @@ function renderSampleFilters(summary) {
   $("#sample-status").value = "";
 }
 
-function filteredSampleRows(summary) {
-  const filter = state.sampleFilter;
-  const q = filter.q.trim().toLowerCase();
-  return (summary.samples || []).filter((sample) => {
-    if (filter.model && sample.model !== filter.model) return false;
-    if (filter.dataset && sample.dataset !== filter.dataset) return false;
-    if (filter.status && sample.status !== filter.status) return false;
-    if (!q) return true;
-    return (`${sample.sample_id} ${sample.dataset} ${sample.model} ${sample.scenario}`)
-      .toLowerCase().includes(q);
-  });
-}
-
-function renderSamples() {
+async function renderSamples() {
   const summary = state.detail?.summary || {};
-  const rows = filteredSampleRows(summary);
-  const total = rows.length;
-  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const page = Math.min(state.sampleFilter.page, pages - 1);
-  state.sampleFilter.page = page;
-  const slice = rows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
-  $("#samples-body").innerHTML = slice.map((sample) => `<tr>
-    <td>${esc(sample.model)}</td>
-    <td>${esc(sample.dataset)}</td>
-    <td title="${esc(sample.sample_id)}">${esc(sample.sample_id)}${sample.truncated ? " (truncated)" : ""}</td>
-    <td>${int(sample.input_context_tokens)}</td>
-    <td>${int(sample.input_context_chars)}</td>
-    <td>${fmt(sample.ttft_ms)}</td>
-    <td>${fmt(sample.gen_tps)}</td>
-    <td>${fmt(sampleMemGb(sample))}</td>
-    <td>${esc(sample.finish_reason || "-")}${sample.length_capped ? ' <span class="pill soft">触顶</span>' : ""}</td>
-    <td>${esc(sample.status)}</td>
-  </tr>`).join("") || `<tr><td colspan="10" class="empty">没有逐样本结果</td></tr>`;
-  $("#sample-count").textContent = `${total} 条`;
-  $("#sample-page").textContent = `第 ${page + 1}/${pages} 页`;
-  $("#sample-prev").disabled = page <= 0;
-  $("#sample-next").disabled = page >= pages - 1;
+  const runId = summary.run_id;
+  if (!runId) return;
+  const filter = state.sampleFilter;
+  state.samplesLoaded = true;
+  const seq = ++state.samplesSeq;
+  const params = new URLSearchParams({
+    offset: String(Math.max(0, filter.page) * PAGE_SIZE),
+    limit: String(PAGE_SIZE),
+  });
+  if (filter.model) params.set("model", filter.model);
+  if (filter.dataset) params.set("dataset", filter.dataset);
+  if (filter.status) params.set("status", filter.status);
+  const query = filter.q.trim();
+  if (query) params.set("q", query);
+  $("#samples-body").innerHTML = `<tr><td colspan="10" class="empty">正在加载逐样本数据…</td></tr>`;
+  try {
+    const data = await api(
+      `/api/runs/${encodeURIComponent(runId)}/samples?${params.toString()}`
+    );
+    if (seq !== state.samplesSeq) return;
+    state.samplesPage = data;
+    const total = Number(data.total || 0);
+    const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    if (filter.page >= pages) {
+      // A filter change shrank the result set: clamp to the last page once.
+      filter.page = pages - 1;
+      renderSamples();
+      return;
+    }
+    const rows = data.rows || [];
+    $("#samples-body").innerHTML = rows.map((sample) => `<tr>
+      <td>${esc(sample.model)}</td>
+      <td>${esc(sample.dataset)}</td>
+      <td title="${esc(sample.sample_id)}">${esc(sample.sample_id)}${sample.truncated ? " (truncated)" : ""}</td>
+      <td>${int(sample.input_context_tokens)}</td>
+      <td>${int(sample.input_context_chars)}</td>
+      <td>${fmt(sample.ttft_ms)}</td>
+      <td>${fmt(sample.gen_tps)}</td>
+      <td>${fmt(sampleMemGb(sample))}</td>
+      <td>${esc(sample.finish_reason || "-")}${sample.length_capped ? ' <span class="pill soft">触顶</span>' : ""}</td>
+      <td>${esc(sample.status)}</td>
+    </tr>`).join("") || `<tr><td colspan="10" class="empty">${total ? "该页没有数据" : "没有逐样本结果"}</td></tr>`;
+    $("#sample-count").textContent = `${total} 条`;
+    $("#sample-page").textContent = `第 ${filter.page + 1}/${pages} 页`;
+    $("#sample-prev").disabled = filter.page <= 0;
+    $("#sample-next").disabled = filter.page >= pages - 1;
+  } catch (err) {
+    if (seq !== state.samplesSeq) return;
+    state.samplesPage = null;
+    state.samplesLoaded = false;  // allow a retry on the next tab activation
+    $("#samples-body").innerHTML =
+      `<tr><td colspan="10" class="empty">加载逐样本数据失败：${esc(err.message)}</td></tr>`;
+    $("#sample-count").textContent = "-";
+    $("#sample-page").textContent = "";
+    $("#sample-prev").disabled = true;
+    $("#sample-next").disabled = true;
+    toast(`加载逐样本失败：${err.message}`, true);
+  }
 }
 
 function renderEnvironment(data) {
-  const manifest = data.manifest || {};
-  const hardware = manifest.hardware || {};
-  const omlx = manifest.omlx || {};
+  // Schema 3.0 keeps the single environment snapshot in run.json; the retired
+  // per-file environment snapshots no longer exist.
+  const runJson = data.run || {};
+  const env = runJson.env || {};
+  const hardware = env.hardware || {};
+  const omlx = env.omlx || {};
   const upload = hardware.upload_fields || {};
   const perf = (data.summary || {}).perf || {};
   const run = (data.summary || {}).run || {};
-  const modelRows = Object.entries(omlx.models || {}).map(([id, info]) => {
+  const modelEnv = env.model_env || {};
+  // ``env.omlx.models`` is the rich, id-keyed snapshot (settings/flags); the
+  // per-record ``model_env`` blocks are the fallback when oMLX admin calls fail.
+  const modelSource = Object.keys(omlx.models || {}).length
+    ? Object.entries(omlx.models)
+    : Object.entries(modelEnv).map(([digest, info]) => [info?.model_name || info?.id || digest, info || {}]);
+  const modelRows = modelSource.map(([id, info]) => {
     const settings = info.settings || {};
-    const flags = (info.feature_flags || []).map((f) => f.key || f).join(", ") || "无";
     return `<tr>
       <td>${esc(id)}</td>
       <td>${esc(info.engine_type || "-")}</td>
       <td>${esc(info.quantization || "-")}</td>
-      <td>${esc(info.context_length ?? "-")}</td>
+      <td>${esc(info.context_length ?? info.max_context_window ?? "-")}</td>
       <td>${esc(settings.moe_expert_offload_enabled ? "on" : "off")}</td>
       <td>${memCell(info.memory)}</td>
-      <td>${esc(flags)}</td>
+      <td>${esc(flagsText(info.feature_flags))}</td>
     </tr>`;
   }).join("");
   const kv = (obj) => Object.entries(obj || {}).map(([k, v]) =>
@@ -1015,7 +1084,7 @@ function renderEnvironment(data) {
   $("#environment-body").innerHTML = `
     <div class="env-block">
       <h3>硬件</h3><dl class="kv">${kv({
-        chip: `${upload.chip_name || ""} ${upload.chip_variant || ""}`,
+        chip: `${upload.chip_name || ""} ${upload.chip_variant || ""}`.trim(),
         memory_gb: upload.memory_gb,
         gpu_cores: upload.gpu_cores,
         os_version: upload.os_version,
@@ -1027,6 +1096,7 @@ function renderEnvironment(data) {
       <h3>性能参数</h3><dl class="kv">${kv({
         samples_per_dataset: perf.samples_per_dataset ?? "全部",
         max_tokens: perf.max_tokens,
+        model_size_gb: data.model_size_gb,
         context_filter: contextFilterLabel(perf.context_windows || []),
         repeats: run.repeats,
         warmup_per_model: run.warmup_per_model,
@@ -1037,10 +1107,10 @@ function renderEnvironment(data) {
     </div>
     <div class="env-block">
       <h3>加速特性（应为空）</h3><dl class="kv">${kv({
-        feature_flags: (omlx.feature_flags || []).join(", ") || "无（默认配置）",
+        feature_flags: flagsText(omlx.feature_flags),
         default_config: omlx.default_config,
-        omlx_version: omlx.omlx_version,
-        notes: (omlx.notes || []).join("; ") || "无",
+        omlx_version: omlx.version ?? omlx.omlx_version,
+        notes: Array.isArray(omlx.notes) ? (omlx.notes.join("; ") || "无") : (omlx.notes || "无"),
       })}</dl>
     </div>
     <div class="env-block" style="grid-column:1/-1">
@@ -1057,11 +1127,17 @@ function switchTab(name) {
   $$(".tab-panel").forEach((panel) => panel.classList.add("hidden"));
   const panel = $(`#tab-${name}`);
   if (panel) panel.classList.remove("hidden");
+  // Pagination is lazy: the first visit to the per-sample tab fetches page 1.
+  if (name === "samples" && state.detail && !state.samplesLoaded) {
+    renderSamples();
+  }
 }
 
 function closeModal() {
   $("#modal").classList.add("hidden");
   state.detail = null;
+  state.samplesPage = null;
+  state.samplesLoaded = false;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1132,10 +1208,14 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!$("#sample-modal").classList.contains("hidden")) closeSampleModal();
     else closeModal();
   });
+  // Server-side pagination: every filter change restarts at page 0 and the
+  // typed query is debounced so each keystroke does not hit samples.csv.
+  let sampleSearchTimer = null;
   $("#sample-search").addEventListener("input", (event) => {
     state.sampleFilter.q = event.target.value;
     state.sampleFilter.page = 0;
-    renderSamples();
+    clearTimeout(sampleSearchTimer);
+    sampleSearchTimer = setTimeout(() => renderSamples(), 250);
   });
   ["sample-model", "sample-dataset", "sample-status"].forEach((id) =>
     $(`#${id}`).addEventListener("change", (event) => {
@@ -1144,8 +1224,16 @@ document.addEventListener("DOMContentLoaded", () => {
       state.sampleFilter.page = 0;
       renderSamples();
     }));
-  $("#sample-prev").addEventListener("click", () => { state.sampleFilter.page = Math.max(0, state.sampleFilter.page - 1); renderSamples(); });
-  $("#sample-next").addEventListener("click", () => { state.sampleFilter.page += 1; renderSamples(); });
+  $("#sample-prev").addEventListener("click", () => {
+    if (!state.samplesPage) return;
+    state.sampleFilter.page = Math.max(0, state.sampleFilter.page - 1);
+    renderSamples();
+  });
+  $("#sample-next").addEventListener("click", () => {
+    if (!state.samplesPage) return;
+    state.sampleFilter.page += 1;
+    renderSamples();
+  });
 
   $("#sample-modal-close").addEventListener("click", closeSampleModal);
   $("#sample-modal-done").addEventListener("click", closeSampleModal);

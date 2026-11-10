@@ -1,1497 +1,1984 @@
 {
-  "schema_version": 3,
-  "generator_version": "tool/dataset/build_acc.py v5",
+  "schema_version": "accuracy/v1",
+  "name": "accuracy",
+  "description": "8 scenarios x 250 rows, small-model accuracy set (bf16 vs quantized); hidden offline data asset",
   "status": "offline-asset",
-  "runner": "not wired（当前 docs/TEST_PLAN 性能-only）",
-  "seed": 20261106,
-  "length_processing": "none",
-  "construction": "none",
-  "osl": 50,
-  "tokens_semantics": "tokens = chat-template messages + tools JSON text; long-context rows use the rendered prompt only, and search_agent retrieval passages (meta.paragraphs) are excluded from tokens",
+  "runner": "not wired",
+  "hidden": true,
+  "rows": 2000,
+  "per_scenario": 250,
+  "seed": 42,
   "tokenizer": {
-    "model": "MiniCPM5-1B",
-    "mode": "local",
-    "tokenizer_dir": "/Users/huawei/.omlx/models/openbmb/MiniCPM5-1B",
-    "semantics": "messages: chat_template(add_generation_prompt=True, enable_thinking=True) + special tokens; text: encode(add_special_tokens=True); validated against oMLX /v1/tokenize cache"
+    "name": "MiniCPM5-1B",
+    "path": "dataset/raw/tokenizer/MiniCPM5-1B/tokenizer.json",
+    "sha256": "3e065a558a034185fe299917b398685c1facd0169a9eea1e629eb30c171fed81",
+    "tokens_semantics": "input_tokens = prompt content tokens; chat-template control tokens excluded"
   },
-  "tokenizer_cache": {
-    "calls": 0,
-    "cache_hits": 8760
+  "sampling": {
+    "method": "sha256(seed|upstream_id) order + stratified largest-remainder quotas",
+    "executed_by": "tool/dataset/accuracy/build.py"
   },
-  "files": [
-    "testset.jsonl"
-  ],
+  "upstream_id_format": {
+    "knowledge_qa": "<sample_id>|<lang>",
+    "instruction_following": "<ifeval key>",
+    "long_context": "<task>|<context sha1 prefix>",
+    "math_logic": "gsm8k/test/<index> | cmath/test/<index>",
+    "coding": "HumanEval/<index> | task_id=<mbpp task_id>",
+    "general_agent": "<bfcl request id>",
+    "search_agent": "<hotpotqa question id>",
+    "multilingual": "<sample_id>|<lang>"
+  },
   "judges": {
-    "mc_letter": {
-      "answer": "single option letter (A-J for MMLU-Pro, A-D for Global-MMLU)",
-      "extract": "explicit answer phrase -> bracketed letter -> letter-only line -> unique standalone letter; letters beyond len(choices) are rejected",
-      "correct": "exact letter match",
-      "metric": "acc@1",
-      "implementation_status": "contract-only: the judge contract is declared here, but accuracy is not wired into the run (current docs/TEST_PLAN.md is performance-only); no evaluator is invoked."
-    },
-    "ifbench": {
-      "answer": "null; judge inputs are meta.instruction_id_list, meta.kwargs and meta.ifbench_key",
-      "extract": "official IFBench evaluation_lib + instructions registry",
-      "correct": "prompt-level strict/loose and instruction-level strict/loose accuracy",
-      "metric": "four accuracy variants",
-      "implementation_status": "contract-only: the judge contract is declared here, but accuracy is not wired into the run (current docs/TEST_PLAN.md is performance-only); no evaluator is invoked."
-    },
-    "qa_f1": {
-      "answer": "meta.answers (list of reference answers; answer mirrors answers[0])",
-      "extract": "SQuAD-style normalisation",
-      "correct": "F1 (max over references); EM reported as secondary",
-      "metric": "F1 / EM",
-      "implementation_status": "contract-only: the judge contract is declared here, but accuracy is not wired into the run (current docs/TEST_PLAN.md is performance-only); no evaluator is invoked."
-    },
-    "math": {
-      "answer": "reference answer string (LaTeX allowed)",
-      "extract": "last \\boxed{...} then answer phrase",
-      "correct": "math-verify symbolic/numeric equivalence",
-      "metric": "acc",
-      "implementation_status": "contract-only: the judge contract is declared here, but accuracy is not wired into the run (current docs/TEST_PLAN.md is performance-only); no evaluator is invoked."
-    },
-    "code_pass1": {
-      "answer": "null; judge inputs are meta.tests (hidden stdin/stdout, <=256KB each) and meta.public_tests",
-      "extract": "run generated program once per test in an isolated process",
-      "correct": "all hidden tests pass; pass@1 over the sampled set",
-      "metric": "pass@1",
-      "implementation_status": "contract-only: the judge contract is declared here, but accuracy is not wired into the run (current docs/TEST_PLAN.md is performance-only); no evaluator is invoked."
-    },
-    "bfcl_ast": {
-      "answer": "meta.possible_answers (official possible-answer structure)",
-      "extract": "normalise predicted tool calls",
-      "correct": "official AST match: candidate set, per-argument alternatives, optional params, order-insensitive parallel calls",
-      "metric": "acc",
-      "implementation_status": "contract-only: the judge contract is declared here, but accuracy is not wired into the run (current docs/TEST_PLAN.md is performance-only); no evaluator is invoked."
-    }
+    "mc_letter": "extract option letter A-D/J and compare with the gold letter",
+    "ifeval": "official IFEval instruction checkers, prompt-level strict accuracy",
+    "normalized_match": "SQuAD-style token F1 or numeric-equivalence exact match",
+    "code_exec": "run the sampled unit tests in an isolated subprocess (pass@1)",
+    "tool_call": "BFCL possible-answer structural match (function name + argument values)"
   },
   "scenarios": {
     "knowledge_qa": {
-      "dataset": "mmlu_pro",
-      "n": 250,
-      "judge": "mc_letter",
-      "metric": "acc@1",
-      "strata": "category (14 subjects), round-robin",
-      "prompt": "mmlu_pro",
-      "tasks": null,
-      "length_bands": null,
-      "min_tokens": null,
-      "max_tokens": null,
-      "categories": null,
-      "category_counts": null,
-      "category_type": null,
-      "languages": null,
-      "per_language": null,
-      "pairing": null,
-      "corpus": null,
-      "window": null,
-      "upstream_id_format": "mmlu_pro:<question_id>"
+      "rows": 250,
+      "datasets": {
+        "global_mmlu": 250
+      },
+      "languages": {
+        "en": 125,
+        "zh": 125
+      },
+      "judges": {
+        "mc_letter": 250
+      },
+      "input_tokens": {
+        "min": 63,
+        "median": 99,
+        "max": 502,
+        "total": 30188
+      },
+      "sampling": {
+        "pool": 13802,
+        "pool_before_alignment": 14042,
+        "selected_ids": 125,
+        "subjects": 56,
+        "subjects_per_category": {
+          "STEM": 40,
+          "Business": 8,
+          "Medical": 15,
+          "Social Sciences": 27,
+          "Humanities": 30,
+          "Other": 5
+        },
+        "quotas": {
+          "abstract_algebra": 2,
+          "anatomy": 2,
+          "astronomy": 2,
+          "business_ethics": 2,
+          "clinical_knowledge": 2,
+          "college_biology": 2,
+          "college_chemistry": 2,
+          "college_computer_science": 2,
+          "college_mathematics": 2,
+          "college_medicine": 2,
+          "college_physics": 2,
+          "computer_security": 2,
+          "conceptual_physics": 2,
+          "econometrics": 2,
+          "electrical_engineering": 2,
+          "elementary_mathematics": 3,
+          "formal_logic": 2,
+          "global_facts": 2,
+          "high_school_biology": 3,
+          "high_school_chemistry": 2,
+          "high_school_computer_science": 2,
+          "high_school_european_history": 2,
+          "high_school_geography": 2,
+          "high_school_government_and_politics": 2,
+          "high_school_macroeconomics": 3,
+          "high_school_mathematics": 2,
+          "high_school_microeconomics": 2,
+          "high_school_physics": 2,
+          "high_school_psychology": 3,
+          "high_school_statistics": 2,
+          "high_school_us_history": 2,
+          "human_aging": 2,
+          "human_sexuality": 2,
+          "international_law": 2,
+          "jurisprudence": 2,
+          "logical_fallacies": 2,
+          "machine_learning": 2,
+          "management": 2,
+          "marketing": 2,
+          "medical_genetics": 2,
+          "miscellaneous": 3,
+          "moral_disputes": 3,
+          "moral_scenarios": 3,
+          "nutrition": 3,
+          "philosophy": 3,
+          "prehistory": 3,
+          "professional_accounting": 2,
+          "professional_law": 4,
+          "professional_medicine": 2,
+          "professional_psychology": 3,
+          "public_relations": 2,
+          "security_studies": 2,
+          "sociology": 2,
+          "us_foreign_policy": 2,
+          "virology": 2,
+          "world_religions": 2
+        },
+        "alignment": {
+          "max_subject_mismatch_rate": 0.0,
+          "subjects": {
+            "abstract_algebra": {
+              "pairs": 100,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "anatomy": {
+              "pairs": 135,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "astronomy": {
+              "pairs": 152,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "business_ethics": {
+              "pairs": 100,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "clinical_knowledge": {
+              "pairs": 265,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "college_biology": {
+              "pairs": 144,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "college_chemistry": {
+              "pairs": 100,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "college_computer_science": {
+              "pairs": 100,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "college_mathematics": {
+              "pairs": 100,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "college_medicine": {
+              "pairs": 173,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "college_physics": {
+              "pairs": 102,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "computer_security": {
+              "pairs": 100,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "conceptual_physics": {
+              "pairs": 235,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "econometrics": {
+              "pairs": 114,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "electrical_engineering": {
+              "pairs": 145,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "elementary_mathematics": {
+              "pairs": 378,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "formal_logic": {
+              "pairs": 126,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "global_facts": {
+              "pairs": 100,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "high_school_biology": {
+              "pairs": 310,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "high_school_chemistry": {
+              "pairs": 203,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "high_school_computer_science": {
+              "pairs": 100,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "high_school_european_history": {
+              "pairs": 165,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "high_school_geography": {
+              "pairs": 198,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "high_school_government_and_politics": {
+              "pairs": 193,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "high_school_macroeconomics": {
+              "pairs": 390,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "high_school_mathematics": {
+              "pairs": 270,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "high_school_microeconomics": {
+              "pairs": 238,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "high_school_physics": {
+              "pairs": 151,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "high_school_psychology": {
+              "pairs": 545,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "high_school_statistics": {
+              "pairs": 216,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "high_school_us_history": {
+              "pairs": 204,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "high_school_world_history": {
+              "pairs": 237,
+              "mismatches": 176,
+              "mismatch_rate": 0.7426
+            },
+            "human_aging": {
+              "pairs": 223,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "human_sexuality": {
+              "pairs": 131,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "international_law": {
+              "pairs": 121,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "jurisprudence": {
+              "pairs": 108,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "logical_fallacies": {
+              "pairs": 163,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "machine_learning": {
+              "pairs": 112,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "management": {
+              "pairs": 103,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "marketing": {
+              "pairs": 234,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "medical_genetics": {
+              "pairs": 100,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "miscellaneous": {
+              "pairs": 783,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "moral_disputes": {
+              "pairs": 346,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "moral_scenarios": {
+              "pairs": 895,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "nutrition": {
+              "pairs": 306,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "philosophy": {
+              "pairs": 311,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "prehistory": {
+              "pairs": 324,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "professional_accounting": {
+              "pairs": 282,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "professional_law": {
+              "pairs": 1534,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "professional_medicine": {
+              "pairs": 272,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "professional_psychology": {
+              "pairs": 612,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "public_relations": {
+              "pairs": 110,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "security_studies": {
+              "pairs": 245,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "sociology": {
+              "pairs": 201,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "us_foreign_policy": {
+              "pairs": 100,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "virology": {
+              "pairs": 166,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            },
+            "world_religions": {
+              "pairs": 171,
+              "mismatches": 0,
+              "mismatch_rate": 0.0
+            }
+          }
+        },
+        "alignment_excluded": [
+          {
+            "subject": "high_school_world_history",
+            "count": 237,
+            "reason": "en/zh answer mismatch rate 74.3% > 0%; upstream rows are misaligned by sample_id"
+          },
+          {
+            "subject": "virology",
+            "count": 2,
+            "reason": "en and/or zh row has an answer outside A-D or an empty option"
+          },
+          {
+            "subject": "abstract_algebra",
+            "sample_id": "abstract_algebra/test/1",
+            "count": 1,
+            "reason": "upstream zh machine translation renders 'index' as '幂' (power), so the zh row reads gold C=24 as '24th power' and invites a wrong answer"
+          }
+        ]
+      }
     },
     "instruction_following": {
-      "dataset": "ifbench",
-      "n": 250,
-      "judge": "ifbench",
-      "metric": "prompt-level + instruction-level, strict + loose acc",
-      "strata": "primary instruction id (58 types), round-robin",
-      "prompt": "verbatim",
-      "tasks": null,
-      "length_bands": null,
-      "min_tokens": null,
-      "max_tokens": null,
-      "categories": null,
-      "category_counts": null,
-      "category_type": null,
-      "languages": null,
-      "per_language": null,
-      "pairing": null,
-      "corpus": null,
-      "window": null,
-      "upstream_id_format": "ifbench:<key>"
+      "rows": 250,
+      "datasets": {
+        "ifeval": 250
+      },
+      "languages": {
+        "en": 250
+      },
+      "judges": {
+        "ifeval": 250
+      },
+      "input_tokens": {
+        "min": 13,
+        "median": 42,
+        "max": 344,
+        "total": 11747
+      },
+      "sampling": {
+        "pool": 510,
+        "excluded_language_instructions": 31,
+        "strata": {
+          "punctuation": 32,
+          "detectable_content": 31,
+          "combination": 55,
+          "change_case": 65,
+          "detectable_format": 114,
+          "keywords": 87,
+          "length_constraints": 76,
+          "startend": 50
+        },
+        "quotas": {
+          "change_case": 32,
+          "combination": 27,
+          "detectable_content": 15,
+          "detectable_format": 56,
+          "keywords": 42,
+          "length_constraints": 37,
+          "punctuation": 16,
+          "startend": 25
+        }
+      }
     },
     "long_context": {
-      "dataset": "longbench_v1",
-      "n": 250,
-      "judge": "qa_f1",
-      "metric": "F1 (max over reference answers) / EM",
-      "strata": "length band (4k-8k/8k-16k/16k-32k) x task, round-robin within band; only 4K-32K tokens",
-      "prompt": null,
-      "tasks": [
-        "narrativeqa",
-        "qasper",
-        "hotpotqa",
-        "2wikimqa"
-      ],
-      "length_bands": {
-        "4k-8k": 100,
-        "8k-16k": 99,
-        "16k-32k": 51
+      "rows": 250,
+      "datasets": {
+        "longbench_v1": 250
       },
-      "min_tokens": 4096,
-      "max_tokens": 32768,
-      "categories": null,
-      "category_counts": null,
-      "category_type": null,
-      "languages": null,
-      "per_language": null,
-      "pairing": null,
-      "corpus": null,
-      "window": null,
-      "upstream_id_format": "longbench_v1:<task>:<_id>"
-    },
-    "math_logic": {
-      "dataset": "math_500",
-      "n": 250,
-      "judge": "math",
-      "metric": "acc (math-verify equivalence)",
-      "strata": "subject x level, round-robin",
-      "prompt": "math_boxed",
-      "tasks": null,
-      "length_bands": null,
-      "min_tokens": null,
-      "max_tokens": null,
-      "categories": null,
-      "category_counts": null,
-      "category_type": null,
-      "languages": null,
-      "per_language": null,
-      "pairing": null,
-      "corpus": null,
-      "window": null,
-      "upstream_id_format": "math_500:<unique_id>"
-    },
-    "coding": {
-      "dataset": "livecodebench",
-      "n": 250,
-      "judge": "code_pass1",
-      "metric": "pass@1 (hidden stdin/stdout tests)",
-      "strata": "newest release window first: all judgeable test6 (2025-01..2025-04), then newest judgeable test5 rows (2024-09..2025-01) to reach 250",
-      "prompt": "lcb",
-      "tasks": null,
-      "length_bands": null,
-      "min_tokens": null,
-      "max_tokens": null,
-      "categories": null,
-      "category_counts": null,
-      "category_type": null,
-      "languages": null,
-      "per_language": null,
-      "pairing": null,
-      "corpus": null,
-      "window": "2024-09-22..2025-04-06 (release v5 + v6)",
-      "upstream_id_format": "livecodebench:<question_id>"
-    },
-    "general_agent": {
-      "dataset": "bfcl",
-      "n": 889,
-      "judge": "bfcl_ast",
-      "metric": "AST match acc (possible answers, order-insensitive)",
-      "strata": "single_turn category: simple_python 100 / simple_java 100 / simple_javascript 50 / multiple 100 / parallel 100 / parallel_multiple 100 / irrelevance 100 / live_simple 100 / live_multiple 100 / live_parallel 15 / live_parallel_multiple 24; random within category, global user-question dedupe",
-      "prompt": "bfcl",
-      "tasks": null,
-      "length_bands": null,
-      "min_tokens": null,
-      "max_tokens": null,
-      "categories": [
-        "simple_python",
-        "simple_java",
-        "simple_javascript",
-        "multiple",
-        "parallel",
-        "parallel_multiple",
-        "irrelevance",
-        "live_simple",
-        "live_multiple",
-        "live_parallel",
-        "live_parallel_multiple"
-      ],
-      "category_counts": {
-        "simple_python": 100,
-        "simple_java": 100,
-        "simple_javascript": 50,
-        "multiple": 100,
-        "parallel": 100,
-        "parallel_multiple": 100,
-        "irrelevance": 100,
-        "live_simple": 100,
-        "live_multiple": 100,
-        "live_parallel": 15,
-        "live_parallel_multiple": 24
+      "languages": {
+        "en": 150,
+        "zh": 100
       },
-      "category_type": "single_turn",
-      "languages": null,
-      "per_language": null,
-      "pairing": null,
-      "corpus": null,
-      "window": null,
-      "upstream_id_format": "bfcl:<bfcl_id>"
-    },
-    "search_agent": {
-      "dataset": "hotpotqa",
-      "n": 250,
-      "judge": "qa_f1",
-      "metric": "EM / F1",
-      "strata": "type (bridge/comparison, proportional to canonical pool), round-robin",
-      "prompt": "hotpot_agent",
-      "tasks": null,
-      "length_bands": null,
-      "min_tokens": null,
-      "max_tokens": null,
-      "categories": null,
-      "category_counts": null,
-      "category_type": null,
-      "languages": null,
-      "per_language": null,
-      "pairing": null,
-      "corpus": "paragraphs in meta, retrieval via search/lookup tools",
-      "window": null,
-      "upstream_id_format": "hotpotqa:<id>"
-    },
-    "multilingual": {
-      "dataset": "global_mmlu",
-      "n": 4200,
-      "judge": "mc_letter",
-      "metric": "acc@1 per language + macro",
-      "strata": "language (42) x paired sample_id (100 common ids, subject round-robin)",
-      "prompt": "global_mmlu",
-      "tasks": null,
-      "length_bands": null,
-      "min_tokens": null,
-      "max_tokens": null,
-      "categories": null,
-      "category_counts": null,
-      "category_type": null,
-      "languages": [
-        "am",
-        "ar",
-        "bn",
-        "cs",
-        "de",
-        "el",
-        "en",
-        "es",
-        "fa",
-        "fil",
-        "fr",
-        "ha",
-        "he",
-        "hi",
-        "id",
-        "ig",
-        "it",
-        "ja",
-        "ko",
-        "ky",
-        "lt",
-        "mg",
-        "ms",
-        "ne",
-        "nl",
-        "ny",
-        "pl",
-        "pt",
-        "ro",
-        "ru",
-        "si",
-        "sn",
-        "so",
-        "sr",
-        "sv",
-        "sw",
-        "te",
-        "tr",
-        "uk",
-        "vi",
-        "yo",
-        "zh"
-      ],
-      "per_language": 100,
-      "pairing": "same 100 sample_id values in every language (translated counterparts)",
-      "corpus": null,
-      "window": null,
-      "upstream_id_format": "global_mmlu:<lang>:<sample_id>"
-    }
-  },
-  "sampling": {
-    "knowledge_qa": {
-      "upstream_rows": 12032,
-      "strata": "category",
-      "selected": 250
-    },
-    "instruction_following": {
-      "upstream_rows": 300,
-      "strata": "primary instruction id",
-      "selected": 250
-    },
-    "long_context": {
-      "min_prompt_tokens": 4096,
-      "max_prompt_tokens": 32768,
-      "length_bands": {
+      "judges": {
+        "normalized_match": 250
+      },
+      "input_tokens": {
+        "min": 4317,
+        "median": 9411,
+        "max": 32176,
+        "total": 2968405
+      },
+      "sampling": {
+        "pool": {
+          "en/2wikimqa/16-32k": 0,
+          "en/2wikimqa/4-8k": 122,
+          "en/2wikimqa/8-16k": 51,
+          "en/hotpotqa/16-32k": 7,
+          "en/hotpotqa/4-8k": 23,
+          "en/hotpotqa/8-16k": 164,
+          "en/multifieldqa_en/16-32k": 0,
+          "en/multifieldqa_en/4-8k": 53,
+          "en/multifieldqa_en/8-16k": 55,
+          "en/narrativeqa/16-32k": 39,
+          "en/narrativeqa/4-8k": 8,
+          "en/narrativeqa/8-16k": 56,
+          "en/qasper/16-32k": 3,
+          "en/qasper/4-8k": 110,
+          "en/qasper/8-16k": 9,
+          "zh/dureader/16-32k": 1,
+          "zh/dureader/4-8k": 58,
+          "zh/dureader/8-16k": 141,
+          "zh/multifieldqa_zh/4-8k": 87,
+          "zh/multifieldqa_zh/8-16k": 7
+        },
         "targets": {
-          "4k-8k": 100,
-          "8k-16k": 99,
-          "16k-32k": 51
+          "en/16-32k": 45,
+          "en/4-8k": 50,
+          "en/8-16k": 55,
+          "zh/4-8k": 50,
+          "zh/8-16k": 50
         },
-        "ranges": {
-          "4k-8k": "4096 <= tokens < 8192",
-          "8k-16k": "8192 <= tokens < 16384",
-          "16k-32k": "16384 <= tokens <= 32768"
+        "selected_buckets": {
+          "en/16-32k": 45,
+          "en/4-8k": 50,
+          "en/8-16k": 55,
+          "zh/4-8k": 50,
+          "zh/8-16k": 50
         },
-        "pools": {
-          "4k-8k": {
-            "narrativeqa": 8,
-            "qasper": 110,
-            "hotpotqa": 23,
-            "2wikimqa": 122
-          },
-          "8k-16k": {
-            "narrativeqa": 56,
-            "qasper": 9,
-            "hotpotqa": 162,
-            "2wikimqa": 52
-          },
-          "16k-32k": {
-            "narrativeqa": 39,
-            "qasper": 3,
-            "hotpotqa": 9,
-            "2wikimqa": 0
-          }
+        "selected_tasks": {
+          "hotpotqa": 37,
+          "narrativeqa": 46,
+          "qasper": 23,
+          "2wikimqa": 27,
+          "multifieldqa_en": 17,
+          "dureader": 68,
+          "multifieldqa_zh": 32
         },
-        "selected": {
-          "4k-8k": 100,
-          "8k-16k": 99,
-          "16k-32k": 51
-        },
-        "selected_by_task": {
-          "4k-8k": {
-            "narrativeqa": 8,
-            "qasper": 35,
-            "hotpotqa": 23,
-            "2wikimqa": 34
-          },
-          "8k-16k": {
-            "narrativeqa": 30,
-            "qasper": 9,
-            "hotpotqa": 30,
-            "2wikimqa": 30
-          },
-          "16k-32k": {
-            "narrativeqa": 39,
-            "qasper": 3,
-            "hotpotqa": 9,
-            "2wikimqa": 0
-          }
+        "duplicate_prompt_groups": 20,
+        "duplicate_answer_unions": 18,
+        "selected_rows_with_unioned_answers": 7,
+        "task_metrics": {
+          "narrativeqa": "f1",
+          "qasper": "f1",
+          "hotpotqa": "f1",
+          "2wikimqa": "f1",
+          "multifieldqa_en": "f1",
+          "dureader": "rouge_zh",
+          "multifieldqa_zh": "f1_zh"
         }
-      },
-      "tasks": {
-        "narrativeqa": {
-          "upstream_rows": 200,
-          "unique_rows_after_dedupe": 182,
-          "merged_duplicate_rows": 18,
-          "band_pools": {
-            "4k-8k": 8,
-            "8k-16k": 56,
-            "16k-32k": 39
-          }
-        },
-        "qasper": {
-          "upstream_rows": 200,
-          "unique_rows_after_dedupe": 200,
-          "merged_duplicate_rows": 0,
-          "band_pools": {
-            "4k-8k": 110,
-            "8k-16k": 9,
-            "16k-32k": 3
-          }
-        },
-        "hotpotqa": {
-          "upstream_rows": 200,
-          "unique_rows_after_dedupe": 200,
-          "merged_duplicate_rows": 0,
-          "band_pools": {
-            "4k-8k": 23,
-            "8k-16k": 162,
-            "16k-32k": 9
-          }
-        },
-        "2wikimqa": {
-          "upstream_rows": 200,
-          "unique_rows_after_dedupe": 200,
-          "merged_duplicate_rows": 0,
-          "band_pools": {
-            "4k-8k": 122,
-            "8k-16k": 52,
-            "16k-32k": 0
-          }
-        }
-      },
-      "dedupe_key": "(task, input, context); answers unioned"
+      }
     },
     "math_logic": {
-      "upstream_rows": 500,
-      "strata": "subject x level",
-      "selected": 250
+      "rows": 250,
+      "datasets": {
+        "cmath": 125,
+        "gsm8k": 125
+      },
+      "languages": {
+        "zh": 125,
+        "en": 125
+      },
+      "judges": {
+        "normalized_match": 250
+      },
+      "input_tokens": {
+        "min": 36,
+        "median": 63,
+        "max": 215,
+        "total": 17112
+      },
+      "sampling": {
+        "pool": {
+          "gsm8k": 1319,
+          "cmath": 1098
+        },
+        "gsm8k_strata": {
+          "2": 357,
+          "4": 290,
+          "5+": 225,
+          "3": 364,
+          "0-1": 83
+        },
+        "gsm8k_quotas": {
+          "0-1": 9,
+          "2": 34,
+          "3": 34,
+          "4": 27,
+          "5+": 21
+        },
+        "cmath_strata": {
+          "1": 164,
+          "2": 253,
+          "3": 237,
+          "4": 120,
+          "5": 126,
+          "6": 198
+        },
+        "cmath_quotas": {
+          "1": 19,
+          "2": 28,
+          "3": 27,
+          "4": 14,
+          "5": 15,
+          "6": 22
+        }
+      }
     },
     "coding": {
-      "window": "2024-09-22..2025-04-06 (release v5 + v6)",
-      "selected": 250,
-      "testtypes": {
-        "stdin": 150,
-        "functional": 100
+      "rows": 250,
+      "datasets": {
+        "humaneval": 125,
+        "mbpp": 125
       },
-      "hidden_tests_kept": 9184,
-      "hidden_tests_dropped_large": 331
+      "languages": {
+        "en": 250
+      },
+      "judges": {
+        "code_exec": 250
+      },
+      "input_tokens": {
+        "min": 54,
+        "median": 129,
+        "max": 426,
+        "total": 36250
+      },
+      "sampling": {
+        "pool": {
+          "humaneval": 164,
+          "mbpp": 427
+        },
+        "humaneval_quotas": {
+          "q1": 32,
+          "q2": 31,
+          "q3": 31,
+          "q4": 31
+        },
+        "mbpp_quotas": {
+          "q1": 31,
+          "q2": 31,
+          "q3": 32,
+          "q4": 31
+        },
+        "mbpp_quartile_basis": "rendered prompt tokens (template + entry point + 3 official tests)",
+        "mbpp_entry_points": 419
+      }
     },
     "general_agent": {
-      "dedupe": "user question text (whitespace-normalised), global across all 11 single-turn categories",
-      "category_type": "single_turn",
-      "category_order": [
-        "simple_python",
-        "simple_java",
-        "simple_javascript",
-        "multiple",
-        "parallel",
-        "parallel_multiple",
-        "irrelevance",
-        "live_simple",
-        "live_multiple",
-        "live_parallel",
-        "live_parallel_multiple"
-      ],
-      "category_counts": {
-        "simple_python": 100,
-        "simple_java": 100,
-        "simple_javascript": 50,
-        "multiple": 100,
-        "parallel": 100,
-        "parallel_multiple": 100,
-        "irrelevance": 100,
-        "live_simple": 100,
-        "live_multiple": 100,
-        "live_parallel": 15,
-        "live_parallel_multiple": 24
+      "rows": 250,
+      "datasets": {
+        "bfcl_v4": 250
       },
-      "categories": {
-        "simple_python": {
-          "upstream_rows": 400,
-          "unique_questions_after_dedupe": 400,
-          "rows_skipped_duplicate_question": 0,
-          "target": 100,
-          "selected": 100
+      "languages": {
+        "en": 250
+      },
+      "judges": {
+        "tool_call": 250
+      },
+      "input_tokens": {
+        "min": 151,
+        "median": 323,
+        "max": 2420,
+        "total": 125045
+      },
+      "sampling": {
+        "pool": {
+          "simple_python": 400,
+          "simple_java": 100,
+          "simple_javascript": 50,
+          "multiple": 200,
+          "parallel": 200,
+          "parallel_multiple": 200,
+          "irrelevance": 240,
+          "live_simple": 258,
+          "live_multiple": 1053,
+          "live_parallel": 16,
+          "live_parallel_multiple": 24
         },
-        "simple_java": {
-          "upstream_rows": 100,
-          "unique_questions_after_dedupe": 100,
-          "rows_skipped_duplicate_question": 0,
-          "target": 100,
-          "selected": 100
-        },
-        "simple_javascript": {
-          "upstream_rows": 50,
-          "unique_questions_after_dedupe": 50,
-          "rows_skipped_duplicate_question": 0,
-          "target": 50,
-          "selected": 50
-        },
-        "multiple": {
-          "upstream_rows": 200,
-          "unique_questions_after_dedupe": 173,
-          "rows_skipped_duplicate_question": 27,
-          "target": 100,
-          "selected": 100
-        },
-        "parallel": {
-          "upstream_rows": 200,
-          "unique_questions_after_dedupe": 200,
-          "rows_skipped_duplicate_question": 0,
-          "target": 100,
-          "selected": 100
-        },
-        "parallel_multiple": {
-          "upstream_rows": 200,
-          "unique_questions_after_dedupe": 200,
-          "rows_skipped_duplicate_question": 0,
-          "target": 100,
-          "selected": 100
-        },
-        "irrelevance": {
-          "upstream_rows": 240,
-          "unique_questions_after_dedupe": 238,
-          "rows_skipped_duplicate_question": 2,
-          "target": 100,
-          "selected": 100
-        },
-        "live_simple": {
-          "upstream_rows": 258,
-          "unique_questions_after_dedupe": 254,
-          "rows_skipped_duplicate_question": 4,
-          "target": 100,
-          "selected": 100
-        },
-        "live_multiple": {
-          "upstream_rows": 1053,
-          "unique_questions_after_dedupe": 1040,
-          "rows_skipped_duplicate_question": 13,
-          "target": 100,
-          "selected": 100
-        },
-        "live_parallel": {
-          "upstream_rows": 16,
-          "unique_questions_after_dedupe": 15,
-          "rows_skipped_duplicate_question": 1,
-          "target": 15,
-          "selected": 15
-        },
-        "live_parallel_multiple": {
-          "upstream_rows": 24,
-          "unique_questions_after_dedupe": 24,
-          "rows_skipped_duplicate_question": 0,
-          "target": 24,
-          "selected": 24
+        "quotas": {
+          "irrelevance": 22,
+          "live_multiple": 59,
+          "live_parallel": 12,
+          "live_parallel_multiple": 13,
+          "live_simple": 23,
+          "multiple": 21,
+          "parallel": 20,
+          "parallel_multiple": 20,
+          "simple_java": 16,
+          "simple_javascript": 14,
+          "simple_python": 30
         }
-      },
-      "unique_questions_selected": 889,
-      "selected": 889
+      }
     },
     "search_agent": {
-      "canonical_pool": 4940,
-      "excluded_by_long_context_hotpotqa": 48,
-      "pool_after_exclusion": 4892,
-      "bridge_selected": 194,
-      "comparison_selected": 56,
-      "matching_excluded_questions_selected": 0
+      "rows": 250,
+      "datasets": {
+        "hotpotqa_distractor": 250
+      },
+      "languages": {
+        "en": 250
+      },
+      "judges": {
+        "normalized_match": 250
+      },
+      "input_tokens": {
+        "min": 612,
+        "median": 1340,
+        "max": 2543,
+        "total": 342415
+      },
+      "sampling": {
+        "pool": 7405,
+        "strata": {
+          "comparison|hop=2": 1147,
+          "bridge|hop=3": 1532,
+          "bridge|hop=4": 543,
+          "bridge|hop=2": 3843,
+          "comparison|hop=4": 98,
+          "comparison|hop=3": 242
+        },
+        "quotas": {
+          "bridge|hop=2": 128,
+          "bridge|hop=3": 51,
+          "bridge|hop=4": 19,
+          "comparison|hop=2": 39,
+          "comparison|hop=3": 9,
+          "comparison|hop=4": 4
+        }
+      }
     },
     "multilingual": {
-      "upstream_rows_per_language": 14042,
-      "upstream_rows_identical_across_languages": true,
-      "languages": [
-        "am",
-        "ar",
-        "bn",
-        "cs",
-        "de",
-        "el",
-        "en",
-        "es",
-        "fa",
-        "fil",
-        "fr",
-        "ha",
-        "he",
-        "hi",
-        "id",
-        "ig",
-        "it",
-        "ja",
-        "ko",
-        "ky",
-        "lt",
-        "mg",
-        "ms",
-        "ne",
-        "nl",
-        "ny",
-        "pl",
-        "pt",
-        "ro",
-        "ru",
-        "si",
-        "sn",
-        "so",
-        "sr",
-        "sv",
-        "sw",
-        "te",
-        "tr",
-        "uk",
-        "vi",
-        "yo",
-        "zh"
-      ],
-      "language_count": 42,
-      "per_language": 100,
-      "paired_ids": 100,
-      "paired_design": "same 100 sample_id values in every language (translated counterparts)",
-      "paired_id_selection": "subject round-robin over the common sample_ids (English reference rows); every language uses the same id list",
-      "subjects_covered": 57,
-      "subject_categories_covered": [
-        "Business",
-        "Humanities",
-        "Medical",
-        "Other",
-        "STEM",
-        "Social Sciences"
-      ],
-      "selected": 4200
-    },
-    "seed": 20261106,
-    "per_scenario": {
-      "knowledge_qa": 250,
-      "instruction_following": 250,
-      "long_context": 250,
-      "math_logic": 250,
-      "coding": 250,
-      "general_agent": 889,
-      "search_agent": 250,
-      "multilingual": 4200
-    },
-    "rules": {
-      "knowledge_qa": "category (14 subjects), round-robin",
-      "instruction_following": "primary instruction id (58 types), round-robin",
-      "long_context": "length band (4k-8k/8k-16k/16k-32k) x task, round-robin within band; only 4K-32K tokens",
-      "math_logic": "subject x level, round-robin",
-      "coding": "newest release window first: all judgeable test6 (2025-01..2025-04), then newest judgeable test5 rows (2024-09..2025-01) to reach 250",
-      "general_agent": "single_turn category: simple_python 100 / simple_java 100 / simple_javascript 50 / multiple 100 / parallel 100 / parallel_multiple 100 / irrelevance 100 / live_simple 100 / live_multiple 100 / live_parallel 15 / live_parallel_multiple 24; random within category, global user-question dedupe",
-      "search_agent": "type (bridge/comparison, proportional to canonical pool), round-robin",
-      "multilingual": "language (42) x paired sample_id (100 common ids, subject round-robin)"
-    },
-    "upstream_id_format": {
-      "knowledge_qa": "mmlu_pro:<question_id>",
-      "instruction_following": "ifbench:<key>",
-      "long_context": "longbench_v1:<task>:<_id>",
-      "math_logic": "math_500:<unique_id>",
-      "coding": "livecodebench:<question_id>",
-      "general_agent": "bfcl:<bfcl_id>",
-      "search_agent": "hotpotqa:<id>",
-      "multilingual": "global_mmlu:<lang>:<sample_id>"
-    },
-    "cross_scenario": {
-      "long_context": "runs first; its selected hotpotqa questions are excluded from search_agent",
-      "search_agent": "pool excludes long_context/hotpotqa questions",
-      "duplicate_questions_after_build": 0
+      "rows": 250,
+      "datasets": {
+        "global_mmlu": 250
+      },
+      "languages": {
+        "ar": 25,
+        "de": 25,
+        "es": 25,
+        "fr": 25,
+        "hi": 25,
+        "ja": 25,
+        "ko": 25,
+        "pt": 25,
+        "ru": 25,
+        "vi": 25
+      },
+      "judges": {
+        "mc_letter": 250
+      },
+      "input_tokens": {
+        "min": 72,
+        "median": 170,
+        "max": 1253,
+        "total": 56942
+      },
+      "sampling": {
+        "pool": {
+          "languages": [
+            "fr",
+            "de",
+            "es",
+            "pt",
+            "ru",
+            "ja",
+            "ko",
+            "ar",
+            "hi",
+            "vi"
+          ],
+          "rows_per_language": 14042,
+          "eligible_sample_ids": 13552,
+          "eligible_by_category": {
+            "STEM": 3038,
+            "Business": 695,
+            "Medical": 1464,
+            "Social Sciences": 3007,
+            "Humanities": 4486,
+            "Other": 862
+          }
+        },
+        "unique_question_ids": 25,
+        "languages": [
+          "fr",
+          "de",
+          "es",
+          "pt",
+          "ru",
+          "ja",
+          "ko",
+          "ar",
+          "hi",
+          "vi"
+        ],
+        "category_quotas": {
+          "Business": 2,
+          "Humanities": 8,
+          "Medical": 3,
+          "Other": 2,
+          "STEM": 5,
+          "Social Sciences": 5
+        },
+        "alignment_excluded": [
+          {
+            "subject": "anatomy",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in de"
+          },
+          {
+            "subject": "anatomy",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in hi"
+          },
+          {
+            "subject": "anatomy",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in ko"
+          },
+          {
+            "subject": "anatomy",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ru"
+          },
+          {
+            "subject": "anatomy",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in vi"
+          },
+          {
+            "subject": "astronomy",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in hi"
+          },
+          {
+            "subject": "astronomy",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in ko"
+          },
+          {
+            "subject": "business_ethics",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in ar"
+          },
+          {
+            "subject": "business_ethics",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in es"
+          },
+          {
+            "subject": "business_ethics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in fr"
+          },
+          {
+            "subject": "business_ethics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in hi"
+          },
+          {
+            "subject": "business_ethics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ja"
+          },
+          {
+            "subject": "business_ethics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ko"
+          },
+          {
+            "subject": "business_ethics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ru"
+          },
+          {
+            "subject": "clinical_knowledge",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ar"
+          },
+          {
+            "subject": "clinical_knowledge",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in vi"
+          },
+          {
+            "subject": "college_biology",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ar"
+          },
+          {
+            "subject": "college_biology",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in ko"
+          },
+          {
+            "subject": "college_biology",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in vi"
+          },
+          {
+            "subject": "college_chemistry",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in hi"
+          },
+          {
+            "subject": "college_chemistry",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ru"
+          },
+          {
+            "subject": "college_computer_science",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in vi"
+          },
+          {
+            "subject": "college_mathematics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in hi"
+          },
+          {
+            "subject": "college_medicine",
+            "count": 3,
+            "reason": "options collapse to <4 distinct non-empty choices in ja"
+          },
+          {
+            "subject": "college_medicine",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ko"
+          },
+          {
+            "subject": "college_medicine",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in vi"
+          },
+          {
+            "subject": "college_physics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in es"
+          },
+          {
+            "subject": "college_physics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in hi"
+          },
+          {
+            "subject": "college_physics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ja"
+          },
+          {
+            "subject": "college_physics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in vi"
+          },
+          {
+            "subject": "conceptual_physics",
+            "count": 3,
+            "reason": "options collapse to <4 distinct non-empty choices in de"
+          },
+          {
+            "subject": "conceptual_physics",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in fr"
+          },
+          {
+            "subject": "conceptual_physics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in hi"
+          },
+          {
+            "subject": "conceptual_physics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ru"
+          },
+          {
+            "subject": "conceptual_physics",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in vi"
+          },
+          {
+            "subject": "econometrics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in fr"
+          },
+          {
+            "subject": "electrical_engineering",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in fr"
+          },
+          {
+            "subject": "electrical_engineering",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in hi"
+          },
+          {
+            "subject": "electrical_engineering",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ja"
+          },
+          {
+            "subject": "electrical_engineering",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in ru"
+          },
+          {
+            "subject": "electrical_engineering",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in vi"
+          },
+          {
+            "subject": "elementary_mathematics",
+            "count": 3,
+            "reason": "options collapse to <4 distinct non-empty choices in de"
+          },
+          {
+            "subject": "elementary_mathematics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in es"
+          },
+          {
+            "subject": "elementary_mathematics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in fr"
+          },
+          {
+            "subject": "elementary_mathematics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in hi"
+          },
+          {
+            "subject": "elementary_mathematics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in pt"
+          },
+          {
+            "subject": "elementary_mathematics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ru"
+          },
+          {
+            "subject": "formal_logic",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in fr"
+          },
+          {
+            "subject": "formal_logic",
+            "count": 3,
+            "reason": "options collapse to <4 distinct non-empty choices in hi"
+          },
+          {
+            "subject": "formal_logic",
+            "count": 5,
+            "reason": "options collapse to <4 distinct non-empty choices in ja"
+          },
+          {
+            "subject": "formal_logic",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ru"
+          },
+          {
+            "subject": "formal_logic",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in vi"
+          },
+          {
+            "subject": "high_school_biology",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ar"
+          },
+          {
+            "subject": "high_school_biology",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in hi"
+          },
+          {
+            "subject": "high_school_biology",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ko"
+          },
+          {
+            "subject": "high_school_biology",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ru"
+          },
+          {
+            "subject": "high_school_biology",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in vi"
+          },
+          {
+            "subject": "high_school_chemistry",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ar"
+          },
+          {
+            "subject": "high_school_chemistry",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in fr"
+          },
+          {
+            "subject": "high_school_chemistry",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in hi"
+          },
+          {
+            "subject": "high_school_chemistry",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ko"
+          },
+          {
+            "subject": "high_school_chemistry",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in vi"
+          },
+          {
+            "subject": "high_school_computer_science",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in fr"
+          },
+          {
+            "subject": "high_school_geography",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in hi"
+          },
+          {
+            "subject": "high_school_geography",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ru"
+          },
+          {
+            "subject": "high_school_geography",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in vi"
+          },
+          {
+            "subject": "high_school_macroeconomics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ar"
+          },
+          {
+            "subject": "high_school_macroeconomics",
+            "count": 3,
+            "reason": "options collapse to <4 distinct non-empty choices in de"
+          },
+          {
+            "subject": "high_school_macroeconomics",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in fr"
+          },
+          {
+            "subject": "high_school_macroeconomics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ko"
+          },
+          {
+            "subject": "high_school_macroeconomics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in pt"
+          },
+          {
+            "subject": "high_school_mathematics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in fr"
+          },
+          {
+            "subject": "high_school_microeconomics",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in ar"
+          },
+          {
+            "subject": "high_school_microeconomics",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in ja"
+          },
+          {
+            "subject": "high_school_microeconomics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ko"
+          },
+          {
+            "subject": "high_school_microeconomics",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in pt"
+          },
+          {
+            "subject": "high_school_microeconomics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in vi"
+          },
+          {
+            "subject": "high_school_physics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ar"
+          },
+          {
+            "subject": "high_school_physics",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in de"
+          },
+          {
+            "subject": "high_school_physics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in fr"
+          },
+          {
+            "subject": "high_school_physics",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in ru"
+          },
+          {
+            "subject": "high_school_psychology",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ar"
+          },
+          {
+            "subject": "high_school_psychology",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in de"
+          },
+          {
+            "subject": "high_school_psychology",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in fr"
+          },
+          {
+            "subject": "high_school_psychology",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ko"
+          },
+          {
+            "subject": "high_school_statistics",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in fr"
+          },
+          {
+            "subject": "high_school_statistics",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in ru"
+          },
+          {
+            "subject": "high_school_world_history",
+            "count": 116,
+            "reason": "answers differ across the 10 languages"
+          },
+          {
+            "subject": "human_aging",
+            "count": 3,
+            "reason": "answers differ across the 10 languages"
+          },
+          {
+            "subject": "human_aging",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in de"
+          },
+          {
+            "subject": "human_aging",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in hi"
+          },
+          {
+            "subject": "human_aging",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ja"
+          },
+          {
+            "subject": "human_aging",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in vi"
+          },
+          {
+            "subject": "human_sexuality",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in fr"
+          },
+          {
+            "subject": "human_sexuality",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in hi"
+          },
+          {
+            "subject": "human_sexuality",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ja"
+          },
+          {
+            "subject": "human_sexuality",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ru"
+          },
+          {
+            "subject": "international_law",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in fr"
+          },
+          {
+            "subject": "jurisprudence",
+            "count": 2,
+            "reason": "answers differ across the 10 languages"
+          },
+          {
+            "subject": "logical_fallacies",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ar"
+          },
+          {
+            "subject": "logical_fallacies",
+            "count": 3,
+            "reason": "options collapse to <4 distinct non-empty choices in ja"
+          },
+          {
+            "subject": "logical_fallacies",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ko"
+          },
+          {
+            "subject": "machine_learning",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in fr"
+          },
+          {
+            "subject": "machine_learning",
+            "count": 4,
+            "reason": "options collapse to <4 distinct non-empty choices in ru"
+          },
+          {
+            "subject": "management",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ru"
+          },
+          {
+            "subject": "management",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in vi"
+          },
+          {
+            "subject": "marketing",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in fr"
+          },
+          {
+            "subject": "marketing",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in hi"
+          },
+          {
+            "subject": "marketing",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ru"
+          },
+          {
+            "subject": "medical_genetics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in hi"
+          },
+          {
+            "subject": "medical_genetics",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in vi"
+          },
+          {
+            "subject": "miscellaneous",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in ar"
+          },
+          {
+            "subject": "miscellaneous",
+            "count": 5,
+            "reason": "options collapse to <4 distinct non-empty choices in hi"
+          },
+          {
+            "subject": "miscellaneous",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in pt"
+          },
+          {
+            "subject": "miscellaneous",
+            "count": 6,
+            "reason": "options collapse to <4 distinct non-empty choices in ru"
+          },
+          {
+            "subject": "miscellaneous",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in vi"
+          },
+          {
+            "subject": "moral_disputes",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in fr"
+          },
+          {
+            "subject": "moral_disputes",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in hi"
+          },
+          {
+            "subject": "moral_disputes",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ja"
+          },
+          {
+            "subject": "moral_disputes",
+            "count": 5,
+            "reason": "options collapse to <4 distinct non-empty choices in pt"
+          },
+          {
+            "subject": "moral_disputes",
+            "count": 3,
+            "reason": "options collapse to <4 distinct non-empty choices in ru"
+          },
+          {
+            "subject": "moral_disputes",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in vi"
+          },
+          {
+            "subject": "nutrition",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in vi"
+          },
+          {
+            "subject": "philosophy",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in fr"
+          },
+          {
+            "subject": "philosophy",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in hi"
+          },
+          {
+            "subject": "philosophy",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in pt"
+          },
+          {
+            "subject": "philosophy",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in vi"
+          },
+          {
+            "subject": "prehistory",
+            "count": 3,
+            "reason": "options collapse to <4 distinct non-empty choices in hi"
+          },
+          {
+            "subject": "prehistory",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ko"
+          },
+          {
+            "subject": "prehistory",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in vi"
+          },
+          {
+            "subject": "professional_law",
+            "count": 1,
+            "reason": "answers differ across the 10 languages"
+          },
+          {
+            "subject": "professional_law",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ar"
+          },
+          {
+            "subject": "professional_law",
+            "count": 4,
+            "reason": "options collapse to <4 distinct non-empty choices in de"
+          },
+          {
+            "subject": "professional_law",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in fr"
+          },
+          {
+            "subject": "professional_law",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in hi"
+          },
+          {
+            "subject": "professional_law",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ko"
+          },
+          {
+            "subject": "professional_law",
+            "count": 5,
+            "reason": "options collapse to <4 distinct non-empty choices in pt"
+          },
+          {
+            "subject": "professional_law",
+            "count": 5,
+            "reason": "options collapse to <4 distinct non-empty choices in ru"
+          },
+          {
+            "subject": "professional_law",
+            "count": 5,
+            "reason": "options collapse to <4 distinct non-empty choices in vi"
+          },
+          {
+            "subject": "professional_medicine",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in de"
+          },
+          {
+            "subject": "professional_medicine",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in hi"
+          },
+          {
+            "subject": "professional_medicine",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ja"
+          },
+          {
+            "subject": "professional_medicine",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in vi"
+          },
+          {
+            "subject": "professional_psychology",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in de"
+          },
+          {
+            "subject": "professional_psychology",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in hi"
+          },
+          {
+            "subject": "professional_psychology",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ja"
+          },
+          {
+            "subject": "professional_psychology",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ko"
+          },
+          {
+            "subject": "public_relations",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in fr"
+          },
+          {
+            "subject": "public_relations",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ko"
+          },
+          {
+            "subject": "security_studies",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in fr"
+          },
+          {
+            "subject": "security_studies",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in hi"
+          },
+          {
+            "subject": "sociology",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in fr"
+          },
+          {
+            "subject": "sociology",
+            "count": 2,
+            "reason": "options collapse to <4 distinct non-empty choices in ru"
+          },
+          {
+            "subject": "virology",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in de"
+          },
+          {
+            "subject": "virology",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ko"
+          },
+          {
+            "subject": "world_religions",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in ar"
+          },
+          {
+            "subject": "world_religions",
+            "count": 1,
+            "reason": "options collapse to <4 distinct non-empty choices in vi"
+          }
+        ]
+      }
     }
   },
-  "deviations": [
-    "MMLU-Pro uses a 0-shot chain-of-thought prompt with the choices re-lettered A-J; the official 5-shot configuration is not used.",
-    "LongBench v1 long-context rows are filtered to a 4K-32K reference-token window (4096 <= tokens <= 32768; no truncation) and are stratified by prompt length: 4k-8k 100 / 8k-16k 99 / 16k-32k 51. The whole 16K-32K pool is taken (narrativeqa 39 / qasper 3 / hotpotqa 9), so per-task quotas are no longer equal (the previous 63/63/62/62 split is retired).",
-    "LongBench v1 rows are deduplicated by (task, input, context); upstream duplicate rows with different gold answers are merged and their answers unioned (narrativeqa: 18 rows merged).",
-    "HotpotQA accuracy rows come from the distractor validation split, which is hard-only (level=hard for all 7,405 rows); they are converted into a single-request retrieval-agent task: the 10 distractor paragraphs live in meta and only the fixed search/lookup tool schemas are sent. The retrieval tools are not executed by the performance runner.",
-    "Global-MMLU is scored generatively from option letters, not with lm-eval's likelihood-based scoring.",
-    "Global-MMLU covers all 42 locally available languages x 100 rows, using a paired design: the same 100 sample_ids (chosen by subject round-robin from the 14,042 common ids) appear in every language, so cross-language differences compare translations of the same question.",
-    "LiveCodeBench mixes two prompt types: function-level prompts for rows with starter code (LeetCode, functional hidden tests) and stdin/stdout prompts otherwise (AtCoder). code_pass1 must therefore support both testtype=functional and testtype=stdin rows; the window is release v5 + v6 (2024-09-22..2025-04-06).",
-    "BFCL covers all 11 v4 single-turn categories (simple_python / simple_java / simple_javascript / multiple / parallel / parallel_multiple / irrelevance / live_simple / live_multiple / live_parallel / live_parallel_multiple); multi-turn categories are excluded. Category counts are 100/100/50/100/100/100/100/100/100/15/24 = 889 (pools smaller than the target contribute their whole pool; live_parallel 15, live_parallel_multiple 24). irrelevance has no upstream possible_answer file, so its gold is the empty answer list (meta.possible_answers = []) and rows are deduplicated by user question across all categories.",
-    "search_agent excludes questions already selected by long_context/hotpotqa (cross-scenario duplication removed).",
-    "Hidden LiveCodeBench tests are retained in full per row, except individual tests whose JSON exceeds the declared 256 KiB local-executor cap (meta.tests_dropped_large records them).",
-    "Accuracy is data-only in this build: the set is not wired into the run (docs/TEST_PLAN.md is performance-only) and no evaluator/runner is implemented."
-  ],
-  "provenance": {
-    "mmlu_pro": {
-      "source_url": "https://huggingface.co/datasets/TIGER-Lab/MMLU-Pro",
-      "license": "MIT",
-      "files": [
-        {
-          "logical_path": "test.parquet",
-          "bytes": 4144185,
-          "sha256": "0e24a191921c2f453518a537a8b2117bd137e7714d4ef1565e9ba06c1ecb9ad8"
-        }
-      ]
-    },
-    "ifbench": {
-      "source_url": "https://huggingface.co/datasets/allenai/IFBench_test",
-      "license": "ODC-BY-1.0",
-      "files": [
-        {
-          "logical_path": "IFBench_test.jsonl",
-          "bytes": 421499,
-          "sha256": "d2ada7da94a38cfe406351614c4e686846ed2da6d1b339db95fa5ead19554a4a"
-        }
-      ]
-    },
-    "longbench_v1": {
-      "source_url": "https://huggingface.co/datasets/zai-org/LongBench",
-      "license": "research use (see upstream repo)",
-      "files": [
-        {
-          "logical_path": "data.zip",
-          "bytes": 113932529,
-          "sha256": "cb45b11a4133c6bc1d6a44b0f8e701335ff1e543195db1103472e575857f7f64"
-        }
-      ]
-    },
-    "math_500": {
-      "source_url": "https://huggingface.co/datasets/HuggingFaceH4/MATH-500",
-      "license": "MIT",
-      "files": [
-        {
-          "logical_path": "test.jsonl",
-          "bytes": 446564,
-          "sha256": "35dc41080a3680858b27fa7e0533d2d547825316fc5dafe5d316f4ccc5a06132"
-        }
-      ]
-    },
-    "livecodebench": {
-      "source_url": "https://huggingface.co/datasets/livecodebench/code_generation_lite",
-      "license": "see upstream repo",
-      "files": [
-        {
-          "logical_path": "test5.jsonl",
-          "bytes": 557699297,
-          "sha256": "7f77571c2a6df0c2a72a3277650309f67e01e0008e18117e624633df53f81214"
-        },
-        {
-          "logical_path": "test6.jsonl",
-          "bytes": 134303240,
-          "sha256": "bb4c364f71921c4495a6ad15abe1a927350b720009f4933e2e71f8af0f6fd1f5"
-        }
-      ]
-    },
-    "bfcl": {
-      "source_url": "https://github.com/ShishirPatil/gorilla",
+  "datasets": {
+    "global_mmlu": {
+      "name": "Global-MMLU",
+      "source_url": "https://huggingface.co/datasets/CohereLabs/Global-MMLU",
       "license": "Apache-2.0",
       "files": [
         {
-          "logical_path": "BFCL_v4_simple_python.json",
-          "bytes": 283274,
-          "sha256": "82dd63ba502eb2520c6b5d1d9a5c4b590e03ff261565175561f6228a367d1991"
-        },
-        {
-          "logical_path": "BFCL_v4_simple_java.json",
-          "bytes": 86619,
-          "sha256": "13d2303a125b08754f0e41995b9273b5005fa8ed8ebfaa24ef53b4d83c4b5c6e"
-        },
-        {
-          "logical_path": "BFCL_v4_simple_javascript.json",
-          "bytes": 47063,
-          "sha256": "329e67fedf79a6243d93dbda4b388d12bd2d31f1f2163d92cb6ef676d1764f44"
-        },
-        {
-          "logical_path": "BFCL_v4_multiple.json",
-          "bytes": 316583,
-          "sha256": "aef168155ebd74b7ac2401198b201343bc7d16d7a3d7e0d4e6d8ee82c6969b2a"
-        },
-        {
-          "logical_path": "BFCL_v4_parallel.json",
-          "bytes": 171896,
-          "sha256": "19f51a82eff42e5d62541aa500115a056eb78f437c2ba1f10415fd7c8e5dda84"
-        },
-        {
-          "logical_path": "BFCL_v4_parallel_multiple.json",
-          "bytes": 347080,
-          "sha256": "8863ea8433239f55c5f016154cf0830853c89f693c6ea270396a2fa121960579"
-        },
-        {
-          "logical_path": "BFCL_v4_irrelevance.json",
-          "bytes": 159940,
-          "sha256": "2b6ed4c2e992cdcf5f1678a701851f944bef7550ee026ed1ddb89efed5be01a6"
-        },
-        {
-          "logical_path": "BFCL_v4_live_simple.json",
-          "bytes": 260140,
-          "sha256": "1af2ac87dca47556db7b7e37e51e28b459a38b594e3c7b3c792b4903598ca0c4"
-        },
-        {
-          "logical_path": "BFCL_v4_live_multiple.json",
-          "bytes": 3891277,
-          "sha256": "fd8ccfad4d911420d0e3341dbe2fff77d1d341da934248b9bb2bda24ab3a10c8"
-        },
-        {
-          "logical_path": "BFCL_v4_live_parallel.json",
-          "bytes": 15649,
-          "sha256": "6c26e9fdc3350cf596e6d1ea9c179cbff834761bccf562f4141ed29a839ca421"
-        },
-        {
-          "logical_path": "BFCL_v4_live_parallel_multiple.json",
-          "bytes": 82332,
-          "sha256": "21d4b9319c1faac431e22757b367ea28917fe467364c3a4b17f16ec06d4f6e79"
-        },
-        {
-          "logical_path": "possible_answer/BFCL_v4_simple_python.json",
-          "bytes": 63627,
-          "sha256": "90cd5bc653690ee8e459b5b3f3fc9458606f7f3fcbf795bb51b7dc581f8c86dc"
-        },
-        {
-          "logical_path": "possible_answer/BFCL_v4_simple_java.json",
-          "bytes": 16407,
-          "sha256": "78f25616084044fa05bbfcee68e03f6ececb222bdd5cb3b7783a675fb3366e35"
-        },
-        {
-          "logical_path": "possible_answer/BFCL_v4_simple_javascript.json",
-          "bytes": 7881,
-          "sha256": "e2f9f2e51d88e0c8056ffbf1a3dd3d02eb032532d2b5d98c9cc9003385bdd56b"
-        },
-        {
-          "logical_path": "possible_answer/BFCL_v4_multiple.json",
-          "bytes": 32254,
-          "sha256": "244e00ce9395df948bcafc7bee64e8f9c87ef70887587d83cae45b13699f3047"
-        },
-        {
-          "logical_path": "possible_answer/BFCL_v4_parallel.json",
-          "bytes": 66005,
-          "sha256": "8a6aa19c1adddc6a5a2f7e40f9dbf30cc7e95815e7b830c90589ab318229e0f0"
-        },
-        {
-          "logical_path": "possible_answer/BFCL_v4_parallel_multiple.json",
-          "bytes": 74602,
-          "sha256": "5ebf24f458c1f16300c05505d83d6f0a1b68b79be273a033febd0d4f840507e3"
-        },
-        {
-          "logical_path": "possible_answer/BFCL_v4_live_simple.json",
-          "bytes": 46972,
-          "sha256": "fec9cfa9744a936f9126981e85a2023da1e63e273eafebc81923a1162fad70ce"
-        },
-        {
-          "logical_path": "possible_answer/BFCL_v4_live_multiple.json",
-          "bytes": 199668,
-          "sha256": "97e90d59c5bd76c55a2920ce93e5566e9046307d3f558578f085f9d3a56c3084"
-        },
-        {
-          "logical_path": "possible_answer/BFCL_v4_live_parallel.json",
-          "bytes": 4972,
-          "sha256": "8a9f189ff0e832ebbbbdade1fd95a7dbcc67406e9177df3f0aad76f59ab00350"
-        },
-        {
-          "logical_path": "possible_answer/BFCL_v4_live_parallel_multiple.json",
-          "bytes": 7420,
-          "sha256": "f5b5f360556c5feb51db46fb9f56ee4b304f4b45b161599bbb14161c98a2873f"
-        }
-      ]
-    },
-    "hotpotqa": {
-      "source_url": "https://huggingface.co/datasets/hotpotqa/hotpot_qa",
-      "license": "CC BY-SA 4.0",
-      "files": [
-        {
-          "logical_path": "distractor/validation.parquet",
-          "bytes": 27452575,
-          "sha256": "c20b638ca82b21d04fe12e14ff417ad05153d4d215a65de54497fca4e972f7c6"
-        }
-      ]
-    },
-    "global_mmlu": {
-      "source_url": "https://huggingface.co/datasets/CohereLabs/Global-MMLU",
-      "license": "see dataset card",
-      "files": [
-        {
-          "logical_path": "am/test.parquet",
-          "bytes": 5075206,
-          "sha256": "ccef9ac613fc1dad87da6c6f5fd06cb46f80d8a907835527b84b52c242383c68"
-        },
-        {
-          "logical_path": "ar/test.parquet",
-          "bytes": 4854848,
-          "sha256": "e969c186f001c7548d54b420b2ddf7ae1d4abfce5720680eadcc4e8a48d0f61b"
-        },
-        {
-          "logical_path": "bn/test.parquet",
-          "bytes": 6200091,
-          "sha256": "49b6d5ee0df9b5a706f7e104469ff787440b12011de330059b3f2c0100c50285"
-        },
-        {
-          "logical_path": "cs/test.parquet",
-          "bytes": 4271546,
-          "sha256": "a41725cff0f27fe136f6870778e62d90de2b8966bc96bbe5328f88f3e5d1e67c"
-        },
-        {
-          "logical_path": "de/test.parquet",
-          "bytes": 4543635,
-          "sha256": "b58a0d5994e756dabef96eb804693be153953052276d3e0b7d57bb2f2798854a"
-        },
-        {
-          "logical_path": "el/test.parquet",
-          "bytes": 6080292,
-          "sha256": "942d3e75bf1f57680f4ca36bfd49f8526568e0dceded8aaeb17b02a9cb444542"
-        },
-        {
-          "logical_path": "en/test.parquet",
+          "path": "global_mmlu/en/test.parquet",
           "bytes": 3910925,
           "sha256": "5baec81ba97243728cc9557b2cba2f03aaeedf8232473db9f20cf995c6b0a1a9"
         },
         {
-          "logical_path": "es/test.parquet",
-          "bytes": 4327396,
-          "sha256": "efbcc4ce1cf14f2f43f7b05be49a9a1153b2893c59d2f660c3bb58679801dccb"
+          "path": "global_mmlu/zh/test.parquet",
+          "bytes": 3618771,
+          "sha256": "e1ba0c287b650043b8686fa5c506d1f2718b098a7f88f724ade55a76f0062ae7"
         },
         {
-          "logical_path": "fa/test.parquet",
-          "bytes": 4730118,
-          "sha256": "f55882f742aeab60b88693f2199c244bf8ab42632202b6283adebebf60531686"
-        },
-        {
-          "logical_path": "fil/test.parquet",
-          "bytes": 4234358,
-          "sha256": "255a9a594af8b58c82da995ad4e380797640642cb7953019a57230d37aec7962"
-        },
-        {
-          "logical_path": "fr/test.parquet",
+          "path": "global_mmlu/fr/test.parquet",
           "bytes": 4550854,
           "sha256": "e602201459c29c5dbacf9a3d80cfe2524496f8e0c0b51b6326ef4205bad3405e"
         },
         {
-          "logical_path": "ha/test.parquet",
-          "bytes": 3789111,
-          "sha256": "b17d14b2fe9bf848935145ad49db494850930f23627880ce14d0f88e09e84766"
+          "path": "global_mmlu/de/test.parquet",
+          "bytes": 4543635,
+          "sha256": "b58a0d5994e756dabef96eb804693be153953052276d3e0b7d57bb2f2798854a"
         },
         {
-          "logical_path": "he/test.parquet",
-          "bytes": 4361466,
-          "sha256": "e615cdc1abe5b7951c9c1d38bac93ef39e8f1c3e4ceeb90da072a2384f7d9e7f"
+          "path": "global_mmlu/es/test.parquet",
+          "bytes": 4327396,
+          "sha256": "efbcc4ce1cf14f2f43f7b05be49a9a1153b2893c59d2f660c3bb58679801dccb"
         },
         {
-          "logical_path": "hi/test.parquet",
-          "bytes": 6140551,
-          "sha256": "f0d82c7650ef47968a22058d9a83d22834d12c4f28e23738594d903ab52bcee5"
-        },
-        {
-          "logical_path": "id/test.parquet",
-          "bytes": 3851684,
-          "sha256": "d3ff9bca8d3b56ef60d9c4a34b3a4b76f3905f8b786cda5cb966136547722271"
-        },
-        {
-          "logical_path": "ig/test.parquet",
-          "bytes": 3778871,
-          "sha256": "21e5352d4a823b033d217be65d698d6552bf4dd3dfb53140c8cc29ebb80f803b"
-        },
-        {
-          "logical_path": "it/test.parquet",
-          "bytes": 4388049,
-          "sha256": "ddc373d35da750cdd629625e2d9e133cbd510cbf3518f82c85cfb8f7aac27478"
-        },
-        {
-          "logical_path": "ja/test.parquet",
-          "bytes": 4363616,
-          "sha256": "b56ad153180d4368757891796dfad0e1a76ebeb3f7b2500b1ac63789d4e4dfe7"
-        },
-        {
-          "logical_path": "ko/test.parquet",
-          "bytes": 4273255,
-          "sha256": "aa896380f066e8e905604bbda8c2c57818a22a7d02ab99a48edc1ad078affb27"
-        },
-        {
-          "logical_path": "ky/test.parquet",
-          "bytes": 5514897,
-          "sha256": "bcbf3a5fc0ed9cc6cf6ced77d2950cb7f2ef21246ffdee7d40ae9183ae36d450"
-        },
-        {
-          "logical_path": "lt/test.parquet",
-          "bytes": 4160608,
-          "sha256": "1d0cc1459fc28294cf69a3e4c7a305f3a4802425cea472b65d465cc9028355a6"
-        },
-        {
-          "logical_path": "mg/test.parquet",
-          "bytes": 3960785,
-          "sha256": "cb557b08bf9a62990bdf382597a3b42625299287e967fd09feb9d543dafa072d"
-        },
-        {
-          "logical_path": "ms/test.parquet",
-          "bytes": 3847371,
-          "sha256": "9dd7ceb35bfba72ef2944bcb20711863e058ebbff7b2f7234bd10957b3f03b8f"
-        },
-        {
-          "logical_path": "ne/test.parquet",
-          "bytes": 5885311,
-          "sha256": "8591e7f6b0e436054cbe1b2861402a2b226d455e29061f8c2c73cad457f8b03f"
-        },
-        {
-          "logical_path": "nl/test.parquet",
-          "bytes": 4235027,
-          "sha256": "d177e050c31cf86c169bcf434aa6caf90d7e25ede9157ab1b08b36d9f7621d1f"
-        },
-        {
-          "logical_path": "ny/test.parquet",
-          "bytes": 3867093,
-          "sha256": "8826cd53bb4d93698e662652fb51a3b0cd533d9486cdf697026488cf4bfdbac0"
-        },
-        {
-          "logical_path": "pl/test.parquet",
-          "bytes": 4438005,
-          "sha256": "b7d3670fc9f0dc98661fd817c33b26b2a5a38010417fc4509c7e7d199253b3a9"
-        },
-        {
-          "logical_path": "pt/test.parquet",
+          "path": "global_mmlu/pt/test.parquet",
           "bytes": 4211041,
           "sha256": "15dda0dd7dbd8eebbe66b6f8ce6087c1f0d29b18e48b7e3b225b6dba375c1048"
         },
         {
-          "logical_path": "ro/test.parquet",
-          "bytes": 4337643,
-          "sha256": "25f62205ac578a041ad013ef143bcd22fea7e6b1f0b51dd743c77a48bb20ffe8"
-        },
-        {
-          "logical_path": "ru/test.parquet",
+          "path": "global_mmlu/ru/test.parquet",
           "bytes": 5884449,
           "sha256": "9037e1aaca6aed1856fe1e427e5b3d4e3bb6563861b760a3360ef077df301bd6"
         },
         {
-          "logical_path": "si/test.parquet",
-          "bytes": 6329471,
-          "sha256": "7e6e2f17675e74843baaf5f5147f4683afe7a9ba089d651e45568c10acd96e40"
+          "path": "global_mmlu/ja/test.parquet",
+          "bytes": 4363616,
+          "sha256": "b56ad153180d4368757891796dfad0e1a76ebeb3f7b2500b1ac63789d4e4dfe7"
         },
         {
-          "logical_path": "sn/test.parquet",
-          "bytes": 3936373,
-          "sha256": "de9ad77687616ec7fdb66abe15ddc7e3efe6d849242bae4d30e6ae5d2c0b1b28"
+          "path": "global_mmlu/ko/test.parquet",
+          "bytes": 4273255,
+          "sha256": "aa896380f066e8e905604bbda8c2c57818a22a7d02ab99a48edc1ad078affb27"
         },
         {
-          "logical_path": "so/test.parquet",
-          "bytes": 4305289,
-          "sha256": "7f32af4d583f71432b00ef9f02dd6a5da064092c805aa56afedb6dfe0f6fae61"
+          "path": "global_mmlu/ar/test.parquet",
+          "bytes": 4854848,
+          "sha256": "e969c186f001c7548d54b420b2ddf7ae1d4abfce5720680eadcc4e8a48d0f61b"
         },
         {
-          "logical_path": "sr/test.parquet",
-          "bytes": 5317727,
-          "sha256": "0bd5411932421031909994f3805bb9496e40fc13d4327f92387a23b4ed049af9"
+          "path": "global_mmlu/hi/test.parquet",
+          "bytes": 6140551,
+          "sha256": "f0d82c7650ef47968a22058d9a83d22834d12c4f28e23738594d903ab52bcee5"
         },
         {
-          "logical_path": "sv/test.parquet",
-          "bytes": 4044989,
-          "sha256": "8eb44757946f69d4d5e6b6db87c7d7b9c67f404bb5185c17eb562b74beaf1624"
-        },
-        {
-          "logical_path": "sw/test.parquet",
-          "bytes": 3922823,
-          "sha256": "de7bfff464f5bbc09a04a31acc4a5a89f66efdb61f6f337abd6081156c4572b5"
-        },
-        {
-          "logical_path": "te/test.parquet",
-          "bytes": 6250157,
-          "sha256": "6d38ab096e31396c5a77483f67df881df0df702a17f708dc75adce1c9c40c5c8"
-        },
-        {
-          "logical_path": "tr/test.parquet",
-          "bytes": 4128502,
-          "sha256": "b1db36634296b99dea6138c4a6f930e95e968df91549a82378a8d320d6df2def"
-        },
-        {
-          "logical_path": "uk/test.parquet",
-          "bytes": 5614319,
-          "sha256": "fc6ebf99e1a6486619af54276b2e2d4dba3fef446b5391bf38e6263369543653"
-        },
-        {
-          "logical_path": "vi/test.parquet",
+          "path": "global_mmlu/vi/test.parquet",
           "bytes": 4435419,
           "sha256": "5cd0840972e32c99d86cf287c7f9b1a8f594dd24fc2800169cce1ec0724abfba"
+        }
+      ],
+      "used_by": [
+        "knowledge_qa",
+        "multilingual"
+      ]
+    },
+    "ifeval": {
+      "name": "IFEval",
+      "source_url": "https://github.com/google-research/google-research/tree/master/instruction_following_eval",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "path": "ifeval/ifeval_input_data.jsonl",
+          "bytes": 207111,
+          "sha256": "6a85310ca8ce15eff755aa08a3a4ff931c7e273e7515ebb3c492ea85fd8288f2"
         },
         {
-          "logical_path": "yo/test.parquet",
-          "bytes": 4608095,
-          "sha256": "eed6dede392f2fd44c00fe21666145029b309d3c2ebc41129b5d129b7b4f2f46"
+          "path": "ifeval/instruction_following_eval/evaluation_lib.py",
+          "bytes": 6984,
+          "sha256": "35decc06000718487f44d7deafa6d3f48a8ec0886281edf40162c0265b7d248c"
         },
         {
-          "logical_path": "zh/test.parquet",
-          "bytes": 3618771,
-          "sha256": "e1ba0c287b650043b8686fa5c506d1f2718b098a7f88f724ade55a76f0062ae7"
+          "path": "ifeval/instruction_following_eval/evaluation_main.py",
+          "bytes": 2449,
+          "sha256": "e6df07a04d25a0e7134933ba2400c26e0129a243e449c88df55043e583fc4b4a"
+        },
+        {
+          "path": "ifeval/instruction_following_eval/instructions.py",
+          "bytes": 55162,
+          "sha256": "60e086f5342a03ce8e18b64bbcccf86308f523c08aa826707a562150a52f3edf"
+        },
+        {
+          "path": "ifeval/instruction_following_eval/instructions_registry.py",
+          "bytes": 7240,
+          "sha256": "ec92d72c264f6d906978613085db262356174300370a3fffe6fefd5969ce9cfc"
+        },
+        {
+          "path": "ifeval/instruction_following_eval/instructions_util.py",
+          "bytes": 19538,
+          "sha256": "a73797261eee5bf447e279d82a2b700b1bdd3cb1193412dbab1270a85832bc6b"
+        }
+      ],
+      "used_by": [
+        "instruction_following"
+      ]
+    },
+    "longbench_v1": {
+      "name": "LongBench v1",
+      "source_url": "https://github.com/THUDM/LongBench",
+      "license": "MIT",
+      "files": [
+        {
+          "path": "longbench_v1/data.zip",
+          "bytes": 113932529,
+          "sha256": "cb45b11a4133c6bc1d6a44b0f8e701335ff1e543195db1103472e575857f7f64"
+        },
+        {
+          "path": "longbench_v1/prompts/dataset2prompt.json",
+          "bytes": 5437,
+          "sha256": "56d22ad4f382169c2b8a11ff4c982a4a1bea096c8152b0f0b85b64686b157c30"
+        },
+        {
+          "path": "longbench_v1/prompts/dataset2maxlen.json",
+          "bytes": 459,
+          "sha256": "72966b3c0933e214591637fb085798c5e687ebff4ddaab5d99bbc31120532022"
+        }
+      ],
+      "used_by": [
+        "long_context"
+      ]
+    },
+    "gsm8k": {
+      "name": "GSM8K",
+      "source_url": "https://huggingface.co/datasets/openai/gsm8k",
+      "license": "MIT",
+      "files": [
+        {
+          "path": "gsm8k/main/test-00000-of-00001.parquet",
+          "bytes": 419088,
+          "sha256": "ee7b8da9e381df27b9e3f7758a159ab2bdaa4dbaa910546cbbc47e0cb44e4f59"
+        }
+      ],
+      "used_by": [
+        "math_logic"
+      ]
+    },
+    "cmath": {
+      "name": "CMATH",
+      "source_url": "https://github.com/XiaoMi/cmath",
+      "license": "see upstream repository (research use)",
+      "files": [
+        {
+          "path": "cmath/cmath_test.jsonl",
+          "bytes": 222216,
+          "sha256": "cabe17c127c3227912b3384f4755e180f3aa0d9e5865677e7e5e223439bf15eb"
+        }
+      ],
+      "used_by": [
+        "math_logic"
+      ]
+    },
+    "humaneval": {
+      "name": "HumanEval",
+      "source_url": "https://github.com/openai/human-eval",
+      "license": "MIT",
+      "files": [
+        {
+          "path": "humaneval/openai_humaneval/test-00000-of-00001.parquet",
+          "bytes": 83920,
+          "sha256": "2f2871a15fbc95b6c683043359f4ed8e144c5a1c4f24f25f66bc51f598dfcfb6"
+        }
+      ],
+      "used_by": [
+        "coding"
+      ]
+    },
+    "mbpp": {
+      "name": "MBPP (sanitized)",
+      "source_url": "https://github.com/google-research/google-research/tree/master/mbpp",
+      "license": "CC-BY-4.0",
+      "files": [
+        {
+          "path": "mbpp/sanitized-mbpp.json",
+          "bytes": 255053,
+          "sha256": "ca95deaa9a01ef0a6f439f88bcf0dd3db3563d22f22aad6cae04ebb9a8d8c8e9"
+        }
+      ],
+      "used_by": [
+        "coding"
+      ]
+    },
+    "bfcl_v4": {
+      "name": "BFCL v4",
+      "source_url": "https://github.com/ShishirPatil/gorilla/tree/main/berkeley-function-call-leaderboard",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "path": "bfcl/BFCL_v4_simple_python.json",
+          "bytes": 283274,
+          "sha256": "82dd63ba502eb2520c6b5d1d9a5c4b590e03ff261565175561f6228a367d1991"
+        },
+        {
+          "path": "bfcl/BFCL_v4_simple_java.json",
+          "bytes": 86619,
+          "sha256": "13d2303a125b08754f0e41995b9273b5005fa8ed8ebfaa24ef53b4d83c4b5c6e"
+        },
+        {
+          "path": "bfcl/BFCL_v4_simple_javascript.json",
+          "bytes": 47063,
+          "sha256": "329e67fedf79a6243d93dbda4b388d12bd2d31f1f2163d92cb6ef676d1764f44"
+        },
+        {
+          "path": "bfcl/BFCL_v4_multiple.json",
+          "bytes": 316583,
+          "sha256": "aef168155ebd74b7ac2401198b201343bc7d16d7a3d7e0d4e6d8ee82c6969b2a"
+        },
+        {
+          "path": "bfcl/BFCL_v4_parallel.json",
+          "bytes": 171896,
+          "sha256": "19f51a82eff42e5d62541aa500115a056eb78f437c2ba1f10415fd7c8e5dda84"
+        },
+        {
+          "path": "bfcl/BFCL_v4_parallel_multiple.json",
+          "bytes": 347080,
+          "sha256": "8863ea8433239f55c5f016154cf0830853c89f693c6ea270396a2fa121960579"
+        },
+        {
+          "path": "bfcl/BFCL_v4_irrelevance.json",
+          "bytes": 159940,
+          "sha256": "2b6ed4c2e992cdcf5f1678a701851f944bef7550ee026ed1ddb89efed5be01a6"
+        },
+        {
+          "path": "bfcl/BFCL_v4_live_simple.json",
+          "bytes": 260140,
+          "sha256": "1af2ac87dca47556db7b7e37e51e28b459a38b594e3c7b3c792b4903598ca0c4"
+        },
+        {
+          "path": "bfcl/BFCL_v4_live_multiple.json",
+          "bytes": 3891277,
+          "sha256": "fd8ccfad4d911420d0e3341dbe2fff77d1d341da934248b9bb2bda24ab3a10c8"
+        },
+        {
+          "path": "bfcl/BFCL_v4_live_parallel.json",
+          "bytes": 15649,
+          "sha256": "6c26e9fdc3350cf596e6d1ea9c179cbff834761bccf562f4141ed29a839ca421"
+        },
+        {
+          "path": "bfcl/BFCL_v4_live_parallel_multiple.json",
+          "bytes": 82332,
+          "sha256": "21d4b9319c1faac431e22757b367ea28917fe467364c3a4b17f16ec06d4f6e79"
+        },
+        {
+          "path": "bfcl/possible_answer/BFCL_v4_simple_python.json",
+          "bytes": 63627,
+          "sha256": "90cd5bc653690ee8e459b5b3f3fc9458606f7f3fcbf795bb51b7dc581f8c86dc"
+        },
+        {
+          "path": "bfcl/possible_answer/BFCL_v4_simple_java.json",
+          "bytes": 16407,
+          "sha256": "78f25616084044fa05bbfcee68e03f6ececb222bdd5cb3b7783a675fb3366e35"
+        },
+        {
+          "path": "bfcl/possible_answer/BFCL_v4_simple_javascript.json",
+          "bytes": 7881,
+          "sha256": "e2f9f2e51d88e0c8056ffbf1a3dd3d02eb032532d2b5d98c9cc9003385bdd56b"
+        },
+        {
+          "path": "bfcl/possible_answer/BFCL_v4_multiple.json",
+          "bytes": 32254,
+          "sha256": "244e00ce9395df948bcafc7bee64e8f9c87ef70887587d83cae45b13699f3047"
+        },
+        {
+          "path": "bfcl/possible_answer/BFCL_v4_parallel.json",
+          "bytes": 66005,
+          "sha256": "8a6aa19c1adddc6a5a2f7e40f9dbf30cc7e95815e7b830c90589ab318229e0f0"
+        },
+        {
+          "path": "bfcl/possible_answer/BFCL_v4_parallel_multiple.json",
+          "bytes": 74602,
+          "sha256": "5ebf24f458c1f16300c05505d83d6f0a1b68b79be273a033febd0d4f840507e3"
+        },
+        {
+          "path": "bfcl/possible_answer/BFCL_v4_live_simple.json",
+          "bytes": 46972,
+          "sha256": "fec9cfa9744a936f9126981e85a2023da1e63e273eafebc81923a1162fad70ce"
+        },
+        {
+          "path": "bfcl/possible_answer/BFCL_v4_live_multiple.json",
+          "bytes": 199668,
+          "sha256": "97e90d59c5bd76c55a2920ce93e5566e9046307d3f558578f085f9d3a56c3084"
+        },
+        {
+          "path": "bfcl/possible_answer/BFCL_v4_live_parallel.json",
+          "bytes": 4972,
+          "sha256": "8a9f189ff0e832ebbbbdade1fd95a7dbcc67406e9177df3f0aad76f59ab00350"
+        },
+        {
+          "path": "bfcl/possible_answer/BFCL_v4_live_parallel_multiple.json",
+          "bytes": 7420,
+          "sha256": "f5b5f360556c5feb51db46fb9f56ee4b304f4b45b161599bbb14161c98a2873f"
+        }
+      ],
+      "used_by": [
+        "general_agent"
+      ]
+    },
+    "hotpotqa_distractor": {
+      "name": "HotpotQA (distractor)",
+      "source_url": "https://huggingface.co/datasets/hotpotqa/hotpot_qa",
+      "license": "CC-BY-SA-4.0",
+      "files": [
+        {
+          "path": "hotpotqa/distractor/validation-00000-of-00001.parquet",
+          "bytes": 27452575,
+          "sha256": "c20b638ca82b21d04fe12e14ff417ad05153d4d215a65de54497fca4e972f7c6"
+        }
+      ],
+      "used_by": [
+        "search_agent"
+      ]
+    }
+  },
+  "tooling": {
+    "tokenizer": {
+      "name": "MiniCPM5-1B tokenizer",
+      "source_url": "https://huggingface.co/openbmb/MiniCPM5-1B",
+      "license": "see model card",
+      "files": [
+        {
+          "path": "tokenizer/MiniCPM5-1B/tokenizer.json",
+          "bytes": 9894271,
+          "sha256": "3e065a558a034185fe299917b398685c1facd0169a9eea1e629eb30c171fed81"
+        }
+      ]
+    },
+    "nltk": {
+      "name": "NLTK punkt / punkt_tab",
+      "source_url": "https://github.com/nltk/nltk_data",
+      "license": "Apache-2.0 (nltk_data)",
+      "files": [
+        {
+          "path": "nltk_data/punkt.zip",
+          "bytes": 13905355,
+          "sha256": "51c3078994aeaf650bfc8e028be4fb42b4a0d177d41c012b6a983979653660ec"
+        },
+        {
+          "path": "nltk_data/punkt_tab.zip",
+          "bytes": 4319076,
+          "sha256": "e57f64187974277726a3417ca6f181ec5403676c717672eef6a748a7b20e0106"
         }
       ]
     }
   },
-  "strata_counts": {
-    "knowledge_qa": {
-      "category": {
-        "biology": 18,
-        "business": 18,
-        "chemistry": 18,
-        "computer science": 18,
-        "economics": 18,
-        "engineering": 18,
-        "health": 18,
-        "history": 18,
-        "law": 18,
-        "math": 18,
-        "other": 18,
-        "philosophy": 18,
-        "physics": 17,
-        "psychology": 17
-      }
-    },
-    "instruction_following": {
-      "instruction_id": {
-        "count:conjunctions": 5,
-        "count:keywords_multiple": 5,
-        "count:numbers": 6,
-        "count:person_names": 5,
-        "count:pronouns": 5,
-        "count:punctuation": 6,
-        "count:unique_word_count": 6,
-        "count:word_count_range": 6,
-        "count:words_japanese": 5,
-        "custom:character_reverse": 1,
-        "custom:csv_city": 1,
-        "custom:csv_quotes": 1,
-        "custom:csv_special_character": 1,
-        "custom:date_format_list": 1,
-        "custom:european_capitals_sort": 1,
-        "custom:mcq_count_length": 1,
-        "custom:multiples": 1,
-        "custom:reverse_newline": 1,
-        "custom:sentence_alphabet": 1,
-        "custom:word_reverse": 1,
-        "format:emoji": 6,
-        "format:line_indent": 6,
-        "format:list": 6,
-        "format:newline": 5,
-        "format:no_bullets_bullets": 5,
-        "format:no_whitespace": 4,
-        "format:options": 6,
-        "format:output_template": 4,
-        "format:parentheses": 6,
-        "format:quote_unquote": 5,
-        "format:quotes": 6,
-        "format:sub-bullets": 6,
-        "format:thesis": 6,
-        "format:title_case": 4,
-        "ratio:overlap": 6,
-        "ratio:sentence_balance": 6,
-        "ratio:sentence_type": 6,
-        "ratio:sentence_words": 5,
-        "ratio:stop_words": 6,
-        "repeat:repeat_change": 3,
-        "repeat:repeat_simple": 2,
-        "repeat:repeat_span": 4,
-        "sentence:alliteration_increment": 5,
-        "sentence:increment": 5,
-        "sentence:keyword": 5,
-        "words:alphabet": 5,
-        "words:consonants": 5,
-        "words:keywords_specific_position": 4,
-        "words:last_first": 5,
-        "words:no_consecutive": 5,
-        "words:odd_even_syllables": 5,
-        "words:palindrome": 5,
-        "words:paragraph_last_first": 5,
-        "words:prime_lengths": 5,
-        "words:repeats": 5,
-        "words:start_verb": 5,
-        "words:vowel": 5,
-        "words:words_position": 3
-      }
-    },
-    "long_context": {
-      "task": {
-        "2wikimqa": 64,
-        "hotpotqa": 62,
-        "narrativeqa": 77,
-        "qasper": 47
-      },
-      "length_band": {
-        "16k-32k": 51,
-        "4k-8k": 100,
-        "8k-16k": 99
-      },
-      "lang": {
-        "en": 250
-      }
-    },
-    "math_logic": {
-      "subject": {
-        "Algebra": 40,
-        "Counting & Probability": 29,
-        "Geometry": 34,
-        "Intermediate Algebra": 39,
-        "Number Theory": 37,
-        "Prealgebra": 39,
-        "Precalculus": 32
-      },
-      "level": {
-        "1": 34,
-        "2": 55,
-        "3": 51,
-        "4": 55,
-        "5": 55
-      }
-    },
-    "coding": {
-      "platform": {
-        "atcoder": 150,
-        "leetcode": 100
-      },
-      "testtype": {
-        "functional": 100,
-        "stdin": 150
-      },
-      "difficulty": {
-        "easy": 64,
-        "hard": 107,
-        "medium": 79
-      }
-    },
-    "general_agent": {
-      "category": {
-        "irrelevance": 100,
-        "live_multiple": 100,
-        "live_parallel": 15,
-        "live_parallel_multiple": 24,
-        "live_simple": 100,
-        "multiple": 100,
-        "parallel": 100,
-        "parallel_multiple": 100,
-        "simple_java": 100,
-        "simple_javascript": 50,
-        "simple_python": 100
-      }
-    },
-    "search_agent": {
-      "type": {
-        "bridge": 194,
-        "comparison": 56
-      },
-      "level": {
-        "hard": 250
-      }
-    },
-    "multilingual": {
-      "lang": {
-        "am": 100,
-        "ar": 100,
-        "bn": 100,
-        "cs": 100,
-        "de": 100,
-        "el": 100,
-        "en": 100,
-        "es": 100,
-        "fa": 100,
-        "fil": 100,
-        "fr": 100,
-        "ha": 100,
-        "he": 100,
-        "hi": 100,
-        "id": 100,
-        "ig": 100,
-        "it": 100,
-        "ja": 100,
-        "ko": 100,
-        "ky": 100,
-        "lt": 100,
-        "mg": 100,
-        "ms": 100,
-        "ne": 100,
-        "nl": 100,
-        "ny": 100,
-        "pl": 100,
-        "pt": 100,
-        "ro": 100,
-        "ru": 100,
-        "si": 100,
-        "sn": 100,
-        "so": 100,
-        "sr": 100,
-        "sv": 100,
-        "sw": 100,
-        "te": 100,
-        "tr": 100,
-        "uk": 100,
-        "vi": 100,
-        "yo": 100,
-        "zh": 100
-      },
-      "subject_category": {
-        "Business": 294,
-        "Humanities": 882,
-        "Medical": 462,
-        "Other": 168,
-        "STEM": 1596,
-        "Social Sciences": 798
-      }
-    }
-  },
-  "stats": {
-    "coding": {
-      "n": 250,
-      "tokens_min": 171,
-      "tokens_median": 504,
-      "tokens_max": 1382,
-      "tokens_mean": 532.7,
-      "prompt_chars_min": 645,
-      "prompt_chars_median": 1597,
-      "prompt_chars_max": 4035,
-      "datasets": [
-        "livecodebench"
-      ],
-      "judges": [
-        "code_pass1"
-      ],
-      "langs": [
-        "en"
-      ]
-    },
-    "general_agent": {
-      "n": 889,
-      "tokens_min": 101,
-      "tokens_median": 247,
-      "tokens_max": 2463,
-      "tokens_mean": 382.7,
-      "prompt_chars_min": 73,
-      "prompt_chars_median": 73,
-      "prompt_chars_max": 73,
-      "datasets": [
-        "bfcl"
-      ],
-      "judges": [
-        "bfcl_ast"
-      ],
-      "langs": [
-        "en"
-      ]
-    },
-    "instruction_following": {
-      "n": 250,
-      "tokens_min": 27,
-      "tokens_median": 75,
-      "tokens_max": 261,
-      "tokens_mean": 85.3,
-      "prompt_chars_min": 50,
-      "prompt_chars_median": 314,
-      "prompt_chars_max": 904,
-      "datasets": [
-        "ifbench"
-      ],
-      "judges": [
-        "ifbench"
-      ],
-      "langs": [
-        "en"
-      ]
-    },
-    "knowledge_qa": {
-      "n": 250,
-      "tokens_min": 87,
-      "tokens_median": 191,
-      "tokens_max": 958,
-      "tokens_mean": 230.8,
-      "prompt_chars_min": 286,
-      "prompt_chars_median": 639,
-      "prompt_chars_max": 3739,
-      "datasets": [
-        "mmlu_pro"
-      ],
-      "judges": [
-        "mc_letter"
-      ],
-      "langs": [
-        "en"
-      ]
-    },
-    "long_context": {
-      "n": 250,
-      "tokens_min": 4102,
-      "tokens_median": 10273,
-      "tokens_max": 32187,
-      "tokens_mean": 12405.5,
-      "prompt_chars_min": 17266,
-      "prompt_chars_median": 44975,
-      "prompt_chars_max": 134663,
-      "datasets": [
-        "longbench_v1:2wikimqa",
-        "longbench_v1:hotpotqa",
-        "longbench_v1:narrativeqa",
-        "longbench_v1:qasper"
-      ],
-      "judges": [
-        "qa_f1"
-      ],
-      "langs": [
-        "en"
-      ]
-    },
-    "math_logic": {
-      "n": 250,
-      "tokens_min": 41,
-      "tokens_median": 83,
-      "tokens_max": 819,
-      "tokens_mean": 106.8,
-      "prompt_chars_min": 119,
-      "prompt_chars_median": 255,
-      "prompt_chars_max": 1830,
-      "datasets": [
-        "math_500"
-      ],
-      "judges": [
-        "math"
-      ],
-      "langs": [
-        "en"
-      ]
-    },
-    "multilingual": {
-      "n": 4200,
-      "tokens_min": 56,
-      "tokens_median": 171,
-      "tokens_max": 4995,
-      "tokens_mean": 251.4,
-      "prompt_chars_min": 136,
-      "prompt_chars_median": 373,
-      "prompt_chars_max": 2793,
-      "datasets": [
-        "global_mmlu"
-      ],
-      "judges": [
-        "mc_letter"
-      ],
-      "langs": [
-        "am",
-        "ar",
-        "bn",
-        "cs",
-        "de",
-        "el",
-        "en",
-        "es",
-        "fa",
-        "fil",
-        "fr",
-        "ha",
-        "he",
-        "hi",
-        "id",
-        "ig",
-        "it",
-        "ja",
-        "ko",
-        "ky",
-        "lt",
-        "mg",
-        "ms",
-        "ne",
-        "nl",
-        "ny",
-        "pl",
-        "pt",
-        "ro",
-        "ru",
-        "si",
-        "sn",
-        "so",
-        "sr",
-        "sv",
-        "sw",
-        "te",
-        "tr",
-        "uk",
-        "vi",
-        "yo",
-        "zh"
-      ]
-    },
-    "search_agent": {
-      "n": 250,
-      "tokens_min": 176,
-      "tokens_median": 185,
-      "tokens_max": 230,
-      "tokens_mean": 186.4,
-      "prompt_chars_min": 139,
-      "prompt_chars_median": 184,
-      "prompt_chars_max": 315,
-      "datasets": [
-        "hotpotqa"
-      ],
-      "judges": [
-        "qa_f1"
-      ],
-      "langs": [
-        "en"
-      ]
-    }
-  },
   "totals": {
-    "rows": 6589,
-    "per_scenario": {
-      "knowledge_qa": 250,
-      "instruction_following": 250,
-      "long_context": 250,
-      "math_logic": 250,
-      "coding": 250,
-      "general_agent": 889,
-      "search_agent": 250,
-      "multilingual": 4200
-    },
-    "scenarios": 8
+    "rows": 2000,
+    "scenarios": 8,
+    "per_scenario": 250
+  },
+  "deviations": [
+    "Global-MMLU is scored generatively from option letters, not with likelihood-based scoring.",
+    "Global-MMLU pairing drops a sample_id when en/zh answer letters disagree, drops every subject whose en/zh mismatch rate is above ALIGNMENT_MAX_SUBJECT_MISMATCH_RATE (upstream high_school_world_history zh/ko row misalignment), and drops known upstream translation errors (abstract_algebra/test/1); the excluded subjects/counts are recorded under sampling.alignment_excluded.",
+    "LongBench v1 long-context rows are filtered to 4K-32K prompt tokens (no truncation); 16-32K rows are English-only because Chinese documents are shorter.",
+    "LongBench v1 rows are deduplicated by (task, input, context); every acceptable gold answer of a duplicate group is unioned into judge.answers in upstream order (e.g. narrativeqa 'A monk.' / 'a priest').",
+    "LongBench Chinese tasks use the official Chinese metrics: dureader -> ROUGE-L (metric=rouge_zh), multifieldqa_zh -> jieba token F1 (metric=f1_zh); the five English tasks keep SQuAD token F1.",
+    "CMATH non-integer gold answers carry judge.tolerance=relative_1pct (1% relative tolerance); GSM8K stays exact and has no tolerance field.",
+    "MBPP prompts name the entry point extracted from the reference solution and quote the first three official tests; judge.entry_point is set and prompt_prefix stays null.",
+    "HotpotQA search_agent is a single-request retrieval QA: the ten distractor paragraphs are in the prompt and no tool loop is executed.",
+    "Multilingual is 10 languages x 25 paired questions (not the 42-language Global-MMLU profile); en/zh are covered by knowledge_qa instead. Candidates require identical answer letters in all 10 languages and four distinct non-empty options in every language; filtered rows are recorded under sampling.alignment_excluded.",
+    "Instruction following uses IFEval; the performance set's reference pool uses the same IFEval source but is never scored.",
+    "Coding uses HumanEval + MBPP (not LiveCodeBench); both are easier sets chosen for 1B-class models.",
+    "Every row carries judge.max_new_tokens (knowledge/multilingual 1536, instruction 1024, math 512, coding 768, general_agent 256, search 32, long_context the official task maxlen).",
+    "Accuracy is a hidden offline data asset: no evaluator is wired into the run and no score may be quoted from it."
+  ],
+  "files": {
+    "testset.jsonl": {
+      "rows": 2000,
+      "bytes": 16762012,
+      "sha256": "e4b7df96acd4aa2e4312f88ccd334bf557ac7fac4041b04814d09038ec7a7424"
+    }
   }
 }

@@ -160,7 +160,6 @@ class RunConfig(BaseModel):
     # "disabled" = send chat_template_kwargs.enable_thinking=false.
     # "enabled"  = force enable_thinking=true.
     thinking_mode: Literal["auto", "disabled", "enabled"] = "disabled"
-    thinking_min_tokens: int = 1024
     fail_fast: bool = False
     # Safety margin so prompt + max_tokens never overflows the context window.
     context_safety_margin_tokens: int = 128

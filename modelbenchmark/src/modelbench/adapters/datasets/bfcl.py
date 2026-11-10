@@ -11,7 +11,7 @@ actually JSONL (one object per line) despite the ``.json`` suffix, and they do
 **not** contain the ground truth: the expected calls live in the sibling
 ``possible_answer/`` files, joined by sample ``id``.  Both files are downloaded
 and verified; if a category's files cannot be fetched it is skipped (and
-recorded in ``data/raw/bfcl/download_errors.json``) rather than fabricated.
+recorded in ``dataset/raw/bfcl/download_errors.json``) rather than fabricated.
 
 Ground-truth shapes differ by category and are normalised to
 ``metadata["gold_calls"] = [{"name": ..., "arguments": {...}}, ...]``:

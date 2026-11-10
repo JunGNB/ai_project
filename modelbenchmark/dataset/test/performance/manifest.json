@@ -1,26 +1,30 @@
 {
-  "schema_version": 3,
-  "generator_version": "tool/dataset/build_perf.py v4",
-  "seed": 20261106,
-  "tokenizer": {
-    "model": "MiniCPM5-1B",
-    "mode": "local",
-    "tokenizer_dir": "/Users/huawei/.omlx/models/openbmb/MiniCPM5-1B",
-    "semantics": "messages: chat_template(add_generation_prompt=True, enable_thinking=True) + special tokens; text: encode(add_special_tokens=True); validated against oMLX /v1/tokenize cache"
+  "schema_version": "performance/v1",
+  "name": "performance",
+  "description": "8 scenarios x 3 context buckets (1K/8K/32K) x 10 targets = 240 measured rows in one jsonl; same target shares an identical question across buckets, only the context length differs; no scoring.",
+  "rows": 240,
+  "per_scenario": 30,
+  "targets_per_cell": 10,
+  "seed": 42,
+  "sampling": {
+    "method": "sha256(seed|upstream_id) ascending order + stratified largest-remainder quotas; independent of file row order",
+    "executed_by": "tool/dataset/performance/build.py"
   },
-  "tokenizer_cache": {
-    "calls": 0,
-    "cache_hits": 11086
+  "tokens_semantics": "tokens = content tokens of messages[0].content + JSON-text tokens of tools (reference tokenizer, no chat template; one BOS per encode included); messages_tokens/tools_tokens are the two audited parts",
+  "bucket_basis": "content tokens (messages + tools JSON text) counted by the reference tokenizer, one BOS per encode included; chat-template control tokens excluded",
+  "tokens_mean": 13995,
+  "tokenizer": {
+    "name": "MiniCPM5-1B",
+    "path": "dataset/raw/tokenizer/MiniCPM5-1B/tokenizer.json",
+    "sha256": "3e065a558a034185fe299917b398685c1facd0169a9eea1e629eb30c171fed81",
+    "tokens_semantics": "tokens = content tokens of messages[0].content + JSON-text tokens of tools (reference tokenizer, no chat template; one BOS per encode included); messages_tokens/tools_tokens are the two audited parts"
   },
   "buckets": {
     "1k": 1024,
     "8k": 8192,
     "32k": 32768
   },
-  "accept_range": [
-    0.95,
-    1.05
-  ],
+  "accept_rule": "integer token counts: floor(0.95*target) <= tokens <= floor(1.05*target), where tokens = messages_tokens + tools_tokens (content tokens, no chat template)",
   "accept_bounds": {
     "1k": {
       "low": 972,
@@ -35,8 +39,6 @@
       "high": 34406
     }
   },
-  "accept_rule": "integer token counts: floor(0.95*target) <= tokens <= floor(1.05*target) (1K lower bound is 972, not 972.8; fixes the previous 0.8-token false rejection)",
-  "osl": 50,
   "run_defaults": {
     "max_tokens": 50,
     "decode_guard": true,
@@ -44,91 +46,10 @@
     "warmup_requests": 0,
     "repeats": 1
   },
-  "tokens_semantics": "tokens = messages + tools (messages_tokens + tools_tokens); messages use the reference chat template, tools are counted as their JSON text",
-  "bucket_basis": "total prompt tokens (messages + tools)",
-  "files": [
-    "testset.jsonl"
-  ],
-  "construction_rules": {
-    "document_prefix": "one LongBench v2 document per target; 1K/8K/32K take a prefix slice of that document; question/options are appended unchanged. Workload-shape probe, not answerability-guaranteed.",
-    "document_prefix_with_search_tools": "same as document_prefix, plus fixed search/lookup tool schemas counted in tokens; one request, tools are not executed in performance mode.",
-    "target_document_first": "1K slices the target's own dureader document; 8K/32K concatenate the target document first, then other same-task documents, and slice to the target length.",
-    "instruction_pool": "target IFEval instruction is appended after a reference block built from other IFEval prompts (same dataset, target excluded).",
-    "solved_examples": "target GSM8K problem is appended after solved examples drawn from the same split, excluding the 20 target problems.",
-    "function_catalog": "target BFCL request plus a catalogue of complete, JSON-Schema-normalised function definitions ordered target-functions-first, then same-category, then the rest; filled by whole functions only (never truncated mid-JSON). The catalogue is a prefix of a shared 642-function pool, not the full pool."
-  },
-  "workloads": {
-    "knowledge_qa": "longbench_v2:Single-Document QA (open-book long-doc MCQ)",
-    "long_context": "longbench_v2:Long Structured Data Understanding",
-    "coding": "longbench_v2:Code Repository Understanding (reading, not generation)",
-    "search_agent": "longbench_v2:Multi-Document QA (single request; tool schemas only)",
-    "chinese_long_context": "longbench_v1:dureader",
-    "instruction_following": "ifeval:target instruction + same-set reference pool",
-    "math_logic": "gsm8k:target problem + solved examples",
-    "general_agent": "bfcl:single request + whole-function catalogue prefix (target functions first)"
-  },
-  "scenarios": {
-    "knowledge_qa": {
-      "dataset": "longbench_v2",
-      "workload": "longbench_v2:Single-Document QA (open-book long-doc MCQ)",
-      "construction": "document_prefix",
-      "domain": "Single-Document QA",
-      "task": null
-    },
-    "long_context": {
-      "dataset": "longbench_v2",
-      "workload": "longbench_v2:Long Structured Data Understanding",
-      "construction": "document_prefix",
-      "domain": "Long Structured Data Understanding",
-      "task": null
-    },
-    "coding": {
-      "dataset": "longbench_v2",
-      "workload": "longbench_v2:Code Repository Understanding (reading, not generation)",
-      "construction": "document_prefix",
-      "domain": "Code Repository Understanding",
-      "task": null
-    },
-    "search_agent": {
-      "dataset": "longbench_v2",
-      "workload": "longbench_v2:Multi-Document QA (single request; tool schemas only)",
-      "construction": "document_prefix_with_search_tools",
-      "domain": "Multi-Document QA",
-      "task": null
-    },
-    "chinese_long_context": {
-      "dataset": "longbench_v1",
-      "workload": "longbench_v1:dureader",
-      "construction": "target_document_first",
-      "domain": null,
-      "task": "dureader"
-    },
-    "instruction_following": {
-      "dataset": "ifeval",
-      "workload": "ifeval:target instruction + same-set reference pool",
-      "construction": "instruction_pool",
-      "domain": null,
-      "task": null
-    },
-    "math_logic": {
-      "dataset": "gsm8k",
-      "workload": "gsm8k:target problem + solved examples",
-      "construction": "solved_examples",
-      "domain": null,
-      "task": null
-    },
-    "general_agent": {
-      "dataset": "bfcl",
-      "workload": "bfcl:single request + whole-function catalogue prefix (target functions first)",
-      "construction": "function_catalog",
-      "domain": null,
-      "task": null
-    }
-  },
   "window_requirements": {
     "declared_32k_tokens": {
-      "min": 32455,
-      "max": 32779
+      "min": 32704,
+      "max": 32841
     },
     "per_request_reserve": {
       "max_tokens": 50,
@@ -137,1986 +58,1884 @@
       "total": 242
     },
     "required_model_window_tokens": {
-      "min": 32697,
-      "max": 33021
+      "min": 32946,
+      "max": 33083
     },
     "window_32768": {
-      "of": 160,
-      "testable": 1,
-      "not_testable": 159,
+      "of": 80,
+      "testable": 0,
+      "not_testable": 80,
       "max_testable_declared_tokens": 32526
     },
     "note": "Runtime window check is declared_tokens + max_tokens + context_safety_margin + decode_guard_reserve. A 32,768-token window can only host declared tokens <= 32526; the remaining 32K rows are reported as not-testable (summary.skipped), never truncated. Declared tokens exclude the decode guard."
   },
-  "provenance": {
-    "longbench_v1": {
-      "source_url": "https://huggingface.co/datasets/zai-org/LongBench",
-      "license": "research use (see upstream repo)",
-      "files": [
-        {
-          "logical_path": "data.zip",
-          "bytes": 113932529,
-          "sha256": "cb45b11a4133c6bc1d6a44b0f8e701335ff1e543195db1103472e575857f7f64"
-        }
-      ]
-    },
-    "bfcl": {
-      "source_url": "https://github.com/ShishirPatil/gorilla",
-      "license": "Apache-2.0",
-      "files": [
-        {
-          "logical_path": "BFCL_v4_simple_python.json",
-          "bytes": 283274,
-          "sha256": "82dd63ba502eb2520c6b5d1d9a5c4b590e03ff261565175561f6228a367d1991"
-        },
-        {
-          "logical_path": "BFCL_v4_multiple.json",
-          "bytes": 316583,
-          "sha256": "aef168155ebd74b7ac2401198b201343bc7d16d7a3d7e0d4e6d8ee82c6969b2a"
-        },
-        {
-          "logical_path": "BFCL_v4_parallel.json",
-          "bytes": 171896,
-          "sha256": "19f51a82eff42e5d62541aa500115a056eb78f437c2ba1f10415fd7c8e5dda84"
-        }
-      ]
-    },
-    "longbench_v2": {
-      "source_url": "https://huggingface.co/datasets/zai-org/LongBench-v2",
-      "license": "Apache-2.0",
-      "files": [
-        {
-          "logical_path": "data.json",
-          "bytes": 465490535,
-          "sha256": "15d61c22d92c96900b3c4948b6aeea218d3214b676a65df48e7b8555604c7fe2"
-        }
-      ]
-    },
-    "ifeval": {
-      "source_url": "https://huggingface.co/datasets/google/IFEval",
-      "license": "Apache-2.0",
-      "files": [
-        {
-          "logical_path": "ifeval_input_data.jsonl",
-          "bytes": 207111,
-          "sha256": "6a85310ca8ce15eff755aa08a3a4ff931c7e273e7515ebb3c492ea85fd8288f2"
-        }
-      ]
-    },
-    "gsm8k": {
-      "source_url": "https://huggingface.co/datasets/openai/gsm8k",
-      "license": "MIT",
-      "files": [
-        {
-          "logical_path": "main/test.parquet",
-          "bytes": 419088,
-          "sha256": "ee7b8da9e381df27b9e3f7758a159ab2bdaa4dbaa910546cbbc47e0cb44e4f59"
-        }
-      ]
-    }
-  },
-  "sampling": {
-    "knowledge_qa": {
-      "dataset": "longbench_v2:Single-Document QA",
-      "workload": "longbench_v2:Single-Document QA (open-book long-doc MCQ)",
-      "seed": 20261106,
-      "pool_filter": "raw context >= 120000 characters",
-      "domain_rows": 175,
-      "source_rows": 116,
-      "dedup": {
-        "context_duplicates_removed": 9,
-        "question_duplicates_removed": 1,
-        "context_duplicates": [
-          {
-            "pool_rank": 24,
-            "sha1": "c9a8a6617502018f",
-            "kept_pool_rank": 22
-          },
-          {
-            "pool_rank": 25,
-            "sha1": "7f1e6c944374fac2",
-            "kept_pool_rank": 18
-          },
-          {
-            "pool_rank": 50,
-            "sha1": "7f1e6c944374fac2",
-            "kept_pool_rank": 18
-          },
-          {
-            "pool_rank": 54,
-            "sha1": "c9a8a6617502018f",
-            "kept_pool_rank": 22
-          },
-          {
-            "pool_rank": 88,
-            "sha1": "7f1e6c944374fac2",
-            "kept_pool_rank": 18
-          },
-          {
-            "pool_rank": 94,
-            "sha1": "b533153bb7544362",
-            "kept_pool_rank": 35
-          },
-          {
-            "pool_rank": 106,
-            "sha1": "b533153bb7544362",
-            "kept_pool_rank": 35
-          },
-          {
-            "pool_rank": 107,
-            "sha1": "c9a8a6617502018f",
-            "kept_pool_rank": 22
-          },
-          {
-            "pool_rank": 115,
-            "sha1": "23718d70dae23cf4",
-            "kept_pool_rank": 5
-          }
-        ],
-        "question_duplicates": [
-          {
-            "pool_rank": 102,
-            "question": "According to the report, which of the following statements are correct?",
-            "kept_pool_rank": 62
-          }
-        ]
-      },
-      "candidates": 106,
-      "selected": 20,
-      "selected_targets": [
-        {
-          "target_id": "tgt-knowledge_qa-000",
-          "pool_rank": 10,
-          "context_sha1": "8baaa4f3a024f888"
-        },
-        {
-          "target_id": "tgt-knowledge_qa-001",
-          "pool_rank": 7,
-          "context_sha1": "4019c253299d329e"
-        },
-        {
-          "target_id": "tgt-knowledge_qa-002",
-          "pool_rank": 67,
-          "context_sha1": "bdaac022b6b32b49"
-        },
-        {
-          "target_id": "tgt-knowledge_qa-003",
-          "pool_rank": 26,
-          "context_sha1": "bee86e7fe9188be9"
-        },
-        {
-          "target_id": "tgt-knowledge_qa-004",
-          "pool_rank": 104,
-          "context_sha1": "11ce99b89a869c63"
-        },
-        {
-          "target_id": "tgt-knowledge_qa-005",
-          "pool_rank": 35,
-          "context_sha1": "b533153bb7544362"
-        },
-        {
-          "target_id": "tgt-knowledge_qa-006",
-          "pool_rank": 69,
-          "context_sha1": "40c2a8bf89015032"
-        },
-        {
-          "target_id": "tgt-knowledge_qa-007",
-          "pool_rank": 92,
-          "context_sha1": "89b91ab35741010f"
-        },
-        {
-          "target_id": "tgt-knowledge_qa-008",
-          "pool_rank": 89,
-          "context_sha1": "e0b8499d049adf9a"
-        },
-        {
-          "target_id": "tgt-knowledge_qa-009",
-          "pool_rank": 4,
-          "context_sha1": "c1ec3888bc21f572"
-        },
-        {
-          "target_id": "tgt-knowledge_qa-010",
-          "pool_rank": 64,
-          "context_sha1": "3b709d440b95b7d4"
-        },
-        {
-          "target_id": "tgt-knowledge_qa-011",
-          "pool_rank": 5,
-          "context_sha1": "23718d70dae23cf4"
-        },
-        {
-          "target_id": "tgt-knowledge_qa-012",
-          "pool_rank": 58,
-          "context_sha1": "885552466393ab67"
-        },
-        {
-          "target_id": "tgt-knowledge_qa-013",
-          "pool_rank": 52,
-          "context_sha1": "a32cfe702d58ff7e"
-        },
-        {
-          "target_id": "tgt-knowledge_qa-014",
-          "pool_rank": 99,
-          "context_sha1": "7083612c3937a0ed"
-        },
-        {
-          "target_id": "tgt-knowledge_qa-015",
-          "pool_rank": 16,
-          "context_sha1": "ed75a8a1a2ff5e85"
-        },
-        {
-          "target_id": "tgt-knowledge_qa-016",
-          "pool_rank": 22,
-          "context_sha1": "c9a8a6617502018f"
-        },
-        {
-          "target_id": "tgt-knowledge_qa-017",
-          "pool_rank": 28,
-          "context_sha1": "ac562461c78ea7a4"
-        },
-        {
-          "target_id": "tgt-knowledge_qa-018",
-          "pool_rank": 71,
-          "context_sha1": "64fcdd2078aff2f4"
-        },
-        {
-          "target_id": "tgt-knowledge_qa-019",
-          "pool_rank": 34,
-          "context_sha1": "5abe3c27b29ed821"
-        }
-      ],
-      "skipped": [
-        {
-          "pool_rank": 105,
-          "reason": "question_too_long",
-          "detail": "question+options+prefix=855 tokens > 614 (1K context would not fit)"
-        },
-        {
-          "pool_rank": 81,
-          "reason": "32k_unreachable",
-          "detail": "best total=28462 tokens; document too short for 32K"
-        }
-      ],
-      "skip_reasons": {
-        "32k_unreachable": 1,
-        "question_too_long": 1
-      },
-      "unique_1k_bodies": 20
-    },
-    "long_context": {
-      "dataset": "longbench_v2:Long Structured Data Understanding",
-      "workload": "longbench_v2:Long Structured Data Understanding",
-      "seed": 20261106,
-      "pool_filter": "raw context >= 120000 characters",
-      "domain_rows": 33,
-      "source_rows": 32,
-      "dedup": {
-        "context_duplicates_removed": 1,
-        "question_duplicates_removed": 0,
-        "context_duplicates": [
-          {
-            "pool_rank": 9,
-            "sha1": "dbd1b8d5fcec4da5",
-            "kept_pool_rank": 6
-          }
-        ],
-        "question_duplicates": []
-      },
-      "candidates": 31,
-      "selected": 20,
-      "selected_targets": [
-        {
-          "target_id": "tgt-long_context-000",
-          "pool_rank": 30,
-          "context_sha1": "28e8dd79c0f3a384"
-        },
-        {
-          "target_id": "tgt-long_context-001",
-          "pool_rank": 18,
-          "context_sha1": "162f4e3dd68ba4b3"
-        },
-        {
-          "target_id": "tgt-long_context-002",
-          "pool_rank": 12,
-          "context_sha1": "e3b8148b1abaf790"
-        },
-        {
-          "target_id": "tgt-long_context-003",
-          "pool_rank": 17,
-          "context_sha1": "a1c6a11b90b04ef6"
-        },
-        {
-          "target_id": "tgt-long_context-004",
-          "pool_rank": 24,
-          "context_sha1": "034e67e6257c42fa"
-        },
-        {
-          "target_id": "tgt-long_context-005",
-          "pool_rank": 14,
-          "context_sha1": "46057dcd424fdfe1"
-        },
-        {
-          "target_id": "tgt-long_context-006",
-          "pool_rank": 19,
-          "context_sha1": "2e512e2ac93dcb98"
-        },
-        {
-          "target_id": "tgt-long_context-007",
-          "pool_rank": 5,
-          "context_sha1": "fe0490ab1f742ee5"
-        },
-        {
-          "target_id": "tgt-long_context-008",
-          "pool_rank": 15,
-          "context_sha1": "8ad0fac0e73bf506"
-        },
-        {
-          "target_id": "tgt-long_context-009",
-          "pool_rank": 10,
-          "context_sha1": "5a3d8dd8e0e5fdd3"
-        },
-        {
-          "target_id": "tgt-long_context-010",
-          "pool_rank": 16,
-          "context_sha1": "af21ae0b26c70547"
-        },
-        {
-          "target_id": "tgt-long_context-011",
-          "pool_rank": 29,
-          "context_sha1": "4153251cbc067578"
-        },
-        {
-          "target_id": "tgt-long_context-012",
-          "pool_rank": 28,
-          "context_sha1": "6859b5679a27dcbf"
-        },
-        {
-          "target_id": "tgt-long_context-013",
-          "pool_rank": 22,
-          "context_sha1": "1f52d8826ac708a3"
-        },
-        {
-          "target_id": "tgt-long_context-014",
-          "pool_rank": 6,
-          "context_sha1": "dbd1b8d5fcec4da5"
-        },
-        {
-          "target_id": "tgt-long_context-015",
-          "pool_rank": 3,
-          "context_sha1": "76b063d1af7d8b6f"
-        },
-        {
-          "target_id": "tgt-long_context-016",
-          "pool_rank": 31,
-          "context_sha1": "e94539451a24e3cc"
-        },
-        {
-          "target_id": "tgt-long_context-017",
-          "pool_rank": 26,
-          "context_sha1": "3e9b12a7c180c8f1"
-        },
-        {
-          "target_id": "tgt-long_context-018",
-          "pool_rank": 8,
-          "context_sha1": "61e3de3d1fe6cda9"
-        },
-        {
-          "target_id": "tgt-long_context-019",
-          "pool_rank": 13,
-          "context_sha1": "91bd618bf65d1e7e"
-        }
-      ],
-      "skipped": [
-        {
-          "pool_rank": 27,
-          "reason": "1k_low_token_density",
-          "detail": "best total=1886 tokens; document slicing cannot reach 1K"
-        },
-        {
-          "pool_rank": 23,
-          "reason": "1k_low_token_density",
-          "detail": "best total=711 tokens; document slicing cannot reach 1K"
-        },
-        {
-          "pool_rank": 25,
-          "reason": "question_too_long",
-          "detail": "question+options+prefix=1014 tokens > 614 (1K context would not fit)"
-        }
-      ],
-      "skip_reasons": {
-        "1k_low_token_density": 2,
-        "question_too_long": 1
-      },
-      "unique_1k_bodies": 15,
-      "known_1k_prefix_collisions": {
-        "unique_1k_bodies": 15,
-        "selected_targets": 20,
-        "reason": "upstream LongBench v2 Long Structured Data documents share a 2,651-character boilerplate prefix; the eligible pool (33 rows, 31 after dedupe) cannot supply 20 distinct 1K bodies, so 5 of the 20 1K bodies are byte-identical. This is an upstream property, not a sampling bug; the target count stays 20 by design."
-      }
-    },
-    "coding": {
-      "dataset": "longbench_v2:Code Repository Understanding",
-      "workload": "longbench_v2:Code Repository Understanding (reading, not generation)",
-      "seed": 20261106,
-      "pool_filter": "raw context >= 120000 characters",
-      "domain_rows": 50,
-      "source_rows": 48,
-      "dedup": {
-        "context_duplicates_removed": 1,
-        "question_duplicates_removed": 0,
-        "context_duplicates": [
-          {
-            "pool_rank": 30,
-            "sha1": "053bf8c4025ba4f4",
-            "kept_pool_rank": 29
-          }
-        ],
-        "question_duplicates": []
-      },
-      "candidates": 47,
-      "selected": 20,
-      "selected_targets": [
-        {
-          "target_id": "tgt-coding-000",
-          "pool_rank": 14,
-          "context_sha1": "c1600b9a31c44c0a"
-        },
-        {
-          "target_id": "tgt-coding-001",
-          "pool_rank": 29,
-          "context_sha1": "053bf8c4025ba4f4"
-        },
-        {
-          "target_id": "tgt-coding-002",
-          "pool_rank": 27,
-          "context_sha1": "b5afeaa4a0bd30d3"
-        },
-        {
-          "target_id": "tgt-coding-003",
-          "pool_rank": 19,
-          "context_sha1": "3cbc5af73f1f4c9e"
-        },
-        {
-          "target_id": "tgt-coding-004",
-          "pool_rank": 41,
-          "context_sha1": "5ed9fa2025c3264d"
-        },
-        {
-          "target_id": "tgt-coding-005",
-          "pool_rank": 34,
-          "context_sha1": "2a160eb48de944d2"
-        },
-        {
-          "target_id": "tgt-coding-006",
-          "pool_rank": 33,
-          "context_sha1": "7918e2b5687f9eea"
-        },
-        {
-          "target_id": "tgt-coding-007",
-          "pool_rank": 12,
-          "context_sha1": "df8c863213ca3f69"
-        },
-        {
-          "target_id": "tgt-coding-008",
-          "pool_rank": 26,
-          "context_sha1": "d94c465f1e786f40"
-        },
-        {
-          "target_id": "tgt-coding-009",
-          "pool_rank": 32,
-          "context_sha1": "b9d110c63be9f530"
-        },
-        {
-          "target_id": "tgt-coding-010",
-          "pool_rank": 6,
-          "context_sha1": "cf4b22412160ee27"
-        },
-        {
-          "target_id": "tgt-coding-011",
-          "pool_rank": 31,
-          "context_sha1": "964a1ee154b3574a"
-        },
-        {
-          "target_id": "tgt-coding-012",
-          "pool_rank": 36,
-          "context_sha1": "bfd7927fd53bb4bf"
-        },
-        {
-          "target_id": "tgt-coding-013",
-          "pool_rank": 46,
-          "context_sha1": "a9d1084eb3043c91"
-        },
-        {
-          "target_id": "tgt-coding-014",
-          "pool_rank": 11,
-          "context_sha1": "2aa275b04617b104"
-        },
-        {
-          "target_id": "tgt-coding-015",
-          "pool_rank": 23,
-          "context_sha1": "a2279e786ca6b0f1"
-        },
-        {
-          "target_id": "tgt-coding-016",
-          "pool_rank": 43,
-          "context_sha1": "6cdaa6789804457c"
-        },
-        {
-          "target_id": "tgt-coding-017",
-          "pool_rank": 39,
-          "context_sha1": "f08795aba1064459"
-        },
-        {
-          "target_id": "tgt-coding-018",
-          "pool_rank": 28,
-          "context_sha1": "a5ac57208195c745"
-        },
-        {
-          "target_id": "tgt-coding-019",
-          "pool_rank": 2,
-          "context_sha1": "387df3c5982199ee"
-        }
-      ],
-      "skipped": [],
-      "skip_reasons": {},
-      "unique_1k_bodies": 20
-    },
-    "search_agent": {
-      "dataset": "longbench_v2:Multi-Document QA",
-      "workload": "longbench_v2:Multi-Document QA (single request; tool schemas only)",
-      "seed": 20261106,
-      "pool_filter": "raw context >= 120000 characters",
-      "domain_rows": 125,
-      "source_rows": 94,
-      "dedup": {
-        "context_duplicates_removed": 0,
-        "question_duplicates_removed": 0,
-        "context_duplicates": [],
-        "question_duplicates": []
-      },
-      "candidates": 94,
-      "selected": 20,
-      "selected_targets": [
-        {
-          "target_id": "tgt-search_agent-000",
-          "pool_rank": 54,
-          "context_sha1": "710e96f39392e38d"
-        },
-        {
-          "target_id": "tgt-search_agent-001",
-          "pool_rank": 22,
-          "context_sha1": "f31820f6f3e0f516"
-        },
-        {
-          "target_id": "tgt-search_agent-002",
-          "pool_rank": 77,
-          "context_sha1": "36ee3fa277e58f85"
-        },
-        {
-          "target_id": "tgt-search_agent-003",
-          "pool_rank": 16,
-          "context_sha1": "2861b01441b3bdb0"
-        },
-        {
-          "target_id": "tgt-search_agent-004",
-          "pool_rank": 48,
-          "context_sha1": "968290f946ba4451"
-        },
-        {
-          "target_id": "tgt-search_agent-005",
-          "pool_rank": 62,
-          "context_sha1": "54574f2fb3f31921"
-        },
-        {
-          "target_id": "tgt-search_agent-006",
-          "pool_rank": 53,
-          "context_sha1": "6f2ba887f176ce90"
-        },
-        {
-          "target_id": "tgt-search_agent-007",
-          "pool_rank": 19,
-          "context_sha1": "854efc7abdc53b21"
-        },
-        {
-          "target_id": "tgt-search_agent-008",
-          "pool_rank": 33,
-          "context_sha1": "72b9a37d48de763b"
-        },
-        {
-          "target_id": "tgt-search_agent-009",
-          "pool_rank": 65,
-          "context_sha1": "72ca8abececb07ac"
-        },
-        {
-          "target_id": "tgt-search_agent-010",
-          "pool_rank": 24,
-          "context_sha1": "96dcb3859e8b7ea1"
-        },
-        {
-          "target_id": "tgt-search_agent-011",
-          "pool_rank": 55,
-          "context_sha1": "80d26667bf22afd4"
-        },
-        {
-          "target_id": "tgt-search_agent-012",
-          "pool_rank": 52,
-          "context_sha1": "54557cd4ad30a4e1"
-        },
-        {
-          "target_id": "tgt-search_agent-013",
-          "pool_rank": 60,
-          "context_sha1": "b43127e7ef7d6f5f"
-        },
-        {
-          "target_id": "tgt-search_agent-014",
-          "pool_rank": 85,
-          "context_sha1": "6824e07867a40858"
-        },
-        {
-          "target_id": "tgt-search_agent-015",
-          "pool_rank": 71,
-          "context_sha1": "bb57f36830240c55"
-        },
-        {
-          "target_id": "tgt-search_agent-016",
-          "pool_rank": 92,
-          "context_sha1": "6e625ddbee1a74ca"
-        },
-        {
-          "target_id": "tgt-search_agent-017",
-          "pool_rank": 86,
-          "context_sha1": "7951ce1b2c13ae23"
-        },
-        {
-          "target_id": "tgt-search_agent-018",
-          "pool_rank": 47,
-          "context_sha1": "dbc7647ad233167f"
-        },
-        {
-          "target_id": "tgt-search_agent-019",
-          "pool_rank": 37,
-          "context_sha1": "759f58a72c612f3d"
-        }
-      ],
-      "skipped": [
-        {
-          "pool_rank": 31,
-          "reason": "question_too_long",
-          "detail": "question+options+prefix=667 tokens > 614 (1K context would not fit)"
-        }
-      ],
-      "skip_reasons": {
-        "question_too_long": 1
-      },
-      "unique_1k_bodies": 20
-    },
-    "chinese_long_context": {
-      "dataset": "longbench_v1:dureader",
-      "workload": "longbench_v1:dureader",
-      "seed": 20261111,
-      "pool_filter": "all dureader rows (200)",
-      "domain_rows": 200,
-      "source_rows": 200,
-      "dedup": {
-        "context_duplicates_removed": 0,
-        "question_duplicates_removed": 0,
-        "context_duplicates": [],
-        "question_duplicates": []
-      },
-      "candidates": 200,
-      "selected": 20,
-      "selected_targets": [
-        {
-          "target_id": "tgt-chinese_long_context-000",
-          "pool_rank": 196,
-          "context_sha1": "66e130e331b8899d"
-        },
-        {
-          "target_id": "tgt-chinese_long_context-001",
-          "pool_rank": 164,
-          "context_sha1": "e097de5345c97014"
-        },
-        {
-          "target_id": "tgt-chinese_long_context-002",
-          "pool_rank": 150,
-          "context_sha1": "c151d4be4804c47f"
-        },
-        {
-          "target_id": "tgt-chinese_long_context-003",
-          "pool_rank": 151,
-          "context_sha1": "5ee3ee19f29611da"
-        },
-        {
-          "target_id": "tgt-chinese_long_context-004",
-          "pool_rank": 6,
-          "context_sha1": "d2de560c7c044235"
-        },
-        {
-          "target_id": "tgt-chinese_long_context-005",
-          "pool_rank": 187,
-          "context_sha1": "658ee0b06945af2d"
-        },
-        {
-          "target_id": "tgt-chinese_long_context-006",
-          "pool_rank": 110,
-          "context_sha1": "aed6a7a5688a4c4c"
-        },
-        {
-          "target_id": "tgt-chinese_long_context-007",
-          "pool_rank": 62,
-          "context_sha1": "31143541c5ecc3b6"
-        },
-        {
-          "target_id": "tgt-chinese_long_context-008",
-          "pool_rank": 38,
-          "context_sha1": "ca97bd9bab45405f"
-        },
-        {
-          "target_id": "tgt-chinese_long_context-009",
-          "pool_rank": 5,
-          "context_sha1": "54a09bfe7beca3d3"
-        },
-        {
-          "target_id": "tgt-chinese_long_context-010",
-          "pool_rank": 98,
-          "context_sha1": "803a04dd2643f9c1"
-        },
-        {
-          "target_id": "tgt-chinese_long_context-011",
-          "pool_rank": 181,
-          "context_sha1": "8314ed395d166db9"
-        },
-        {
-          "target_id": "tgt-chinese_long_context-012",
-          "pool_rank": 58,
-          "context_sha1": "b4abb4352da39cd6"
-        },
-        {
-          "target_id": "tgt-chinese_long_context-013",
-          "pool_rank": 3,
-          "context_sha1": "30ac16a7684946b0"
-        },
-        {
-          "target_id": "tgt-chinese_long_context-014",
-          "pool_rank": 118,
-          "context_sha1": "f5eaf4da1b0b87eb"
-        },
-        {
-          "target_id": "tgt-chinese_long_context-015",
-          "pool_rank": 146,
-          "context_sha1": "f74b5433364bc34b"
-        },
-        {
-          "target_id": "tgt-chinese_long_context-016",
-          "pool_rank": 43,
-          "context_sha1": "6475739b2e1562e5"
-        },
-        {
-          "target_id": "tgt-chinese_long_context-017",
-          "pool_rank": 148,
-          "context_sha1": "9a94f135f36e59f1"
-        },
-        {
-          "target_id": "tgt-chinese_long_context-018",
-          "pool_rank": 45,
-          "context_sha1": "443116ab1a34ac1e"
-        },
-        {
-          "target_id": "tgt-chinese_long_context-019",
-          "pool_rank": 30,
-          "context_sha1": "245c485207728dfc"
-        }
-      ],
-      "skipped": [],
-      "skip_reasons": {}
-    },
-    "instruction_following": {
-      "dataset": "ifeval",
-      "workload": "ifeval:target instruction + same-set reference pool",
-      "seed": 20261108,
-      "pool_filter": null,
-      "domain_rows": 541,
-      "source_rows": 541,
-      "dedup": {
-        "context_duplicates_removed": 0,
-        "question_duplicates_removed": 0,
-        "context_duplicates": [],
-        "question_duplicates": []
-      },
-      "candidates": 541,
-      "selected": 20,
-      "selected_targets": [
-        {
-          "target_id": "tgt-instruction_following-000",
-          "pool_rank": 520,
-          "reference_rotation_start": 0,
-          "reference_pool_cycles": 2
-        },
-        {
-          "target_id": "tgt-instruction_following-001",
-          "pool_rank": 349,
-          "reference_rotation_start": 37,
-          "reference_pool_cycles": 2
-        },
-        {
-          "target_id": "tgt-instruction_following-002",
-          "pool_rank": 170,
-          "reference_rotation_start": 74,
-          "reference_pool_cycles": 2
-        },
-        {
-          "target_id": "tgt-instruction_following-003",
-          "pool_rank": 74,
-          "reference_rotation_start": 111,
-          "reference_pool_cycles": 2
-        },
-        {
-          "target_id": "tgt-instruction_following-004",
-          "pool_rank": 373,
-          "reference_rotation_start": 148,
-          "reference_pool_cycles": 2
-        },
-        {
-          "target_id": "tgt-instruction_following-005",
-          "pool_rank": 287,
-          "reference_rotation_start": 185,
-          "reference_pool_cycles": 2
-        },
-        {
-          "target_id": "tgt-instruction_following-006",
-          "pool_rank": 310,
-          "reference_rotation_start": 222,
-          "reference_pool_cycles": 2
-        },
-        {
-          "target_id": "tgt-instruction_following-007",
-          "pool_rank": 412,
-          "reference_rotation_start": 259,
-          "reference_pool_cycles": 2
-        },
-        {
-          "target_id": "tgt-instruction_following-008",
-          "pool_rank": 495,
-          "reference_rotation_start": 296,
-          "reference_pool_cycles": 2
-        },
-        {
-          "target_id": "tgt-instruction_following-009",
-          "pool_rank": 143,
-          "reference_rotation_start": 333,
-          "reference_pool_cycles": 2
-        },
-        {
-          "target_id": "tgt-instruction_following-010",
-          "pool_rank": 189,
-          "reference_rotation_start": 370,
-          "reference_pool_cycles": 2
-        },
-        {
-          "target_id": "tgt-instruction_following-011",
-          "pool_rank": 529,
-          "reference_rotation_start": 407,
-          "reference_pool_cycles": 2
-        },
-        {
-          "target_id": "tgt-instruction_following-012",
-          "pool_rank": 264,
-          "reference_rotation_start": 444,
-          "reference_pool_cycles": 2
-        },
-        {
-          "target_id": "tgt-instruction_following-013",
-          "pool_rank": 453,
-          "reference_rotation_start": 481,
-          "reference_pool_cycles": 2
-        },
-        {
-          "target_id": "tgt-instruction_following-014",
-          "pool_rank": 71,
-          "reference_rotation_start": 518,
-          "reference_pool_cycles": 2
-        },
-        {
-          "target_id": "tgt-instruction_following-015",
-          "pool_rank": 148,
-          "reference_rotation_start": 15,
-          "reference_pool_cycles": 2
-        },
-        {
-          "target_id": "tgt-instruction_following-016",
-          "pool_rank": 42,
-          "reference_rotation_start": 52,
-          "reference_pool_cycles": 2
-        },
-        {
-          "target_id": "tgt-instruction_following-017",
-          "pool_rank": 19,
-          "reference_rotation_start": 89,
-          "reference_pool_cycles": 2
-        },
-        {
-          "target_id": "tgt-instruction_following-018",
-          "pool_rank": 433,
-          "reference_rotation_start": 126,
-          "reference_pool_cycles": 2
-        },
-        {
-          "target_id": "tgt-instruction_following-019",
-          "pool_rank": 266,
-          "reference_rotation_start": 163,
-          "reference_pool_cycles": 2
-        }
-      ],
-      "skipped": [],
-      "skip_reasons": {}
-    },
-    "math_logic": {
-      "dataset": "gsm8k",
-      "workload": "gsm8k:target problem + solved examples",
-      "seed": 20261109,
-      "pool_filter": null,
-      "domain_rows": 1319,
-      "source_rows": 1319,
-      "dedup": {
-        "context_duplicates_removed": 0,
-        "question_duplicates_removed": 0,
-        "context_duplicates": [],
-        "question_duplicates": []
-      },
-      "candidates": 1319,
-      "selected": 20,
-      "selected_targets": [
-        {
-          "target_id": "tgt-math_logic-000",
-          "pool_rank": 231,
-          "example_rotation_start": 0
-        },
-        {
-          "target_id": "tgt-math_logic-001",
-          "pool_rank": 229,
-          "example_rotation_start": 41
-        },
-        {
-          "target_id": "tgt-math_logic-002",
-          "pool_rank": 610,
-          "example_rotation_start": 82
-        },
-        {
-          "target_id": "tgt-math_logic-003",
-          "pool_rank": 776,
-          "example_rotation_start": 123
-        },
-        {
-          "target_id": "tgt-math_logic-004",
-          "pool_rank": 1235,
-          "example_rotation_start": 164
-        },
-        {
-          "target_id": "tgt-math_logic-005",
-          "pool_rank": 10,
-          "example_rotation_start": 205
-        },
-        {
-          "target_id": "tgt-math_logic-006",
-          "pool_rank": 392,
-          "example_rotation_start": 246
-        },
-        {
-          "target_id": "tgt-math_logic-007",
-          "pool_rank": 949,
-          "example_rotation_start": 287
-        },
-        {
-          "target_id": "tgt-math_logic-008",
-          "pool_rank": 565,
-          "example_rotation_start": 328
-        },
-        {
-          "target_id": "tgt-math_logic-009",
-          "pool_rank": 1274,
-          "example_rotation_start": 369
-        },
-        {
-          "target_id": "tgt-math_logic-010",
-          "pool_rank": 1148,
-          "example_rotation_start": 410
-        },
-        {
-          "target_id": "tgt-math_logic-011",
-          "pool_rank": 233,
-          "example_rotation_start": 451
-        },
-        {
-          "target_id": "tgt-math_logic-012",
-          "pool_rank": 1169,
-          "example_rotation_start": 492
-        },
-        {
-          "target_id": "tgt-math_logic-013",
-          "pool_rank": 1012,
-          "example_rotation_start": 533
-        },
-        {
-          "target_id": "tgt-math_logic-014",
-          "pool_rank": 543,
-          "example_rotation_start": 574
-        },
-        {
-          "target_id": "tgt-math_logic-015",
-          "pool_rank": 934,
-          "example_rotation_start": 615
-        },
-        {
-          "target_id": "tgt-math_logic-016",
-          "pool_rank": 907,
-          "example_rotation_start": 656
-        },
-        {
-          "target_id": "tgt-math_logic-017",
-          "pool_rank": 221,
-          "example_rotation_start": 697
-        },
-        {
-          "target_id": "tgt-math_logic-018",
-          "pool_rank": 258,
-          "example_rotation_start": 738
-        },
-        {
-          "target_id": "tgt-math_logic-019",
-          "pool_rank": 1178,
-          "example_rotation_start": 779
-        }
-      ],
-      "skipped": [],
-      "skip_reasons": {}
-    },
-    "general_agent": {
-      "dataset": "bfcl",
-      "workload": "bfcl:single request + whole-function catalogue prefix (target functions first)",
-      "seed": 20261110,
-      "pool_filter": "BFCL v4 single-turn request files (simple_python/multiple/parallel)",
-      "domain_rows": 800,
-      "source_rows": 800,
-      "dedup": {
-        "context_duplicates_removed": 0,
-        "question_duplicates_removed": 0,
-        "context_duplicates": [],
-        "question_duplicates": []
-      },
-      "candidates": 800,
-      "selected": 20,
-      "selected_targets": [
-        {
-          "target_id": "tgt-general_agent-000",
-          "pool_rank": 251,
-          "bfcl_id": "simple_python_251",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "body_catalog_functions": {
-            "1k": 7,
-            "8k": 58,
-            "32k": 229
-          },
-          "own_functions_visible": {
-            "1k": 1,
-            "8k": 1,
-            "32k": 1
-          }
-        },
-        {
-          "target_id": "tgt-general_agent-001",
-          "pool_rank": 167,
-          "bfcl_id": "simple_python_167",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "body_catalog_functions": {
-            "1k": 7,
-            "8k": 58,
-            "32k": 229
-          },
-          "own_functions_visible": {
-            "1k": 1,
-            "8k": 1,
-            "32k": 1
-          }
-        },
-        {
-          "target_id": "tgt-general_agent-002",
-          "pool_rank": 82,
-          "bfcl_id": "simple_python_82",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "body_catalog_functions": {
-            "1k": 7,
-            "8k": 59,
-            "32k": 229
-          },
-          "own_functions_visible": {
-            "1k": 1,
-            "8k": 1,
-            "32k": 1
-          }
-        },
-        {
-          "target_id": "tgt-general_agent-003",
-          "pool_rank": 334,
-          "bfcl_id": "simple_python_334",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "body_catalog_functions": {
-            "1k": 6,
-            "8k": 57,
-            "32k": 228
-          },
-          "own_functions_visible": {
-            "1k": 1,
-            "8k": 1,
-            "32k": 1
-          }
-        },
-        {
-          "target_id": "tgt-general_agent-004",
-          "pool_rank": 80,
-          "bfcl_id": "simple_python_80",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "body_catalog_functions": {
-            "1k": 6,
-            "8k": 57,
-            "32k": 228
-          },
-          "own_functions_visible": {
-            "1k": 1,
-            "8k": 1,
-            "32k": 1
-          }
-        },
-        {
-          "target_id": "tgt-general_agent-005",
-          "pool_rank": 11,
-          "bfcl_id": "simple_python_11",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "body_catalog_functions": {
-            "1k": 7,
-            "8k": 58,
-            "32k": 229
-          },
-          "own_functions_visible": {
-            "1k": 1,
-            "8k": 1,
-            "32k": 1
-          }
-        },
-        {
-          "target_id": "tgt-general_agent-006",
-          "pool_rank": 197,
-          "bfcl_id": "simple_python_197",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "body_catalog_functions": {
-            "1k": 7,
-            "8k": 58,
-            "32k": 229
-          },
-          "own_functions_visible": {
-            "1k": 1,
-            "8k": 1,
-            "32k": 1
-          }
-        },
-        {
-          "target_id": "tgt-general_agent-007",
-          "pool_rank": 324,
-          "bfcl_id": "simple_python_324",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "body_catalog_functions": {
-            "1k": 7,
-            "8k": 58,
-            "32k": 229
-          },
-          "own_functions_visible": {
-            "1k": 1,
-            "8k": 1,
-            "32k": 1
-          }
-        },
-        {
-          "target_id": "tgt-general_agent-008",
-          "pool_rank": 72,
-          "bfcl_id": "simple_python_72",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "body_catalog_functions": {
-            "1k": 6,
-            "8k": 57,
-            "32k": 228
-          },
-          "own_functions_visible": {
-            "1k": 1,
-            "8k": 1,
-            "32k": 1
-          }
-        },
-        {
-          "target_id": "tgt-general_agent-009",
-          "pool_rank": 137,
-          "bfcl_id": "simple_python_137",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "body_catalog_functions": {
-            "1k": 6,
-            "8k": 57,
-            "32k": 228
-          },
-          "own_functions_visible": {
-            "1k": 1,
-            "8k": 1,
-            "32k": 1
-          }
-        },
-        {
-          "target_id": "tgt-general_agent-010",
-          "pool_rank": 9,
-          "bfcl_id": "multiple_9",
-          "category": "multiple",
-          "category_detail": "multiple",
-          "body_catalog_functions": {
-            "1k": 5,
-            "8k": 60,
-            "32k": 248
-          },
-          "own_functions_visible": {
-            "1k": 3,
-            "8k": 3,
-            "32k": 3
-          }
-        },
-        {
-          "target_id": "tgt-general_agent-011",
-          "pool_rank": 110,
-          "bfcl_id": "multiple_110",
-          "category": "multiple",
-          "category_detail": "multiple",
-          "body_catalog_functions": {
-            "1k": 4,
-            "8k": 60,
-            "32k": 247
-          },
-          "own_functions_visible": {
-            "1k": 2,
-            "8k": 2,
-            "32k": 2
-          }
-        },
-        {
-          "target_id": "tgt-general_agent-012",
-          "pool_rank": 97,
-          "bfcl_id": "multiple_97",
-          "category": "multiple",
-          "category_detail": "multiple",
-          "body_catalog_functions": {
-            "1k": 4,
-            "8k": 60,
-            "32k": 248
-          },
-          "own_functions_visible": {
-            "1k": 2,
-            "8k": 2,
-            "32k": 2
-          }
-        },
-        {
-          "target_id": "tgt-general_agent-013",
-          "pool_rank": 29,
-          "bfcl_id": "multiple_29",
-          "category": "multiple",
-          "category_detail": "multiple",
-          "body_catalog_functions": {
-            "1k": 5,
-            "8k": 61,
-            "32k": 248
-          },
-          "own_functions_visible": {
-            "1k": 2,
-            "8k": 2,
-            "32k": 2
-          }
-        },
-        {
-          "target_id": "tgt-general_agent-014",
-          "pool_rank": 117,
-          "bfcl_id": "multiple_117",
-          "category": "multiple",
-          "category_detail": "multiple",
-          "body_catalog_functions": {
-            "1k": 3,
-            "8k": 58,
-            "32k": 246
-          },
-          "own_functions_visible": {
-            "1k": 3,
-            "8k": 3,
-            "32k": 3
-          }
-        },
-        {
-          "target_id": "tgt-general_agent-015",
-          "pool_rank": 58,
-          "bfcl_id": "parallel_58",
-          "category": "parallel",
-          "category_detail": "parallel",
-          "body_catalog_functions": {
-            "1k": 7,
-            "8k": 59,
-            "32k": 231
-          },
-          "own_functions_visible": {
-            "1k": 1,
-            "8k": 1,
-            "32k": 1
-          }
-        },
-        {
-          "target_id": "tgt-general_agent-016",
-          "pool_rank": 25,
-          "bfcl_id": "parallel_25",
-          "category": "parallel",
-          "category_detail": "parallel",
-          "body_catalog_functions": {
-            "1k": 7,
-            "8k": 59,
-            "32k": 231
-          },
-          "own_functions_visible": {
-            "1k": 1,
-            "8k": 1,
-            "32k": 1
-          }
-        },
-        {
-          "target_id": "tgt-general_agent-017",
-          "pool_rank": 18,
-          "bfcl_id": "parallel_18",
-          "category": "parallel",
-          "category_detail": "parallel",
-          "body_catalog_functions": {
-            "1k": 6,
-            "8k": 58,
-            "32k": 231
-          },
-          "own_functions_visible": {
-            "1k": 1,
-            "8k": 1,
-            "32k": 1
-          }
-        },
-        {
-          "target_id": "tgt-general_agent-018",
-          "pool_rank": 147,
-          "bfcl_id": "parallel_147",
-          "category": "parallel",
-          "category_detail": "parallel",
-          "body_catalog_functions": {
-            "1k": 6,
-            "8k": 58,
-            "32k": 230
-          },
-          "own_functions_visible": {
-            "1k": 1,
-            "8k": 1,
-            "32k": 1
-          }
-        },
-        {
-          "target_id": "tgt-general_agent-019",
-          "pool_rank": 101,
-          "bfcl_id": "parallel_101",
-          "category": "parallel",
-          "category_detail": "parallel",
-          "body_catalog_functions": {
-            "1k": 6,
-            "8k": 58,
-            "32k": 230
-          },
-          "own_functions_visible": {
-            "1k": 1,
-            "8k": 1,
-            "32k": 1
-          }
-        }
-      ],
-      "skipped": [
-        {
-          "pool_rank": 316,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=1119 tokens (bucket bounds (972, 1075))",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "bfcl_id": "simple_python_316"
-        },
-        {
-          "pool_rank": 81,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=1117 tokens (bucket bounds (972, 1075))",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "bfcl_id": "simple_python_81"
-        },
-        {
-          "pool_rank": 77,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=1108 tokens (bucket bounds (972, 1075))",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "bfcl_id": "simple_python_77"
-        },
-        {
-          "pool_rank": 390,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=1077 tokens (bucket bounds (972, 1075))",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "bfcl_id": "simple_python_390"
-        },
-        {
-          "pool_rank": 279,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=1088 tokens (bucket bounds (972, 1075))",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "bfcl_id": "simple_python_279"
-        },
-        {
-          "pool_rank": 30,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=939 tokens (bucket bounds (972, 1075))",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "bfcl_id": "simple_python_30"
-        },
-        {
-          "pool_rank": 308,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=1125 tokens (bucket bounds (972, 1075))",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "bfcl_id": "simple_python_308"
-        },
-        {
-          "pool_rank": 194,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=1172 tokens (bucket bounds (972, 1075))",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "bfcl_id": "simple_python_194"
-        },
-        {
-          "pool_rank": 127,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=969 tokens (bucket bounds (972, 1075))",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "bfcl_id": "simple_python_127"
-        },
-        {
-          "pool_rank": 98,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=1109 tokens (bucket bounds (972, 1075))",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "bfcl_id": "simple_python_98"
-        },
-        {
-          "pool_rank": 294,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=1107 tokens (bucket bounds (972, 1075))",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "bfcl_id": "simple_python_294"
-        },
-        {
-          "pool_rank": 378,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=1109 tokens (bucket bounds (972, 1075))",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "bfcl_id": "simple_python_378"
-        },
-        {
-          "pool_rank": 71,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=1114 tokens (bucket bounds (972, 1075))",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "bfcl_id": "simple_python_71"
-        },
-        {
-          "pool_rank": 83,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=955 tokens (bucket bounds (972, 1075))",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "bfcl_id": "simple_python_83"
-        },
-        {
-          "pool_rank": 57,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=952 tokens (bucket bounds (972, 1075))",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "bfcl_id": "simple_python_57"
-        },
-        {
-          "pool_rank": 170,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=954 tokens (bucket bounds (972, 1075))",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "bfcl_id": "simple_python_170"
-        },
-        {
-          "pool_rank": 365,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=1118 tokens (bucket bounds (972, 1075))",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "bfcl_id": "simple_python_365"
-        },
-        {
-          "pool_rank": 122,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=1117 tokens (bucket bounds (972, 1075))",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "bfcl_id": "simple_python_122"
-        },
-        {
-          "pool_rank": 16,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=1113 tokens (bucket bounds (972, 1075))",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "bfcl_id": "simple_python_16"
-        },
-        {
-          "pool_rank": 204,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=1117 tokens (bucket bounds (972, 1075))",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "bfcl_id": "simple_python_204"
-        },
-        {
-          "pool_rank": 209,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=923 tokens (bucket bounds (972, 1075))",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "bfcl_id": "simple_python_209"
-        },
-        {
-          "pool_rank": 234,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=951 tokens (bucket bounds (972, 1075))",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "bfcl_id": "simple_python_234"
-        },
-        {
-          "pool_rank": 309,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=1115 tokens (bucket bounds (972, 1075))",
-          "category": "simple",
-          "category_detail": "simple_python",
-          "bfcl_id": "simple_python_309"
-        },
-        {
-          "pool_rank": 6,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=1228 tokens (bucket bounds (972, 1075))",
-          "category": "multiple",
-          "category_detail": "multiple",
-          "bfcl_id": "multiple_6"
-        },
-        {
-          "pool_rank": 26,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=1145 tokens (bucket bounds (972, 1075))",
-          "category": "multiple",
-          "category_detail": "multiple",
-          "bfcl_id": "multiple_26"
-        },
-        {
-          "pool_rank": 125,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=936 tokens (bucket bounds (972, 1075))",
-          "category": "multiple",
-          "category_detail": "multiple",
-          "bfcl_id": "multiple_125"
-        },
-        {
-          "pool_rank": 36,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=944 tokens (bucket bounds (972, 1075))",
-          "category": "parallel",
-          "category_detail": "parallel",
-          "bfcl_id": "parallel_36"
-        },
-        {
-          "pool_rank": 71,
-          "reason": "1k_infeasible",
-          "detail": "tools+request best total=952 tokens (bucket bounds (972, 1075))",
-          "category": "parallel",
-          "category_detail": "parallel",
-          "bfcl_id": "parallel_71"
-        }
-      ],
-      "skip_reasons": {
-        "1k_infeasible": 28
-      },
-      "category_pool": {
-        "simple_python": 400,
-        "multiple": 200,
-        "parallel": 200
-      },
-      "category_quota": {
-        "simple_python": 10,
-        "multiple": 5,
-        "parallel": 5
-      },
-      "category_catalog_functions": {
-        "simple_python": 370,
-        "multiple": 443,
-        "parallel": 186
-      },
-      "catalog_universe_functions": 642,
-      "category_skipped": {
-        "multiple": 3,
-        "parallel": 2,
-        "simple": 23
-      },
-      "category_selected": {
-        "multiple": 5,
-        "parallel": 5,
-        "simple": 10
-      }
-    }
+  "default_run": {
+    "measured_requests": 240,
+    "cells": 24
   },
   "stats": {
-    "chinese_long_context|1k": {
-      "n": 20,
-      "constructed": 0,
-      "dataset": "longbench_v1:dureader",
-      "tokens_min": 1000,
-      "tokens_median": 1017,
-      "tokens_max": 1032,
-      "tokens_mean": 1016.2,
-      "langs": [
-        "zh"
-      ]
-    },
-    "chinese_long_context|8k": {
-      "n": 20,
-      "constructed": 20,
-      "dataset": "longbench_v1:dureader",
-      "tokens_min": 8149,
-      "tokens_median": 8184,
-      "tokens_max": 8201,
-      "tokens_mean": 8182.3,
-      "langs": [
-        "zh"
-      ]
-    },
-    "chinese_long_context|32k": {
-      "n": 20,
-      "constructed": 20,
-      "dataset": "longbench_v1:dureader",
-      "tokens_min": 32746,
-      "tokens_median": 32761,
-      "tokens_max": 32779,
-      "tokens_mean": 32761.0,
-      "langs": [
-        "zh"
-      ]
-    },
-    "coding|1k": {
-      "n": 20,
-      "constructed": 0,
-      "dataset": "longbench_v2:Code Repository Understanding",
-      "tokens_min": 1005,
-      "tokens_median": 1016,
-      "tokens_max": 1030,
-      "tokens_mean": 1016.5,
-      "langs": [
-        "en"
-      ]
-    },
-    "coding|8k": {
-      "n": 20,
-      "constructed": 0,
-      "dataset": "longbench_v2:Code Repository Understanding",
-      "tokens_min": 8168,
-      "tokens_median": 8185,
-      "tokens_max": 8196,
-      "tokens_mean": 8184.2,
-      "langs": [
-        "en"
-      ]
-    },
-    "coding|32k": {
-      "n": 20,
-      "constructed": 0,
-      "dataset": "longbench_v2:Code Repository Understanding",
-      "tokens_min": 32752,
-      "tokens_median": 32761,
-      "tokens_max": 32763,
-      "tokens_mean": 32759.7,
-      "langs": [
-        "en"
-      ]
-    },
-    "general_agent|1k": {
-      "n": 20,
-      "constructed": 20,
-      "dataset": "bfcl",
-      "tokens_min": 978,
-      "tokens_median": 1025,
-      "tokens_max": 1072,
-      "tokens_mean": 1024.0,
-      "langs": [
-        "en"
-      ]
-    },
-    "general_agent|8k": {
-      "n": 20,
-      "constructed": 20,
-      "dataset": "bfcl",
-      "tokens_min": 8023,
-      "tokens_median": 8087,
-      "tokens_max": 8167,
-      "tokens_mean": 8092.6,
-      "langs": [
-        "en"
-      ]
-    },
-    "general_agent|32k": {
-      "n": 20,
-      "constructed": 20,
-      "dataset": "bfcl",
-      "tokens_min": 32617,
-      "tokens_median": 32699,
-      "tokens_max": 32759,
-      "tokens_mean": 32692.5,
-      "langs": [
-        "en"
-      ]
-    },
-    "instruction_following|1k": {
-      "n": 20,
-      "constructed": 20,
-      "dataset": "ifeval",
-      "tokens_min": 1015,
-      "tokens_median": 1016,
-      "tokens_max": 1017,
-      "tokens_mean": 1016.0,
-      "langs": [
-        "en"
-      ]
-    },
-    "instruction_following|8k": {
-      "n": 20,
-      "constructed": 20,
-      "dataset": "ifeval",
-      "tokens_min": 8183,
-      "tokens_median": 8184,
-      "tokens_max": 8185,
-      "tokens_mean": 8183.9,
-      "langs": [
-        "en"
-      ]
-    },
-    "instruction_following|32k": {
-      "n": 20,
-      "constructed": 20,
-      "dataset": "ifeval",
-      "tokens_min": 32759,
-      "tokens_median": 32760,
-      "tokens_max": 32762,
-      "tokens_mean": 32760.1,
-      "langs": [
-        "en"
-      ]
-    },
     "knowledge_qa|1k": {
-      "n": 20,
+      "n": 10,
       "constructed": 0,
       "dataset": "longbench_v2:Single-Document QA",
-      "tokens_min": 1015,
-      "tokens_median": 1017,
-      "tokens_max": 1019,
-      "tokens_mean": 1017.0,
+      "tokens_min": 1024,
+      "tokens_median": 1024,
+      "tokens_max": 1024,
+      "tokens_mean": 1024,
       "langs": [
         "en"
       ]
     },
     "knowledge_qa|8k": {
-      "n": 20,
+      "n": 10,
       "constructed": 0,
       "dataset": "longbench_v2:Single-Document QA",
-      "tokens_min": 8183,
-      "tokens_median": 8185,
-      "tokens_max": 8185,
-      "tokens_mean": 8184.4,
+      "tokens_min": 8192,
+      "tokens_median": 8192,
+      "tokens_max": 8192,
+      "tokens_mean": 8192,
       "langs": [
         "en"
       ]
     },
     "knowledge_qa|32k": {
-      "n": 20,
+      "n": 10,
       "constructed": 0,
       "dataset": "longbench_v2:Single-Document QA",
-      "tokens_min": 32758,
-      "tokens_median": 32761,
-      "tokens_max": 32762,
-      "tokens_mean": 32760.8,
+      "tokens_min": 32768,
+      "tokens_median": 32768,
+      "tokens_max": 32768,
+      "tokens_mean": 32768,
+      "langs": [
+        "en"
+      ]
+    },
+    "instruction_following|1k": {
+      "n": 10,
+      "constructed": 10,
+      "dataset": "ifeval",
+      "tokens_min": 1024,
+      "tokens_median": 1024,
+      "tokens_max": 1024,
+      "tokens_mean": 1024,
+      "langs": [
+        "en"
+      ]
+    },
+    "instruction_following|8k": {
+      "n": 10,
+      "constructed": 10,
+      "dataset": "ifeval",
+      "tokens_min": 8192,
+      "tokens_median": 8192,
+      "tokens_max": 8192,
+      "tokens_mean": 8192,
+      "langs": [
+        "en"
+      ]
+    },
+    "instruction_following|32k": {
+      "n": 10,
+      "constructed": 10,
+      "dataset": "ifeval",
+      "tokens_min": 32768,
+      "tokens_median": 32768,
+      "tokens_max": 32768,
+      "tokens_mean": 32768,
       "langs": [
         "en"
       ]
     },
     "long_context|1k": {
-      "n": 20,
+      "n": 10,
       "constructed": 0,
       "dataset": "longbench_v2:Long Structured Data Understanding",
-      "tokens_min": 1008,
-      "tokens_median": 1017,
-      "tokens_max": 1019,
-      "tokens_mean": 1016.5,
+      "tokens_min": 1024,
+      "tokens_median": 1024,
+      "tokens_max": 1024,
+      "tokens_mean": 1024,
       "langs": [
         "en"
       ]
     },
     "long_context|8k": {
-      "n": 20,
+      "n": 10,
       "constructed": 0,
       "dataset": "longbench_v2:Long Structured Data Understanding",
-      "tokens_min": 8166,
-      "tokens_median": 8185,
-      "tokens_max": 8189,
-      "tokens_mean": 8184.2,
+      "tokens_min": 8192,
+      "tokens_median": 8192,
+      "tokens_max": 8192,
+      "tokens_mean": 8192,
       "langs": [
         "en"
       ]
     },
     "long_context|32k": {
-      "n": 20,
+      "n": 10,
       "constructed": 0,
       "dataset": "longbench_v2:Long Structured Data Understanding",
-      "tokens_min": 32743,
-      "tokens_median": 32761,
-      "tokens_max": 32763,
-      "tokens_mean": 32760.0,
+      "tokens_min": 32768,
+      "tokens_median": 32768,
+      "tokens_max": 32768,
+      "tokens_mean": 32768,
       "langs": [
         "en"
       ]
     },
     "math_logic|1k": {
-      "n": 20,
-      "constructed": 20,
+      "n": 10,
+      "constructed": 10,
       "dataset": "gsm8k",
-      "tokens_min": 1012,
-      "tokens_median": 1016,
-      "tokens_max": 1018,
-      "tokens_mean": 1015.9,
+      "tokens_min": 1024,
+      "tokens_median": 1024,
+      "tokens_max": 1024,
+      "tokens_mean": 1024,
       "langs": [
         "en"
       ]
     },
     "math_logic|8k": {
-      "n": 20,
-      "constructed": 20,
+      "n": 10,
+      "constructed": 10,
       "dataset": "gsm8k",
-      "tokens_min": 8181,
-      "tokens_median": 8184,
-      "tokens_max": 8189,
-      "tokens_mean": 8184.1,
+      "tokens_min": 8192,
+      "tokens_median": 8192,
+      "tokens_max": 8192,
+      "tokens_mean": 8192,
       "langs": [
         "en"
       ]
     },
     "math_logic|32k": {
-      "n": 20,
-      "constructed": 20,
+      "n": 10,
+      "constructed": 10,
       "dataset": "gsm8k",
-      "tokens_min": 32753,
-      "tokens_median": 32760,
-      "tokens_max": 32766,
-      "tokens_mean": 32759.8,
+      "tokens_min": 32768,
+      "tokens_median": 32768,
+      "tokens_max": 32768,
+      "tokens_mean": 32768,
+      "langs": [
+        "en"
+      ]
+    },
+    "coding|1k": {
+      "n": 10,
+      "constructed": 0,
+      "dataset": "longbench_v2:Code Repository Understanding",
+      "tokens_min": 1023,
+      "tokens_median": 1024,
+      "tokens_max": 1024,
+      "tokens_mean": 1024,
+      "langs": [
+        "en"
+      ]
+    },
+    "coding|8k": {
+      "n": 10,
+      "constructed": 0,
+      "dataset": "longbench_v2:Code Repository Understanding",
+      "tokens_min": 8192,
+      "tokens_median": 8192,
+      "tokens_max": 8192,
+      "tokens_mean": 8192,
+      "langs": [
+        "en"
+      ]
+    },
+    "coding|32k": {
+      "n": 10,
+      "constructed": 0,
+      "dataset": "longbench_v2:Code Repository Understanding",
+      "tokens_min": 32768,
+      "tokens_median": 32768,
+      "tokens_max": 32768,
+      "tokens_mean": 32768,
+      "langs": [
+        "en"
+      ]
+    },
+    "general_agent|1k": {
+      "n": 10,
+      "constructed": 10,
+      "dataset": "bfcl_v4",
+      "tokens_min": 997,
+      "tokens_median": 1049,
+      "tokens_max": 1074,
+      "tokens_mean": 1040,
+      "langs": [
+        "en"
+      ]
+    },
+    "general_agent|8k": {
+      "n": 10,
+      "constructed": 10,
+      "dataset": "bfcl_v4",
+      "tokens_min": 8106,
+      "tokens_median": 8183,
+      "tokens_max": 8252,
+      "tokens_mean": 8181,
+      "langs": [
+        "en"
+      ]
+    },
+    "general_agent|32k": {
+      "n": 10,
+      "constructed": 10,
+      "dataset": "bfcl_v4",
+      "tokens_min": 32704,
+      "tokens_median": 32781,
+      "tokens_max": 32841,
+      "tokens_mean": 32774,
       "langs": [
         "en"
       ]
     },
     "search_agent|1k": {
-      "n": 20,
+      "n": 10,
       "constructed": 0,
       "dataset": "longbench_v2:Multi-Document QA",
-      "tokens_min": 1014,
-      "tokens_median": 1017,
-      "tokens_max": 1022,
-      "tokens_mean": 1016.6,
+      "tokens_min": 1024,
+      "tokens_median": 1024,
+      "tokens_max": 1024,
+      "tokens_mean": 1024,
       "langs": [
         "en"
       ]
     },
     "search_agent|8k": {
-      "n": 20,
+      "n": 10,
       "constructed": 0,
       "dataset": "longbench_v2:Multi-Document QA",
-      "tokens_min": 8183,
-      "tokens_median": 8185,
-      "tokens_max": 8188,
-      "tokens_mean": 8184.9,
+      "tokens_min": 8192,
+      "tokens_median": 8192,
+      "tokens_max": 8192,
+      "tokens_mean": 8192,
       "langs": [
         "en"
       ]
     },
     "search_agent|32k": {
-      "n": 20,
+      "n": 10,
       "constructed": 0,
       "dataset": "longbench_v2:Multi-Document QA",
-      "tokens_min": 32455,
-      "tokens_median": 32761,
-      "tokens_max": 32765,
-      "tokens_mean": 32745.6,
+      "tokens_min": 32767,
+      "tokens_median": 32768,
+      "tokens_max": 32768,
+      "tokens_mean": 32768,
       "langs": [
         "en"
       ]
-    }
-  },
-  "tokens_mean": 13980.0,
-  "totals": {
-    "rows": 480,
-    "cells": 24,
-    "per_cell": 20,
-    "measured_requests": 480,
-    "targets": 160
-  },
-  "default_run": {
-    "measured_requests": 480,
-    "cells": 24
-  },
-  "sets": {
-    "performance": {
-      "file": "testset.jsonl",
-      "per_bucket": 20,
-      "rows": 480
     },
-    "performance_10": {
-      "file": "testset_10.jsonl",
-      "per_bucket": 10,
-      "rows": 240,
-      "selection": "per scenario: sorted target_id[::2] (10 of 20), all three buckets kept"
+    "multilingual|1k": {
+      "n": 10,
+      "constructed": 10,
+      "dataset": "global_mmlu",
+      "tokens_min": 1023,
+      "tokens_median": 1024,
+      "tokens_max": 1024,
+      "tokens_mean": 1024,
+      "langs": [
+        "ar",
+        "de",
+        "es",
+        "fr",
+        "hi",
+        "ja",
+        "ko",
+        "pt",
+        "ru",
+        "vi"
+      ]
+    },
+    "multilingual|8k": {
+      "n": 10,
+      "constructed": 10,
+      "dataset": "global_mmlu",
+      "tokens_min": 8192,
+      "tokens_median": 8192,
+      "tokens_max": 8192,
+      "tokens_mean": 8192,
+      "langs": [
+        "ar",
+        "de",
+        "es",
+        "fr",
+        "hi",
+        "ja",
+        "ko",
+        "pt",
+        "ru",
+        "vi"
+      ]
+    },
+    "multilingual|32k": {
+      "n": 10,
+      "constructed": 10,
+      "dataset": "global_mmlu",
+      "tokens_min": 32767,
+      "tokens_median": 32768,
+      "tokens_max": 32768,
+      "tokens_mean": 32768,
+      "langs": [
+        "ar",
+        "de",
+        "es",
+        "fr",
+        "hi",
+        "ja",
+        "ko",
+        "pt",
+        "ru",
+        "vi"
+      ]
     }
-  }
+  },
+  "provenance": {
+    "longbench_v2": {
+      "name": "LongBench v2",
+      "source_url": "https://huggingface.co/datasets/zai-org/LongBench-v2",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "path": "longbench_v2/data.json",
+          "bytes": 465490535,
+          "sha256": "15d61c22d92c96900b3c4948b6aeea218d3214b676a65df48e7b8555604c7fe2"
+        }
+      ],
+      "used_by": [
+        "knowledge_qa",
+        "long_context",
+        "coding",
+        "search_agent"
+      ]
+    },
+    "ifeval": {
+      "name": "IFEval",
+      "source_url": "https://github.com/google-research/google-research/tree/master/instruction_following_eval",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "path": "ifeval/ifeval_input_data.jsonl",
+          "bytes": 207111,
+          "sha256": "6a85310ca8ce15eff755aa08a3a4ff931c7e273e7515ebb3c492ea85fd8288f2"
+        }
+      ],
+      "used_by": [
+        "instruction_following"
+      ]
+    },
+    "gsm8k": {
+      "name": "GSM8K",
+      "source_url": "https://huggingface.co/datasets/openai/gsm8k",
+      "license": "MIT",
+      "files": [
+        {
+          "path": "gsm8k/main/test-00000-of-00001.parquet",
+          "bytes": 419088,
+          "sha256": "ee7b8da9e381df27b9e3f7758a159ab2bdaa4dbaa910546cbbc47e0cb44e4f59"
+        }
+      ],
+      "used_by": [
+        "math_logic"
+      ]
+    },
+    "bfcl_v4": {
+      "name": "BFCL v4",
+      "source_url": "https://github.com/ShishirPatil/gorilla/tree/main/berkeley-function-call-leaderboard",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "path": "bfcl/BFCL_v4_simple_python.json",
+          "bytes": 283274,
+          "sha256": "82dd63ba502eb2520c6b5d1d9a5c4b590e03ff261565175561f6228a367d1991"
+        },
+        {
+          "path": "bfcl/BFCL_v4_multiple.json",
+          "bytes": 316583,
+          "sha256": "aef168155ebd74b7ac2401198b201343bc7d16d7a3d7e0d4e6d8ee82c6969b2a"
+        },
+        {
+          "path": "bfcl/BFCL_v4_parallel.json",
+          "bytes": 171896,
+          "sha256": "19f51a82eff42e5d62541aa500115a056eb78f437c2ba1f10415fd7c8e5dda84"
+        }
+      ],
+      "used_by": [
+        "general_agent"
+      ]
+    },
+    "global_mmlu": {
+      "name": "Global-MMLU",
+      "source_url": "https://huggingface.co/datasets/CohereLabs/Global-MMLU",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "path": "global_mmlu/en/test.parquet",
+          "bytes": 3910925,
+          "sha256": "5baec81ba97243728cc9557b2cba2f03aaeedf8232473db9f20cf995c6b0a1a9"
+        },
+        {
+          "path": "global_mmlu/fr/test.parquet",
+          "bytes": 4550854,
+          "sha256": "e602201459c29c5dbacf9a3d80cfe2524496f8e0c0b51b6326ef4205bad3405e"
+        },
+        {
+          "path": "global_mmlu/de/test.parquet",
+          "bytes": 4543635,
+          "sha256": "b58a0d5994e756dabef96eb804693be153953052276d3e0b7d57bb2f2798854a"
+        },
+        {
+          "path": "global_mmlu/es/test.parquet",
+          "bytes": 4327396,
+          "sha256": "efbcc4ce1cf14f2f43f7b05be49a9a1153b2893c59d2f660c3bb58679801dccb"
+        },
+        {
+          "path": "global_mmlu/pt/test.parquet",
+          "bytes": 4211041,
+          "sha256": "15dda0dd7dbd8eebbe66b6f8ce6087c1f0d29b18e48b7e3b225b6dba375c1048"
+        },
+        {
+          "path": "global_mmlu/ru/test.parquet",
+          "bytes": 5884449,
+          "sha256": "9037e1aaca6aed1856fe1e427e5b3d4e3bb6563861b760a3360ef077df301bd6"
+        },
+        {
+          "path": "global_mmlu/ja/test.parquet",
+          "bytes": 4363616,
+          "sha256": "b56ad153180d4368757891796dfad0e1a76ebeb3f7b2500b1ac63789d4e4dfe7"
+        },
+        {
+          "path": "global_mmlu/ko/test.parquet",
+          "bytes": 4273255,
+          "sha256": "aa896380f066e8e905604bbda8c2c57818a22a7d02ab99a48edc1ad078affb27"
+        },
+        {
+          "path": "global_mmlu/ar/test.parquet",
+          "bytes": 4854848,
+          "sha256": "e969c186f001c7548d54b420b2ddf7ae1d4abfce5720680eadcc4e8a48d0f61b"
+        },
+        {
+          "path": "global_mmlu/hi/test.parquet",
+          "bytes": 6140551,
+          "sha256": "f0d82c7650ef47968a22058d9a83d22834d12c4f28e23738594d903ab52bcee5"
+        },
+        {
+          "path": "global_mmlu/vi/test.parquet",
+          "bytes": 4435419,
+          "sha256": "5cd0840972e32c99d86cf287c7f9b1a8f594dd24fc2800169cce1ec0724abfba"
+        }
+      ],
+      "used_by": [
+        "multilingual"
+      ]
+    }
+  },
+  "scenarios": {
+    "knowledge_qa": {
+      "rows": 30,
+      "targets": 10,
+      "buckets": {
+        "1k": 10,
+        "8k": 10,
+        "32k": 10
+      },
+      "datasets": {
+        "longbench_v2:Single-Document QA": 30
+      },
+      "languages": {
+        "en": 30
+      },
+      "constructed": 0,
+      "tokens": {
+        "min": 1024,
+        "median": 8192,
+        "max": 32768,
+        "mean": 13995,
+        "total": 419840
+      },
+      "unique_contexts": {
+        "selected_targets": 10,
+        "unique_context_sha1": 10
+      },
+      "sampling": {
+        "dataset": "longbench_v2:Single-Document QA",
+        "workload": "longbench_v2:Single-Document QA",
+        "seed": 42,
+        "pool": 175,
+        "dedup": {
+          "context_duplicates_removed": 9,
+          "question_duplicates_removed": 1
+        },
+        "candidates": 106,
+        "selected": 10,
+        "quotas": {},
+        "skipped": [
+          {
+            "upstream_id": "6703933bbb02136c067ccd78",
+            "reason": "32k_unreachable",
+            "detail": "32k: best total=30937 tokens, bounds [31129, 34406]"
+          }
+        ],
+        "skip_reasons": {
+          "32k_unreachable": 1
+        },
+        "targets": [
+          {
+            "target_id": "tgt-knowledge_qa-000",
+            "upstream_id": "67246903bb02136c067d74f2",
+            "context_sha1": "185b0f310c651f95",
+            "context_chars": 601885,
+            "context_chars_per_bucket": {
+              "1k": 3242,
+              "8k": 32605,
+              "32k": 128789
+            }
+          },
+          {
+            "target_id": "tgt-knowledge_qa-001",
+            "upstream_id": "6725e351bb02136c067d8758",
+            "context_sha1": "40c2a8bf89015032",
+            "context_chars": 584415,
+            "context_chars_per_bucket": {
+              "1k": 3465,
+              "8k": 35260,
+              "32k": 136986
+            }
+          },
+          {
+            "target_id": "tgt-knowledge_qa-002",
+            "upstream_id": "66ed0cb0821e116aacb1e6c1",
+            "context_sha1": "755e104072d720c3",
+            "context_chars": 142458,
+            "context_chars_per_bucket": {
+              "1k": 3261,
+              "8k": 28951,
+              "32k": 95911
+            }
+          },
+          {
+            "target_id": "tgt-knowledge_qa-003",
+            "upstream_id": "66ebdfb65a08c7b9b35e140a",
+            "context_sha1": "5d60b959fbe87c8a",
+            "context_chars": 366845,
+            "context_chars_per_bucket": {
+              "1k": 4280,
+              "8k": 38769,
+              "32k": 140705
+            }
+          },
+          {
+            "target_id": "tgt-knowledge_qa-004",
+            "upstream_id": "66ec3352821e116aacb1c085",
+            "context_sha1": "fe16cbc03a408fe4",
+            "context_chars": 307844,
+            "context_chars_per_bucket": {
+              "1k": 3402,
+              "8k": 32312,
+              "32k": 129727
+            }
+          },
+          {
+            "target_id": "tgt-knowledge_qa-005",
+            "upstream_id": "66ebd34d5a08c7b9b35e035d",
+            "context_sha1": "0a9c55a6b7ce9037",
+            "context_chars": 3596979,
+            "context_chars_per_bucket": {
+              "1k": 13771,
+              "8k": 44790,
+              "32k": 149361
+            }
+          },
+          {
+            "target_id": "tgt-knowledge_qa-006",
+            "upstream_id": "67040983bb02136c067cd996",
+            "context_sha1": "3b709d440b95b7d4",
+            "context_chars": 1644574,
+            "context_chars_per_bucket": {
+              "1k": 4051,
+              "8k": 34324,
+              "32k": 122321
+            }
+          },
+          {
+            "target_id": "tgt-knowledge_qa-007",
+            "upstream_id": "67246413bb02136c067d7374",
+            "context_sha1": "c3076dd17ad7751e",
+            "context_chars": 708655,
+            "context_chars_per_bucket": {
+              "1k": 1590,
+              "8k": 30897,
+              "32k": 132971
+            }
+          },
+          {
+            "target_id": "tgt-knowledge_qa-008",
+            "upstream_id": "66f793f4bb02136c067c306e",
+            "context_sha1": "4a0345d90cc5ff4f",
+            "context_chars": 309484,
+            "context_chars_per_bucket": {
+              "1k": 4333,
+              "8k": 26989,
+              "32k": 123074
+            }
+          },
+          {
+            "target_id": "tgt-knowledge_qa-009",
+            "upstream_id": "670fbf5abb02136c067d2d9c",
+            "context_sha1": "c9a8a6617502018f",
+            "context_chars": 425156,
+            "context_chars_per_bucket": {
+              "1k": 4212,
+              "8k": 35912,
+              "32k": 143579
+            }
+          }
+        ],
+        "pool_filter": "raw context >= 120000 characters, deduplicated by sha1(context)",
+        "domain_rows": 175,
+        "source_eligible": 116
+      }
+    },
+    "instruction_following": {
+      "rows": 30,
+      "targets": 10,
+      "buckets": {
+        "1k": 10,
+        "8k": 10,
+        "32k": 10
+      },
+      "datasets": {
+        "ifeval": 30
+      },
+      "languages": {
+        "en": 30
+      },
+      "constructed": 30,
+      "tokens": {
+        "min": 1024,
+        "median": 8192,
+        "max": 32768,
+        "mean": 13995,
+        "total": 419840
+      },
+      "unique_contexts": {
+        "selected_targets": 10,
+        "unique_context_sha1": 10
+      },
+      "sampling": {
+        "dataset": "ifeval",
+        "workload": "ifeval:instruction_following",
+        "seed": 42,
+        "pool": 510,
+        "dedup": {},
+        "candidates": 510,
+        "selected": 10,
+        "quotas": {
+          "change_case": 1,
+          "combination": 1,
+          "detectable_content": 1,
+          "detectable_format": 2,
+          "keywords": 2,
+          "length_constraints": 1,
+          "punctuation": 1,
+          "startend": 1
+        },
+        "skipped": [],
+        "skip_reasons": {},
+        "targets": [
+          {
+            "target_id": "tgt-instruction_following-000",
+            "upstream_id": "1592",
+            "instruction_type": "change_case",
+            "reference_rotation_start": 233,
+            "reference_pool_cycles": 1
+          },
+          {
+            "target_id": "tgt-instruction_following-001",
+            "upstream_id": "3748",
+            "instruction_type": "combination",
+            "reference_rotation_start": 192,
+            "reference_pool_cycles": 1
+          },
+          {
+            "target_id": "tgt-instruction_following-002",
+            "upstream_id": "3743",
+            "instruction_type": "detectable_content",
+            "reference_rotation_start": 8,
+            "reference_pool_cycles": 1
+          },
+          {
+            "target_id": "tgt-instruction_following-003",
+            "upstream_id": "3429",
+            "instruction_type": "detectable_format",
+            "reference_rotation_start": 384,
+            "reference_pool_cycles": 1
+          },
+          {
+            "target_id": "tgt-instruction_following-004",
+            "upstream_id": "2752",
+            "instruction_type": "detectable_format",
+            "reference_rotation_start": 410,
+            "reference_pool_cycles": 1
+          },
+          {
+            "target_id": "tgt-instruction_following-005",
+            "upstream_id": "2447",
+            "instruction_type": "keywords",
+            "reference_rotation_start": 405,
+            "reference_pool_cycles": 1
+          },
+          {
+            "target_id": "tgt-instruction_following-006",
+            "upstream_id": "1498",
+            "instruction_type": "keywords",
+            "reference_rotation_start": 432,
+            "reference_pool_cycles": 1
+          },
+          {
+            "target_id": "tgt-instruction_following-007",
+            "upstream_id": "1943",
+            "instruction_type": "length_constraints",
+            "reference_rotation_start": 143,
+            "reference_pool_cycles": 1
+          },
+          {
+            "target_id": "tgt-instruction_following-008",
+            "upstream_id": "1300",
+            "instruction_type": "punctuation",
+            "reference_rotation_start": 420,
+            "reference_pool_cycles": 1
+          },
+          {
+            "target_id": "tgt-instruction_following-009",
+            "upstream_id": "30",
+            "instruction_type": "startend",
+            "reference_rotation_start": 137,
+            "reference_pool_cycles": 1
+          }
+        ],
+        "source_rows": 541,
+        "excluded_language_instructions": 31,
+        "strata": {
+          "change_case": 65,
+          "combination": 55,
+          "detectable_content": 31,
+          "detectable_format": 114,
+          "keywords": 87,
+          "length_constraints": 76,
+          "punctuation": 32,
+          "startend": 50
+        },
+        "reference_rotation": "sha256(42|target_id) % len(pool), target excluded; one pass of distinct 'metadata + prompt' units, never repeated",
+        "reference_format": "prompt_with_instruction_metadata"
+      }
+    },
+    "long_context": {
+      "rows": 30,
+      "targets": 10,
+      "buckets": {
+        "1k": 10,
+        "8k": 10,
+        "32k": 10
+      },
+      "datasets": {
+        "longbench_v2:Long Structured Data Understanding": 30
+      },
+      "languages": {
+        "en": 30
+      },
+      "constructed": 0,
+      "tokens": {
+        "min": 1024,
+        "median": 8192,
+        "max": 32768,
+        "mean": 13995,
+        "total": 419840
+      },
+      "unique_contexts": {
+        "selected_targets": 10,
+        "unique_context_sha1": 10
+      },
+      "sampling": {
+        "dataset": "longbench_v2:Long Structured Data Understanding",
+        "workload": "longbench_v2:Long Structured Data Understanding",
+        "seed": 42,
+        "pool": 33,
+        "dedup": {
+          "context_duplicates_removed": 1,
+          "question_duplicates_removed": 0
+        },
+        "candidates": 31,
+        "selected": 10,
+        "quotas": {},
+        "skipped": [],
+        "skip_reasons": {},
+        "targets": [
+          {
+            "target_id": "tgt-long_context-000",
+            "upstream_id": "67285e1dbb02136c067d901b",
+            "context_sha1": "76b063d1af7d8b6f",
+            "context_chars": 419455,
+            "context_chars_per_bucket": {
+              "1k": 2628,
+              "8k": 22676,
+              "32k": 99573
+            }
+          },
+          {
+            "target_id": "tgt-long_context-001",
+            "upstream_id": "66fa8ccdbb02136c067c6fa7",
+            "context_sha1": "61e3de3d1fe6cda9",
+            "context_chars": 1275474,
+            "context_chars_per_bucket": {
+              "1k": 3410,
+              "8k": 23796,
+              "32k": 96767
+            }
+          },
+          {
+            "target_id": "tgt-long_context-002",
+            "upstream_id": "6724c4aabb02136c067d78a6",
+            "context_sha1": "aa986e6a41ae5593",
+            "context_chars": 416747,
+            "context_chars_per_bucket": {
+              "1k": 2616,
+              "8k": 22662,
+              "32k": 100504
+            }
+          },
+          {
+            "target_id": "tgt-long_context-003",
+            "upstream_id": "6703a0ecbb02136c067cd11b",
+            "context_sha1": "535f43d6248c8937",
+            "context_chars": 246048,
+            "context_chars_per_bucket": {
+              "1k": 2698,
+              "8k": 24161,
+              "32k": 98956
+            }
+          },
+          {
+            "target_id": "tgt-long_context-004",
+            "upstream_id": "67286036bb02136c067d9092",
+            "context_sha1": "1d6cbd085e306f7d",
+            "context_chars": 445748,
+            "context_chars_per_bucket": {
+              "1k": 2626,
+              "8k": 22673,
+              "32k": 102752
+            }
+          },
+          {
+            "target_id": "tgt-long_context-005",
+            "upstream_id": "67039cfabb02136c067cd04e",
+            "context_sha1": "6859b5679a27dcbf",
+            "context_chars": 341229,
+            "context_chars_per_bucket": {
+              "1k": 2134,
+              "8k": 21986,
+              "32k": 89972
+            }
+          },
+          {
+            "target_id": "tgt-long_context-006",
+            "upstream_id": "6724cae7bb02136c067d79be",
+            "context_sha1": "4153251cbc067578",
+            "context_chars": 9781854,
+            "context_chars_per_bucket": {
+              "1k": 2623,
+              "8k": 22671,
+              "32k": 102316
+            }
+          },
+          {
+            "target_id": "tgt-long_context-007",
+            "upstream_id": "6724c788bb02136c067d792d",
+            "context_sha1": "dbd1b8d5fcec4da5",
+            "context_chars": 550914,
+            "context_chars_per_bucket": {
+              "1k": 2597,
+              "8k": 22647,
+              "32k": 101384
+            }
+          },
+          {
+            "target_id": "tgt-long_context-008",
+            "upstream_id": "6724c1d4bb02136c067d77ec",
+            "context_sha1": "2e512e2ac93dcb98",
+            "context_chars": 456984,
+            "context_chars_per_bucket": {
+              "1k": 2623,
+              "8k": 22671,
+              "32k": 102380
+            }
+          },
+          {
+            "target_id": "tgt-long_context-009",
+            "upstream_id": "66f3ac0b821e116aacb2e203",
+            "context_sha1": "3e9b12a7c180c8f1",
+            "context_chars": 2407150,
+            "context_chars_per_bucket": {
+              "1k": 2334,
+              "8k": 17408,
+              "32k": 67721
+            }
+          }
+        ],
+        "pool_filter": "raw context >= 120000 characters, deduplicated by sha1(context)",
+        "domain_rows": 33,
+        "source_eligible": 32
+      }
+    },
+    "math_logic": {
+      "rows": 30,
+      "targets": 10,
+      "buckets": {
+        "1k": 10,
+        "8k": 10,
+        "32k": 10
+      },
+      "datasets": {
+        "gsm8k": 30
+      },
+      "languages": {
+        "en": 30
+      },
+      "constructed": 30,
+      "tokens": {
+        "min": 1024,
+        "median": 8192,
+        "max": 32768,
+        "mean": 13995,
+        "total": 419840
+      },
+      "unique_contexts": {
+        "selected_targets": 10,
+        "unique_context_sha1": 10
+      },
+      "sampling": {
+        "dataset": "gsm8k",
+        "workload": "gsm8k:math_word_problems",
+        "seed": 42,
+        "pool": 1319,
+        "dedup": {
+          "duplicate_problems_removed": 0
+        },
+        "candidates": 1319,
+        "selected": 10,
+        "quotas": {},
+        "skipped": [],
+        "skip_reasons": {},
+        "targets": [
+          {
+            "target_id": "tgt-math_logic-000",
+            "upstream_id": "test/1064",
+            "grade": "3",
+            "example_rotation_start": 0
+          },
+          {
+            "target_id": "tgt-math_logic-001",
+            "upstream_id": "test/334",
+            "grade": "2",
+            "example_rotation_start": 41
+          },
+          {
+            "target_id": "tgt-math_logic-002",
+            "upstream_id": "test/1109",
+            "grade": "5+",
+            "example_rotation_start": 82
+          },
+          {
+            "target_id": "tgt-math_logic-003",
+            "upstream_id": "test/141",
+            "grade": "0-1",
+            "example_rotation_start": 123
+          },
+          {
+            "target_id": "tgt-math_logic-004",
+            "upstream_id": "test/402",
+            "grade": "5+",
+            "example_rotation_start": 164
+          },
+          {
+            "target_id": "tgt-math_logic-005",
+            "upstream_id": "test/1158",
+            "grade": "2",
+            "example_rotation_start": 205
+          },
+          {
+            "target_id": "tgt-math_logic-006",
+            "upstream_id": "test/1311",
+            "grade": "2",
+            "example_rotation_start": 246
+          },
+          {
+            "target_id": "tgt-math_logic-007",
+            "upstream_id": "test/958",
+            "grade": "0-1",
+            "example_rotation_start": 287
+          },
+          {
+            "target_id": "tgt-math_logic-008",
+            "upstream_id": "test/728",
+            "grade": "2",
+            "example_rotation_start": 328
+          },
+          {
+            "target_id": "tgt-math_logic-009",
+            "upstream_id": "test/451",
+            "grade": "3",
+            "example_rotation_start": 369
+          }
+        ],
+        "rotation_step": 41,
+        "reference_rotation": "start = (target_index * 41) % len(others); all 10 targets excluded"
+      }
+    },
+    "coding": {
+      "rows": 30,
+      "targets": 10,
+      "buckets": {
+        "1k": 10,
+        "8k": 10,
+        "32k": 10
+      },
+      "datasets": {
+        "longbench_v2:Code Repository Understanding": 30
+      },
+      "languages": {
+        "en": 30
+      },
+      "constructed": 0,
+      "tokens": {
+        "min": 1023,
+        "median": 8192,
+        "max": 32768,
+        "mean": 13995,
+        "total": 419839
+      },
+      "unique_contexts": {
+        "selected_targets": 10,
+        "unique_context_sha1": 10
+      },
+      "sampling": {
+        "dataset": "longbench_v2:Code Repository Understanding",
+        "workload": "longbench_v2:Code Repository Understanding",
+        "seed": 42,
+        "pool": 50,
+        "dedup": {
+          "context_duplicates_removed": 1,
+          "question_duplicates_removed": 0
+        },
+        "candidates": 47,
+        "selected": 10,
+        "quotas": {},
+        "skipped": [],
+        "skip_reasons": {},
+        "targets": [
+          {
+            "target_id": "tgt-coding-000",
+            "upstream_id": "66ec3644821e116aacb1c312",
+            "context_sha1": "8b7ad9e5259873ab",
+            "context_chars": 395334,
+            "context_chars_per_bucket": {
+              "1k": 1888,
+              "8k": 25357,
+              "32k": 122262
+            }
+          },
+          {
+            "target_id": "tgt-coding-001",
+            "upstream_id": "66f3fd3a821e116aacb30533",
+            "context_sha1": "a59739c915b2abd9",
+            "context_chars": 6002782,
+            "context_chars_per_bucket": {
+              "1k": 2788,
+              "8k": 32787,
+              "32k": 133065
+            }
+          },
+          {
+            "target_id": "tgt-coding-002",
+            "upstream_id": "66fa788abb02136c067c6d75",
+            "context_sha1": "5ed9fa2025c3264d",
+            "context_chars": 915974,
+            "context_chars_per_bucket": {
+              "1k": 2858,
+              "8k": 29084,
+              "32k": 110421
+            }
+          },
+          {
+            "target_id": "tgt-coding-003",
+            "upstream_id": "66fa1e4cbb02136c067c5edf",
+            "context_sha1": "b5dbb70fb36e4466",
+            "context_chars": 4500898,
+            "context_chars_per_bucket": {
+              "1k": 2491,
+              "8k": 33150,
+              "32k": 136046
+            }
+          },
+          {
+            "target_id": "tgt-coding-004",
+            "upstream_id": "66f40c5e821e116aacb30ad2",
+            "context_sha1": "6cdaa6789804457c",
+            "context_chars": 11312794,
+            "context_chars_per_bucket": {
+              "1k": 3299,
+              "8k": 30235,
+              "32k": 121867
+            }
+          },
+          {
+            "target_id": "tgt-coding-005",
+            "upstream_id": "66ecf139821e116aacb1e0e1",
+            "context_sha1": "2ed47bc579e1819d",
+            "context_chars": 197578,
+            "context_chars_per_bucket": {
+              "1k": 2936,
+              "8k": 25186,
+              "32k": 111978
+            }
+          },
+          {
+            "target_id": "tgt-coding-006",
+            "upstream_id": "66f2e874821e116aacb2c0af",
+            "context_sha1": "f44783c9a443ad07",
+            "context_chars": 614556,
+            "context_chars_per_bucket": {
+              "1k": 3848,
+              "8k": 28066,
+              "32k": 109840
+            }
+          },
+          {
+            "target_id": "tgt-coding-007",
+            "upstream_id": "66fa2734bb02136c067c627a",
+            "context_sha1": "cf4b22412160ee27",
+            "context_chars": 1949620,
+            "context_chars_per_bucket": {
+              "1k": 2648,
+              "8k": 29235,
+              "32k": 133816
+            }
+          },
+          {
+            "target_id": "tgt-coding-008",
+            "upstream_id": "66f1dac1821e116aacb27df1",
+            "context_sha1": "a9e01c7cbe814b71",
+            "context_chars": 1599163,
+            "context_chars_per_bucket": {
+              "1k": 3491,
+              "8k": 29481,
+              "32k": 123348
+            }
+          },
+          {
+            "target_id": "tgt-coding-009",
+            "upstream_id": "66fa6702bb02136c067c6abb",
+            "context_sha1": "b5afeaa4a0bd30d3",
+            "context_chars": 2136912,
+            "context_chars_per_bucket": {
+              "1k": 3170,
+              "8k": 26405,
+              "32k": 110954
+            }
+          }
+        ],
+        "pool_filter": "raw context >= 120000 characters, deduplicated by sha1(context)",
+        "domain_rows": 50,
+        "source_eligible": 48
+      }
+    },
+    "general_agent": {
+      "rows": 30,
+      "targets": 10,
+      "buckets": {
+        "1k": 10,
+        "8k": 10,
+        "32k": 10
+      },
+      "datasets": {
+        "bfcl_v4": 30
+      },
+      "languages": {
+        "en": 30
+      },
+      "constructed": 30,
+      "tokens": {
+        "min": 997,
+        "median": 8183,
+        "max": 32841,
+        "mean": 13999,
+        "total": 419960
+      },
+      "unique_contexts": {
+        "selected_targets": 10,
+        "unique_context_sha1": 10
+      },
+      "sampling": {
+        "dataset": "bfcl_v4",
+        "workload": "bfcl_v4:single_turn_function_calling",
+        "seed": 42,
+        "pool": 800,
+        "dedup": {},
+        "candidates": 800,
+        "selected": 10,
+        "quotas": {
+          "simple_python": 4,
+          "multiple": 3,
+          "parallel": 3
+        },
+        "skipped": [
+          {
+            "upstream_id": "simple_python_396",
+            "reason": "1k_infeasible",
+            "detail": "1k: catalogue prefix 7/642 functions, best total=1076, own=1, bounds [972, 1075]",
+            "category": "simple"
+          },
+          {
+            "upstream_id": "parallel_157",
+            "reason": "1k_infeasible",
+            "detail": "1k: catalogue prefix 6/642 functions, best total=1083, own=1, bounds [972, 1075]",
+            "category": "parallel"
+          }
+        ],
+        "skip_reasons": {
+          "1k_infeasible": 2
+        },
+        "targets": [
+          {
+            "target_id": "tgt-general_agent-000",
+            "upstream_id": "simple_python_352",
+            "category": "simple",
+            "catalog_functions_per_bucket": {
+              "1k": 7,
+              "8k": 56,
+              "32k": 232
+            },
+            "own_functions": 1
+          },
+          {
+            "target_id": "tgt-general_agent-001",
+            "upstream_id": "simple_python_168",
+            "category": "simple",
+            "catalog_functions_per_bucket": {
+              "1k": 6,
+              "8k": 55,
+              "32k": 232
+            },
+            "own_functions": 1
+          },
+          {
+            "target_id": "tgt-general_agent-002",
+            "upstream_id": "simple_python_306",
+            "category": "simple",
+            "catalog_functions_per_bucket": {
+              "1k": 7,
+              "8k": 55,
+              "32k": 232
+            },
+            "own_functions": 1
+          },
+          {
+            "target_id": "tgt-general_agent-003",
+            "upstream_id": "simple_python_50",
+            "category": "simple",
+            "catalog_functions_per_bucket": {
+              "1k": 6,
+              "8k": 54,
+              "32k": 231
+            },
+            "own_functions": 1
+          },
+          {
+            "target_id": "tgt-general_agent-004",
+            "upstream_id": "multiple_0",
+            "category": "multiple",
+            "catalog_functions_per_bucket": {
+              "1k": 3,
+              "8k": 57,
+              "32k": 229
+            },
+            "own_functions": 2
+          },
+          {
+            "target_id": "tgt-general_agent-005",
+            "upstream_id": "multiple_173",
+            "category": "multiple",
+            "catalog_functions_per_bucket": {
+              "1k": 4,
+              "8k": 57,
+              "32k": 230
+            },
+            "own_functions": 3
+          },
+          {
+            "target_id": "tgt-general_agent-006",
+            "upstream_id": "multiple_40",
+            "category": "multiple",
+            "catalog_functions_per_bucket": {
+              "1k": 3,
+              "8k": 56,
+              "32k": 229
+            },
+            "own_functions": 2
+          },
+          {
+            "target_id": "tgt-general_agent-007",
+            "upstream_id": "parallel_174",
+            "category": "parallel",
+            "catalog_functions_per_bucket": {
+              "1k": 6,
+              "8k": 58,
+              "32k": 233
+            },
+            "own_functions": 1
+          },
+          {
+            "target_id": "tgt-general_agent-008",
+            "upstream_id": "parallel_85",
+            "category": "parallel",
+            "catalog_functions_per_bucket": {
+              "1k": 6,
+              "8k": 58,
+              "32k": 233
+            },
+            "own_functions": 1
+          },
+          {
+            "target_id": "tgt-general_agent-009",
+            "upstream_id": "parallel_180",
+            "category": "parallel",
+            "catalog_functions_per_bucket": {
+              "1k": 7,
+              "8k": 59,
+              "32k": 234
+            },
+            "own_functions": 1
+          }
+        ],
+        "category_pool": {
+          "simple_python": 400,
+          "multiple": 200,
+          "parallel": 200
+        },
+        "category_quota": {
+          "simple_python": 4,
+          "multiple": 3,
+          "parallel": 3
+        },
+        "category_catalog_functions": {
+          "simple_python": 370,
+          "multiple": 443,
+          "parallel": 186
+        },
+        "catalog_universe_functions": 642,
+        "catalog_order": "target functions first, then same category, then the rest (unique by name)",
+        "reference_rotation": "target-first whole-function prefix; no truncation inside a JSON object",
+        "category_selected": {
+          "multiple": 3,
+          "parallel": 3,
+          "simple": 4
+        }
+      }
+    },
+    "search_agent": {
+      "rows": 30,
+      "targets": 10,
+      "buckets": {
+        "1k": 10,
+        "8k": 10,
+        "32k": 10
+      },
+      "datasets": {
+        "longbench_v2:Multi-Document QA": 30
+      },
+      "languages": {
+        "en": 30
+      },
+      "constructed": 0,
+      "tokens": {
+        "min": 1024,
+        "median": 8192,
+        "max": 32768,
+        "mean": 13995,
+        "total": 419839
+      },
+      "unique_contexts": {
+        "selected_targets": 10,
+        "unique_context_sha1": 10
+      },
+      "sampling": {
+        "dataset": "longbench_v2:Multi-Document QA",
+        "workload": "longbench_v2:Multi-Document QA",
+        "seed": 42,
+        "pool": 125,
+        "dedup": {
+          "context_duplicates_removed": 0,
+          "question_duplicates_removed": 0
+        },
+        "candidates": 94,
+        "selected": 10,
+        "quotas": {},
+        "skipped": [
+          {
+            "upstream_id": "66ec0874821e116aacb194a4",
+            "reason": "question_too_long",
+            "detail": "question+options+prefix=811 tokens > 614 (1K context would not fit)"
+          },
+          {
+            "upstream_id": "66fa190bbb02136c067c5d32",
+            "reason": "question_too_long",
+            "detail": "question+options+prefix=659 tokens > 614 (1K context would not fit)"
+          },
+          {
+            "upstream_id": "66ec1aef821e116aacb1aa1a",
+            "reason": "question_too_long",
+            "detail": "question+options+prefix=814 tokens > 614 (1K context would not fit)"
+          }
+        ],
+        "skip_reasons": {
+          "question_too_long": 3
+        },
+        "targets": [
+          {
+            "target_id": "tgt-search_agent-000",
+            "upstream_id": "6704fe26bb02136c067ce670",
+            "context_sha1": "1208e1b810b81546",
+            "context_chars": 1617711,
+            "context_chars_per_bucket": {
+              "1k": 8428,
+              "8k": 46344,
+              "32k": 156369
+            }
+          },
+          {
+            "target_id": "tgt-search_agent-001",
+            "upstream_id": "66fd4f54bb02136c067c9987",
+            "context_sha1": "a3495edb438c54e4",
+            "context_chars": 282443,
+            "context_chars_per_bucket": {
+              "1k": 2828,
+              "8k": 33045,
+              "32k": 132620
+            }
+          },
+          {
+            "target_id": "tgt-search_agent-002",
+            "upstream_id": "670646aebb02136c067cf85a",
+            "context_sha1": "6824e07867a40858",
+            "context_chars": 378895,
+            "context_chars_per_bucket": {
+              "1k": 2441,
+              "8k": 29230,
+              "32k": 124214
+            }
+          },
+          {
+            "target_id": "tgt-search_agent-003",
+            "upstream_id": "66f2a98a821e116aacb2a8bf",
+            "context_sha1": "dbdcfe5abaf30821",
+            "context_chars": 166965,
+            "context_chars_per_bucket": {
+              "1k": 3175,
+              "8k": 31385,
+              "32k": 116946
+            }
+          },
+          {
+            "target_id": "tgt-search_agent-004",
+            "upstream_id": "66f2ad2b821e116aacb2ac0f",
+            "context_sha1": "866aa89073210a00",
+            "context_chars": 153926,
+            "context_chars_per_bucket": {
+              "1k": 3988,
+              "8k": 28932,
+              "32k": 103784
+            }
+          },
+          {
+            "target_id": "tgt-search_agent-005",
+            "upstream_id": "66efaf70821e116aacb234bd",
+            "context_sha1": "7d431a7559adf736",
+            "context_chars": 352693,
+            "context_chars_per_bucket": {
+              "1k": 3209,
+              "8k": 37881,
+              "32k": 155026
+            }
+          },
+          {
+            "target_id": "tgt-search_agent-006",
+            "upstream_id": "66f7a96cbb02136c067c3255",
+            "context_sha1": "dbc7647ad233167f",
+            "context_chars": 171209,
+            "context_chars_per_bucket": {
+              "1k": 3450,
+              "8k": 33613,
+              "32k": 131583
+            }
+          },
+          {
+            "target_id": "tgt-search_agent-007",
+            "upstream_id": "66f94f9ebb02136c067c4fde",
+            "context_sha1": "8d271732269cc1af",
+            "context_chars": 2007494,
+            "context_chars_per_bucket": {
+              "1k": 2128,
+              "8k": 38910,
+              "32k": 157813
+            }
+          },
+          {
+            "target_id": "tgt-search_agent-008",
+            "upstream_id": "6707b3cabb02136c067d1021",
+            "context_sha1": "a5f9e407d3947731",
+            "context_chars": 512017,
+            "context_chars_per_bucket": {
+              "1k": 4620,
+              "8k": 35447,
+              "32k": 120477
+            }
+          },
+          {
+            "target_id": "tgt-search_agent-009",
+            "upstream_id": "66f4ce9e821e116aacb31731",
+            "context_sha1": "3ff7e531548d55ab",
+            "context_chars": 241749,
+            "context_chars_per_bucket": {
+              "1k": 2681,
+              "8k": 37417,
+              "32k": 154323
+            }
+          }
+        ],
+        "pool_filter": "raw context >= 120000 characters, deduplicated by sha1(context)",
+        "domain_rows": 125,
+        "source_eligible": 94
+      }
+    },
+    "multilingual": {
+      "rows": 30,
+      "targets": 10,
+      "buckets": {
+        "1k": 10,
+        "8k": 10,
+        "32k": 10
+      },
+      "datasets": {
+        "global_mmlu": 30
+      },
+      "languages": {
+        "ar": 3,
+        "de": 3,
+        "es": 3,
+        "fr": 3,
+        "hi": 3,
+        "ja": 3,
+        "ko": 3,
+        "pt": 3,
+        "ru": 3,
+        "vi": 3
+      },
+      "constructed": 30,
+      "tokens": {
+        "min": 1023,
+        "median": 8192,
+        "max": 32768,
+        "mean": 13995,
+        "total": 419838
+      },
+      "unique_contexts": {
+        "selected_targets": 10,
+        "unique_context_sha1": 10
+      },
+      "sampling": {
+        "dataset": "global_mmlu",
+        "workload": "global_mmlu:multilingual_mc_qa",
+        "seed": 42,
+        "pool": 14042,
+        "dedup": {},
+        "candidates": 14042,
+        "selected": 10,
+        "quotas": {
+          "Business": 1,
+          "Humanities": 2,
+          "Medical": 2,
+          "Other": 1,
+          "STEM": 2,
+          "Social Sciences": 2
+        },
+        "skipped": [],
+        "skip_reasons": {},
+        "targets": [
+          {
+            "target_id": "tgt-multilingual-000",
+            "upstream_id": "marketing/test/121|fr",
+            "lang": "fr",
+            "sample_id": "marketing/test/121",
+            "subject": "marketing",
+            "subject_category": "Business",
+            "reference_rotation_start": 5542
+          },
+          {
+            "target_id": "tgt-multilingual-001",
+            "upstream_id": "formal_logic/test/37|de",
+            "lang": "de",
+            "sample_id": "formal_logic/test/37",
+            "subject": "formal_logic",
+            "subject_category": "Humanities",
+            "reference_rotation_start": 8936
+          },
+          {
+            "target_id": "tgt-multilingual-002",
+            "upstream_id": "moral_scenarios/test/458|es",
+            "lang": "es",
+            "sample_id": "moral_scenarios/test/458",
+            "subject": "moral_scenarios",
+            "subject_category": "Humanities",
+            "reference_rotation_start": 4812
+          },
+          {
+            "target_id": "tgt-multilingual-003",
+            "upstream_id": "medical_genetics/test/91|pt",
+            "lang": "pt",
+            "sample_id": "medical_genetics/test/91",
+            "subject": "medical_genetics",
+            "subject_category": "Medical",
+            "reference_rotation_start": 7428
+          },
+          {
+            "target_id": "tgt-multilingual-004",
+            "upstream_id": "nutrition/test/219|ru",
+            "lang": "ru",
+            "sample_id": "nutrition/test/219",
+            "subject": "nutrition",
+            "subject_category": "Medical",
+            "reference_rotation_start": 8612
+          },
+          {
+            "target_id": "tgt-multilingual-005",
+            "upstream_id": "miscellaneous/test/336|ja",
+            "lang": "ja",
+            "sample_id": "miscellaneous/test/336",
+            "subject": "miscellaneous",
+            "subject_category": "Other",
+            "reference_rotation_start": 9778
+          },
+          {
+            "target_id": "tgt-multilingual-006",
+            "upstream_id": "college_chemistry/test/62|ko",
+            "lang": "ko",
+            "sample_id": "college_chemistry/test/62",
+            "subject": "college_chemistry",
+            "subject_category": "STEM",
+            "reference_rotation_start": 7640
+          },
+          {
+            "target_id": "tgt-multilingual-007",
+            "upstream_id": "electrical_engineering/test/54|ar",
+            "lang": "ar",
+            "sample_id": "electrical_engineering/test/54",
+            "subject": "electrical_engineering",
+            "subject_category": "STEM",
+            "reference_rotation_start": 10127
+          },
+          {
+            "target_id": "tgt-multilingual-008",
+            "upstream_id": "econometrics/test/75|hi",
+            "lang": "hi",
+            "sample_id": "econometrics/test/75",
+            "subject": "econometrics",
+            "subject_category": "Social Sciences",
+            "reference_rotation_start": 4870
+          },
+          {
+            "target_id": "tgt-multilingual-009",
+            "upstream_id": "us_foreign_policy/test/49|vi",
+            "lang": "vi",
+            "sample_id": "us_foreign_policy/test/49",
+            "subject": "us_foreign_policy",
+            "subject_category": "Social Sciences",
+            "reference_rotation_start": 11069
+          }
+        ],
+        "subjects": 57,
+        "languages": [
+          "fr",
+          "de",
+          "es",
+          "pt",
+          "ru",
+          "ja",
+          "ko",
+          "ar",
+          "hi",
+          "vi"
+        ],
+        "category_pool": {
+          "Business": 719,
+          "Humanities": 4705,
+          "Medical": 1505,
+          "Other": 883,
+          "STEM": 3153,
+          "Social Sciences": 3077
+        },
+        "category_quota": {
+          "Business": 1,
+          "Humanities": 2,
+          "Medical": 2,
+          "Other": 1,
+          "STEM": 2,
+          "Social Sciences": 2
+        },
+        "subjects_selected": [
+          "marketing",
+          "formal_logic",
+          "moral_scenarios",
+          "medical_genetics",
+          "nutrition",
+          "miscellaneous",
+          "college_chemistry",
+          "electrical_engineering",
+          "econometrics",
+          "us_foreign_policy"
+        ],
+        "subject_mapping": [
+          {
+            "language": "fr",
+            "sample_id": "marketing/test/121",
+            "subject": "marketing",
+            "subject_category": "Business"
+          },
+          {
+            "language": "de",
+            "sample_id": "formal_logic/test/37",
+            "subject": "formal_logic",
+            "subject_category": "Humanities"
+          },
+          {
+            "language": "es",
+            "sample_id": "moral_scenarios/test/458",
+            "subject": "moral_scenarios",
+            "subject_category": "Humanities"
+          },
+          {
+            "language": "pt",
+            "sample_id": "medical_genetics/test/91",
+            "subject": "medical_genetics",
+            "subject_category": "Medical"
+          },
+          {
+            "language": "ru",
+            "sample_id": "nutrition/test/219",
+            "subject": "nutrition",
+            "subject_category": "Medical"
+          },
+          {
+            "language": "ja",
+            "sample_id": "miscellaneous/test/336",
+            "subject": "miscellaneous",
+            "subject_category": "Other"
+          },
+          {
+            "language": "ko",
+            "sample_id": "college_chemistry/test/62",
+            "subject": "college_chemistry",
+            "subject_category": "STEM"
+          },
+          {
+            "language": "ar",
+            "sample_id": "electrical_engineering/test/54",
+            "subject": "electrical_engineering",
+            "subject_category": "STEM"
+          },
+          {
+            "language": "hi",
+            "sample_id": "econometrics/test/75",
+            "subject": "econometrics",
+            "subject_category": "Social Sciences"
+          },
+          {
+            "language": "vi",
+            "sample_id": "us_foreign_policy/test/49",
+            "subject": "us_foreign_policy",
+            "subject_category": "Social Sciences"
+          }
+        ],
+        "reference_rotation": "sha256(42|target_id) % len(pool), same-language pool, target sample_id excluded"
+      }
+    }
+  },
+  "totals": {
+    "rows": 240,
+    "scenarios": 8,
+    "buckets": 3,
+    "targets": 80,
+    "targets_per_cell": 10,
+    "measured_requests": 240
+  },
+  "files": {
+    "testset.jsonl": {
+      "rows": 240,
+      "bytes": 13273802,
+      "sha256": "5bba5d7266642ab7b66e6c0af34b5c8fa094c6a13fa1cc436b1c4f087f858890"
+    }
+  },
+  "deviations": [
+    {
+      "id": "content-token-basis",
+      "note": "Declared tokens are content tokens of the user message plus the JSON text of tools (chat-template control tokens excluded). The model-side rendered prompt is larger: the reference tokenizer also counts one BOS per encoded text (see tokenizer-bos-included) and the runner appends a decode-guard message before chat-template overhead (see decode-guard-suffix), so actual input_context_tokens exceeds the declared bucket value."
+    },
+    {
+      "id": "tokenizer-bos-included",
+      "note": "The reference tokenizer counts with add_special_tokens=True, so every declared messages_tokens/tools_tokens includes one BOS token: +1 for the user message in all scenarios and +1 more for tools JSON in general_agent/search_agent (+2 total). The declared tokens therefore include a special control token even though tokens_semantics says content tokens without chat template; the +/-5% bucket bounds absorb the 1-2 tokens."
+    },
+    {
+      "id": "decode-guard-suffix",
+      "note": "At run time benchmark._apply_decode_guard appends a second user message (36 tokens in the reference tokenizer) instructing the model to ignore the question above and write a >=250-word technical summary. Together with chat-template overhead (~10-30 tokens) the rendered prompt exceeds the declared content by ~46-69 tokens: the 1K bucket actually renders ~1.9%-11.6% above its declared value, 8K/32K by <2%. Generation follows the guard instruction, not the dataset question; this is a measurement-protocol deviation."
+    },
+    {
+      "id": "ten-targets-per-cell",
+      "note": "10 targets per scenario x bucket (240 measured requests total) is a load-shape profile for per-sample latency/TPS, not a leaderboard-scale evaluation: official benchmarks usually run every item."
+    },
+    {
+      "id": "document-prefix-slicing",
+      "note": "Document scenarios use a character prefix of one LongBench v2 document per bucket (1K subset of 8K subset of 32K) with an identical question/options block; official LongBench v2 uses the full document with the official prompt template."
+    },
+    {
+      "id": "document-prefix-mid-structure",
+      "note": "The document prefix is cut at a character offset, not at a structural boundary, so long_context prompts can end inside a JSON object/array/string and coding prompts can end inside an open Markdown code fence (for example 19/30 long_context rows have unbalanced braces). Structured closure of the sliced document is not guaranteed."
+    },
+    {
+      "id": "agent-single-request",
+      "note": "general_agent sends one BFCL v4 single-turn request with a target-first whole-function catalogue prefix; official BFCL scores multi-turn tool-call trajectories and exact arguments."
+    },
+    {
+      "id": "multilingual-diagonal",
+      "note": "multilingual uses 10 different Global-MMLU questions rendered one per language (the same-language reference block is a load-shape extension), whereas the accuracy set and the official Global-MMLU protocol evaluate the same question in each language."
+    },
+    {
+      "id": "no-scoring",
+      "note": "Performance rows carry no judge/gold contract: run mode never scores, SampleRecord.score stays null, and answer correctness is out of scope for this set."
+    },
+    {
+      "id": "constructed-reference-blocks",
+      "note": "instruction_following, math_logic and multilingual contexts are same-set reference blocks (other items rotated per target), not the official few-shot prompt templates."
+    },
+    {
+      "id": "reference-block-prefix-slice",
+      "note": "Reference blocks are assembled from complete units (instruction / solved example / question) and then cut by character prefix, so the last unit can be partial: the final reference item may be half an instruction, half an example or half a question stem, and the cut may fall inside a multilingual question/option unit. The block is not repeated; only the tail unit is potentially truncated."
+    },
+    {
+      "id": "ifeval-32k-instruction-metadata",
+      "note": "instruction_following renders each reference item as 'INSTRUCTION <k>: ids=<instruction_id_list JSON> kwargs=<kwargs JSON>' followed by the prompt. One pass of the 509 non-target items is ~44.1K tokens (> the 32K lower bound 31,129), so the 32K reference block is a single non-repeating pass of distinct units (reference_pool_cycles is always 1); this replaces the earlier doubled block."
+    },
+    {
+      "id": "window-32768-not-testable",
+      "note": "32K rows declare 31,129-34,406 tokens; with max_tokens=50 + 128 safety + 64 decode-guard = 242 reserved tokens a 32,768-token model window cannot host the upper rows (not-testable, reported as skipped, never truncated)."
+    }
+  ]
 }

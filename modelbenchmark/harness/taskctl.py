@@ -50,6 +50,24 @@ def _journal_path() -> Path:
 def _report_latest() -> Path:
     return Path(os.environ.get("MB_GATE_REPORT", str(ROOT / "harness" / "reports" / "latest.json")))
 
+
+#: ``complete --gate`` must see the full default gate, not a ``--only`` subset
+#: (``make docs`` writes a 2-check latest report and would otherwise bypass it).
+REQUIRED_GATE_CHECKS = frozenset(
+    {
+        "imports",
+        "compile",
+        "tests",
+        "validate",
+        "dataset_integrity",
+        "perf_plan",
+        "docs_links",
+        "docs_contract",
+        "secrets",
+        "hygiene",
+    }
+)
+
 STATUSES = ("pending", "in_progress", "blocked", "done")
 PRIORITIES = ("P0", "P1", "P2")
 ID_PATTERN = "T-"
@@ -271,6 +289,18 @@ def cmd_complete(args: argparse.Namespace) -> int:
             _fail(f"cannot read gate report: {exc}")
         if not report.get("summary", {}).get("ok"):
             _fail("--gate requested but the latest gate report did not pass")
+        present = {
+            str(check.get("name"))
+            for check in report.get("checks") or []
+            if isinstance(check, dict)
+        }
+        missing = sorted(REQUIRED_GATE_CHECKS - present)
+        if missing:
+            _fail(
+                "--gate requires the full default gate report; missing checks: "
+                f"{', '.join(missing)} (run `python -m harness.gate`, not "
+                "`--only ...`)"
+            )
         report_path = _report_latest()
     task["status"] = "done"
     task["notes"].append({"at": _now(), "owner": task.get("owner"), "note": args.note})

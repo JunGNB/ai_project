@@ -1,21 +1,54 @@
-# Default performance test set: 8 scenarios over the pre-built samples
-# (dataset/test/performance/testset.jsonl).
-#
-# 8 scenarios × 1K/8K/32K × 20 = 480 measured requests (no separate warmup).
-# Each (scenario, bucket) is one cell; samples in the three buckets share target_id.
 name: performance
-title: 性能测试（8 场景 × 1K/8K/32K × 20）
-description: >-
-  默认性能测试集：knowledge_qa / instruction_following / long_context / math_logic /
-  coding / general_agent / search_agent / chinese_long_context。
-  样本来自 dataset/test/performance/testset.jsonl，按 scenario 过滤；
-  每个 (scenario, bucket) 形成独立 cell，同 target_id 的三条为同题不同长。
+title: 性能测试（8 场景 × 1K/8K/32K × 10，240 measured）
+description: 8 场景 × 3 档 × 10 个 target；同 target 三档仅上下文长度不同；不判分。样本由 tool/dataset/performance/build.py
+  从 dataset/raw 的上游数据确定性抽样构建。
 scenarios:
-  knowledge_qa: {}
-  instruction_following: {}
-  long_context: {}
-  math_logic: {}
-  coding: {}
-  general_agent: {}
-  search_agent: {}
-  chinese_long_context: {}
+  knowledge_qa:
+    dataset: perf_jsonl
+    dataset_params:
+      scenario: knowledge_qa
+      path: dataset/test/performance/testset.jsonl
+  instruction_following:
+    dataset: perf_jsonl
+    dataset_params:
+      scenario: instruction_following
+      path: dataset/test/performance/testset.jsonl
+  long_context:
+    dataset: perf_jsonl
+    dataset_params:
+      scenario: long_context
+      path: dataset/test/performance/testset.jsonl
+  math_logic:
+    dataset: perf_jsonl
+    dataset_params:
+      scenario: math_logic
+      path: dataset/test/performance/testset.jsonl
+  coding:
+    dataset: perf_jsonl
+    dataset_params:
+      scenario: coding
+      path: dataset/test/performance/testset.jsonl
+  general_agent:
+    dataset: perf_jsonl
+    dataset_params:
+      scenario: general_agent
+      path: dataset/test/performance/testset.jsonl
+  search_agent:
+    dataset: perf_jsonl
+    dataset_params:
+      scenario: search_agent
+      path: dataset/test/performance/testset.jsonl
+  multilingual:
+    dataset: perf_jsonl
+    dataset_params:
+      scenario: multilingual
+      path: dataset/test/performance/testset.jsonl
+sampling:
+  seed: 42
+  targets_per_cell: 10
+  method: sha256(seed|upstream_id) + stratified largest remainder
+buckets:
+  1k: 1024
+  8k: 8192
+  32k: 32768
+osl: 50

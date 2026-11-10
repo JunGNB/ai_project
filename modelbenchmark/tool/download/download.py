@@ -25,7 +25,7 @@ Behaviour
   whose SHA-256 matches ``data/raw/<dataset>/download_manifest.json`` and
   otherwise resumes the HTTP transfer (see ``src/modelbench/adapters/datasets/_download.py``).
 * Every downloaded file is recorded with URL + size + SHA-256 in that manifest;
-  docs/DATASETS.md mirrors the same information for reviewers.
+  docs/design/32-dataset-sources.md mirrors the same information for reviewers.
 * ``--force`` re-downloads even verified files.
 * ``longbench_v2`` is intentionally *not* part of ``all``: it is owned by the
   Lead layer (its 465 MB archive is downloaded separately).

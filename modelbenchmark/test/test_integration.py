@@ -13,18 +13,46 @@ hardware/oMLX configuration snapshot.
 from __future__ import annotations
 
 import json
+import re
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
 from modelbench.adapters.omlx.client import OMLXClient
+from modelbench.adapters.storage import layout
 from modelbench.adapters.storage.writer import RunWriter
+
+
+def _aggregates(run_dir):
+    import json as _json
+
+    return _json.loads((Path(run_dir) / layout.AGGREGATES_JSON).read_text())
+
+
+def _run_json(run_dir):
+    import json as _json
+
+    return _json.loads((Path(run_dir) / layout.RUN_JSON).read_text())
+
+
+def _find_run_dir(output_root, batch_id, model_slug="model", method="performance"):
+    """Locate a run directory: the flat name *is* the run id."""
+    return layout.run_dir_for(Path(output_root), batch_id, method, model_slug)
+
+
+def _samples_csv(run_dir):
+    import csv as _csv
+
+    with (Path(run_dir) / layout.SAMPLES_CSV).open(encoding="utf-8", newline="") as fh:
+        return list(_csv.DictReader(fh))
 from modelbench.application.batch import BatchRunner
 from modelbench.application.benchmark import Orchestrator
 from modelbench.adapters.config.settings import ModelLoadConfig, ModelSpec, load_config
-from modelbench.domain.models import CacheMode
+from modelbench.domain.models import CacheMode, SCHEMA_VERSION
 
 
 class FakeOMLXState:
@@ -47,6 +75,11 @@ class FakeOMLXState:
         # finish_reason="length"; those samples must still be aggregated.
         self.completion_tokens: int = 20
         self.finish_reason: str = "stop"
+        #: Fake tokenize override (tests actual-ISL/window logic deterministically).
+        self.tokenize_override: Optional[int] = None
+        #: Delay between SSE chunks; tests that need a plausible decode window
+        #: set this (the default writes the whole stream in one burst).
+        self.stream_chunk_delay_s: float = 0.0
         # Transport/contamination retry knobs: fail the first N chat attempts,
         # then optionally report cached_tokens from this per-attempt sequence.
         self.chat_attempts: int = 0
@@ -249,8 +282,19 @@ class FakeOMLXHandler(BaseHTTPRequestHandler):
                 text += body["prompt"]
             if body.get("tools"):
                 text += json.dumps(body["tools"])
+            target_marker = re.search(r"target=(\d+)", text)
+            token_marker = re.search(r"tokens=(\d+)", text)
+            count = (
+                self.state.tokenize_override
+                if self.state.tokenize_override is not None
+                else int(target_marker.group(1))
+                if target_marker
+                else int(token_marker.group(1))
+                if token_marker
+                else max(1, len(text) // 4 + 8)
+            )
             return self._json(
-                {"count": max(1, len(text) // 4 + 8), "max_model_len": self.state.max_window}
+                {"count": int(count), "max_model_len": self.state.max_window}
             )
         if path.startswith("/v1/models/") and path.endswith("/load"):
             self.state.loads.append(path.split("/")[3])
@@ -327,8 +371,15 @@ class FakeOMLXHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
-            self.wfile.write(payload)
-            self.wfile.flush()
+            if self.state.stream_chunk_delay_s:
+                for line in payload.splitlines(keepends=True):
+                    self.wfile.write(line)
+                    self.wfile.flush()
+                    if line.startswith(b"data: {") and b"usage" not in line:
+                        time.sleep(self.state.stream_chunk_delay_s)
+            else:
+                self.wfile.write(payload)
+                self.wfile.flush()
             return
         return self._json({"error": f"unknown POST {path}"}, 404)
 
@@ -405,7 +456,14 @@ def _perf_rows(
             }
             if prebuilt:
                 row["messages"] = [
-                    {"role": "user", "content": f"Fixture question {scenario} {index}"}
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Fixture question {scenario} {index} "
+                            f"target={ {'1k': 1024, '8k': 8192, '32k': 32768}[bucket] } "
+                            f"tokens={int(tokens)}"
+                        ),
+                    }
                 ]
             else:
                 row["question"] = question or f"Fixture question {scenario} {index}"
@@ -487,6 +545,10 @@ def _fake_config(
         prebuilt=prebuilt,
         question=question,
     )
+    # The fake tokenizer otherwise counts the tiny fixture text, which would
+    # (correctly) look far outside the declared bucket and be skipped by the
+    # actual-ISL tolerance.  Tests that exercise tolerance/window logic override
+    # this explicitly afterwards.
     return cfg
 
 
@@ -503,31 +565,35 @@ def test_end_to_end_performance_run(fake_server, tmp_path):
 
     run_dir = Path(summary["run_dir"])
     for name in (
-        "manifest.json",
-        "hardware.json",
-        "omlx.json",
-        "models.json",
+        "run.json",
+        "MANIFEST.json",
         "records.jsonl",
-        "summary.json",
-        "summary.csv",
-        "cells.csv",
         "samples.csv",
+        "aggregates.json",
         "report.md",
-        "analysis/run.json",
-        "analysis/samples_long.csv",
-        "analysis/environment.json",
+        "logs/run.log",
     ):
         assert (run_dir / name).is_file(), f"missing {name}"
-    # TG TPS coverage count must be present in both CSV aggregates (F08).
-    summary_header = (run_dir / "summary.csv").read_text(encoding="utf-8").splitlines()[0]
-    cells_header = (run_dir / "cells.csv").read_text(encoding="utf-8").splitlines()[0]
-    assert "gen_tps_n" in summary_header
-    assert "gen_tps_n" in cells_header
+    # NOTE: APFS/HFS+ is case-insensitive, so "manifest.json" and "MANIFEST.json"
+    # collide; only assert on names that cannot alias the new layout.
+    for gone in ("summary.json", "summary.csv", "cells.csv", "analysis", "raw",
+                 "hardware.json", "omlx.json", "models.json"):
+        assert not (run_dir / gone).exists(), f"{gone} must no longer be written"
+    # TG TPS coverage count lives in the aggregate distributions (F08).
+    agg = _aggregates(run_dir)
+    assert agg["overall"][0]["perf"]["gen_tps"]["n"] >= 0
+    assert agg["cells"][0]["perf"]["gen_tps"]["n"] >= 0
+    # The prompt bodies live once in the global blob pool.
+    assert list((tmp_path / layout.BLOBS / layout.PROMPTS).glob("*/*.json"))
     index = json.loads((tmp_path / "index.json").read_text())
-    entry = [item for item in index["runs"] if item["run_id"] == "integration"][0]
+    entry = [
+        item
+        for item in index["runs"]
+        if item["run_id"] == "integration__performance__model"
+    ][0]
     assert entry["n_samples"] == 4
     assert entry["models_measured"] == ["fake-model"]
-    assert entry["analysis"]
+    assert entry["files"]["records.jsonl"]["sha256"]
 
     records = [json.loads(line) for line in (run_dir / "records.jsonl").read_text().splitlines()]
     measured = [r for r in records if r["phase"] == "measured"]
@@ -551,9 +617,19 @@ def test_end_to_end_performance_run(fake_server, tmp_path):
         # Decode guard: appended to every performance request so TG TPS has a
         # decode window even when the dataset prompt ends with "Answer:".
         assert record["request"]["context_meta"]["decode_guard"] is True
-        guard = record["request"]["messages"][-1]
+        # The prompt body lives in the content-addressed blob pool now, so the
+        # guard is verified through the digest the record carries.
+        prompt_sha = record["request"]["prompt_sha256"]
+        assert prompt_sha, "record must reference its prompt blob"
+        blob = json.loads(
+            (tmp_path / layout.BLOBS / layout.PROMPTS / prompt_sha[:2] / f"{prompt_sha}.json").read_text()
+        )
+        assert blob["sha256"] == prompt_sha
+        assert blob["chars"] == record["request"]["prompt_chars"]
+        guard = blob["messages"][-1]
         assert guard["role"] == "user"
         assert guard["content"].startswith("This request is a performance measurement")
+        assert blob["decode_guard_version"] == 1
         assert record["cache"]["cleared_before_request"] is True
         assert record["cache"]["cached_tokens"] == 0
         assert record["request"]["target_context_tokens"] is None
@@ -565,11 +641,12 @@ def test_end_to_end_performance_run(fake_server, tmp_path):
         assert record["metrics"]["peak_memory_gb"] > 0
         assert record["score"] is None  # performance-only: never scored
 
-    # --- summary shape --------------------------------------------------
-    summary_json = json.loads((run_dir / "summary.json").read_text())
-    assert summary_json["schema_version"] == "2.1"
-    assert summary_json["mode"] == "performance"
-    assert summary_json["perf"]["max_tokens"] == 50
+    # --- aggregates + run.json shape ------------------------------------
+    summary_json = _aggregates(run_dir)
+    run_meta = _run_json(run_dir)
+    assert summary_json["schema_version"] == SCHEMA_VERSION
+    assert run_meta["method"] == "performance"
+    assert run_meta["config"]["perf"]["max_tokens"] == 50
     assert len(summary_json["overall"]) == 1
     overall = summary_json["overall"][0]
     assert overall["model"] == "fake-model"
@@ -580,9 +657,11 @@ def test_end_to_end_performance_run(fake_server, tmp_path):
     assert "accuracy" not in overall
     assert len(summary_json["cells"]) == 1
     assert "accuracy" not in summary_json["cells"][0]
-    assert len(summary_json["samples"]) == 4
-    assert summary_json["samples"][0]["input_context_tokens"] > 0
-    assert summary_json["samples"][0]["context_length"] == 1024
+    sample_rows = _samples_csv(run_dir)
+    assert len(sample_rows) == 4
+    assert int(sample_rows[0]["input_context_tokens"]) > 0
+    assert int(sample_rows[0]["context_length"]) == 1024
+    assert sample_rows[0]["cache_cleared"] == "True"
     # The headline averages must be recomputable from records.jsonl alone.
     valid = [r for r in measured if r["status"] == "ok"]
     recomputed_ttft = round(sum(r["metrics"]["ttft_ms"] for r in valid) / len(valid), 3)
@@ -598,8 +677,14 @@ def test_end_to_end_performance_run(fake_server, tmp_path):
         1024,
     )
 
-    # --- environment snapshot ------------------------------------------
-    omlx = json.loads((run_dir / "omlx.json").read_text())
+    # --- environment snapshot (single run.json, no side files) ----------
+    env = run_meta["env"]
+    # The server-wide /v1/models/status snapshot (memory ceiling, load timings,
+    # full model inventory) used to be models.json; it must still be recorded.
+    assert env.get("server_models"), "server model snapshot missing from run.json"
+    assert "server" in env["server_models"]
+    assert env["server_models"]["server"]
+    omlx = env["omlx"]
     assert omlx["device"]["chip_name"] == "M4"
     assert omlx["feature_flags"] == []  # default config: no acceleration enabled
     assert omlx["default_config"] is True
@@ -612,14 +697,21 @@ def test_end_to_end_performance_run(fake_server, tmp_path):
     assert "baseline_rss_mb" in memory and "idle_rss_mb" in memory
     report = (run_dir / "report.md").read_text()
     assert "进程内存" in report
-    hardware = json.loads((run_dir / "hardware.json").read_text())
+    hardware = env["hardware"]
     assert hardware["upload_fields"]["chip_name"] == "M4"
     assert hardware["upload_fields"]["memory_gb"] == 24
     assert hardware["upload_fields"]["gpu_cores"] == 16
 
-    # --- raw evidence ---------------------------------------------------
-    samples_root = run_dir / "raw" / "samples" / "mmlu" / "knowledge_qa"
-    assert list(samples_root.glob("*.json")), "raw samples were not persisted"
+    # --- raw evidence: prompt bodies are content-addressed ---------------
+    records = [
+        json.loads(line)
+        for line in (run_dir / "records.jsonl").read_text().splitlines()
+    ]
+    shas = {r["request"]["prompt_sha256"] for r in records}
+    assert shas and all(shas)
+    blob_root = tmp_path / layout.BLOBS / layout.PROMPTS
+    stored = {path.stem for path in blob_root.glob("*/*.json")}
+    assert shas <= stored, "some prompts are not resolvable from the blob pool"
 
 
 def test_length_capped_run_keeps_samples_and_metrics(fake_server, tmp_path):
@@ -629,6 +721,9 @@ def test_length_capped_run_keeps_samples_and_metrics(fake_server, tmp_path):
     cfg.perf.max_tokens = 50
     state.completion_tokens = 50
     state.finish_reason = "length"
+    # A realistic token-by-token stream is required for TG TPS to be meaningful
+    # (a single-burst response is suppressed by design, see test below).
+    state.stream_chunk_delay_s = 0.04
 
     client = OMLXClient(base_url=cfg.server.base_url, api_key="fake-key")
     writer = RunWriter(tmp_path, run_id="capped")
@@ -652,15 +747,18 @@ def test_length_capped_run_keeps_samples_and_metrics(fake_server, tmp_path):
         assert record["metrics"]["gen_tps"] is not None
         assert record["metrics"]["tpot_ms"] is not None
 
-    summary_json = json.loads((run_dir / "summary.json").read_text())
+    summary_json = _aggregates(run_dir)
     overall = summary_json["overall"][0]
     assert overall["n_valid"] == 2
     assert overall["n_length_capped"] == 2
     assert overall["perf"]["gen_tps"]["n"] == 2
     assert overall["perf"]["gen_tps"]["mean"] is not None
-    samples = summary_json["samples"]
+    samples = _samples_csv(run_dir)
     assert len(samples) == 2
-    assert all(row["length_capped"] and row["finish_reason"] == "length" for row in samples)
+    assert all(
+        row["length_capped"] == "True" and row["finish_reason"] == "length"
+        for row in samples
+    )
     header = (run_dir / "samples.csv").read_text().splitlines()[0]
     assert "length_capped" in header and "finish_reason" in header
     report = (run_dir / "report.md").read_text()
@@ -893,6 +991,10 @@ def test_prebuilt_prompt_too_long_is_skipped_not_truncated(fake_server, tmp_path
         bucket="8k",
     )
     cfg.run.warmup_requests = 0
+    # The fake tokenizer would count the short fixture as tiny; override so the
+    # *actual* tokenized count exceeds the model window (the declared 9000 is
+    # only the reference-tokenizer value and must not be the sole basis).
+    state.tokenize_override = 5000
     client = OMLXClient(base_url=cfg.server.base_url, api_key="fake-key")
     writer = RunWriter(tmp_path, run_id="prebuilt-overflow")
     try:
@@ -944,7 +1046,7 @@ def test_cells_split_by_dataset_and_context_length(fake_server, tmp_path):
     finally:
         client.close()
 
-    summary_json = json.loads((Path(summary["run_dir"]) / "summary.json").read_text())
+    summary_json = _aggregates(summary["run_dir"])
     assert summary_json["n_samples"] == 6
     keys = {
         (cell["scenario"], cell["dataset"], cell["context_length"])
@@ -994,13 +1096,10 @@ def test_persisted_acceleration_settings_are_reset_to_default(_server_mode, tmp_
     assert state.events.index(
         "settings:{'dflash_enabled': False, 'turboquant_kv_enabled': False}"
     ) < state.events.index("load:fake-model")
-    run_dir = Path(cfg.run.output_dir) / "reset-settings"
-    omlx = json.loads((run_dir / "omlx.json").read_text())
+    run_dir = _find_run_dir(Path(cfg.run.output_dir), "reset-settings")
+    omlx = _run_json(run_dir)["env"]["omlx"]
     assert omlx["feature_flags"] == []
     assert omlx["default_config"] is True
-    manifest = json.loads((run_dir / "manifest.json").read_text())
-    assert manifest["omlx"]["feature_flags"] == []
-    assert manifest["omlx"]["default_config"] is True
 
 
 def test_warm_mode_runs_without_cache_clear_errors(fake_server, tmp_path):
@@ -1291,21 +1390,32 @@ def test_batch_runner_writes_one_bundle_per_model(fake_server, tmp_path):
         client.close()
     assert batch["batch_id"] == "itest-batch"
     assert batch["method"] == "performance"
-    assert batch["n_models_tested"] == 1
+    assert batch["n_models_measured"] == 1
     run = batch["model_runs"][0]
-    assert run["run_id"] == "itest-batch_performance_fake-model"
-    run_dir = Path(run["run_dir"])
+    assert run["run_id"] == "itest-batch__performance__fake-model"
+    # Flat layout: run_path is relative to the output root.
+    assert run["run_path"] == "runs/itest-batch__performance__fake-model"
+    run_dir = tmp_path / run["run_path"]
     assert run_dir.is_dir()
-    summary = json.loads((run_dir / "summary.json").read_text())
-    assert summary["batch"]["batch_id"] == "itest-batch"
-    assert summary["batch"]["method"] == "performance"
-    assert summary["n_samples"] == 2
-    batch_file = tmp_path / "batches" / "itest-batch.json"
-    assert batch_file.is_file()
+    assert run_dir == layout.run_dir(tmp_path, run["run_id"])
+    assert (_run_json(run_dir))["batch_id"] == "itest-batch"
+    assert (_aggregates(run_dir))["n_samples"] == 2
+    batch_path = layout.batch_path(tmp_path, "itest-batch")
+    assert batch_path.is_file()
+    batch_payload = json.loads(batch_path.read_text())
+    # A batch directory must stay movable: no absolute paths in its metadata.
+    assert str(tmp_path) not in json.dumps(batch_payload)
+    assert batch_payload["model_runs"][0]["run_path"].startswith("runs/")
+    assert "run_dir" not in batch_payload["model_runs"][0]
+    # batch metadata is a sidecar file in batches/, not a per-batch directory tree
+    assert sorted(p.name for p in (tmp_path / "batches").iterdir()) == ["itest-batch.json"]
+    assert not (tmp_path / "result_analysis").exists()
     index = json.loads((tmp_path / "index.json").read_text())
     assert index["n_batches"] == 1
     assert index["batches"][0]["batch_id"] == "itest-batch"
-    assert index["batches"][0]["run_ids"] == ["itest-batch_performance_fake-model"]
+    assert [item["run_id"] for item in index["batches"][0]["models"]] == [
+        "itest-batch__performance__fake-model"
+    ]
 
 
 def test_batch_excel_analysis_has_three_sheets(fake_server, tmp_path):
@@ -1318,10 +1428,17 @@ def test_batch_excel_analysis_has_three_sheets(fake_server, tmp_path):
         batch = BatchRunner(cfg, client, tmp_path, batch_id="excel-batch").run()
     finally:
         client.close()
-    analysis = batch["result_analysis"]
-    workbook_path = Path(analysis["workbook"])
+    # Excel is a derived deliverable: generated on demand into output/exports/.
+    from modelbench.adapters.storage import excel_report
+
+    assert "result_analysis" not in batch
+    workbook_path = excel_report.write_batch_excel(
+        tmp_path, layout.batch_path(tmp_path, "excel-batch"), batch
+    )
     assert workbook_path.is_file()
-    assert "result_analysis" in analysis["dir"]
+    assert workbook_path.parent == layout.exports_dir(tmp_path)
+    assert workbook_path.name == "excel-batch.xlsx"
+    assert not (tmp_path / "result_analysis").exists()
     wb = load_workbook(workbook_path)
     assert wb.sheetnames == ["硬件配置", "模型性能平均", "详细数据"]
     detail = wb["详细数据"]
@@ -1340,11 +1457,14 @@ def test_batch_excel_analysis_has_three_sheets(fake_server, tmp_path):
     assert row[9] is not None        # output token size
     averages = wb["模型性能平均"]
     assert averages.max_row == 2
+    assert [cell.value for cell in averages[1]][:4] == [
+        "测试模型", "模型ID", "模型大小(GB)", "上下文档位",
+    ]
     assert averages.cell(row=2, column=1).value == "fake-model"
-    assert averages.cell(row=2, column=3).value == "1K"      # per-context row
-    assert averages.cell(row=2, column=9).value is not None  # n_length_capped
-    assert averages.cell(row=2, column=10).value is not None  # ttft mean
-    assert averages.cell(row=2, column=14).value is not None  # gen_tps n
+    assert averages.cell(row=2, column=4).value == "1K"      # per-context row
+    assert averages.cell(row=2, column=10).value is not None  # n_length_capped
+    assert averages.cell(row=2, column=11).value is not None  # ttft mean
+    assert averages.cell(row=2, column=15).value is not None  # gen_tps n
 
 
 def test_stratified_sampling_covers_buckets_end_to_end(fake_server, tmp_path):
@@ -1398,8 +1518,8 @@ def test_context_window_filter_end_to_end(fake_server, tmp_path):
         client.close()
 
     run_dir = Path(summary["run_dir"])
-    summary_json = json.loads((run_dir / "summary.json").read_text())
-    assert summary_json["perf"]["context_windows"] == [1024]
+    summary_json = _aggregates(run_dir)
+    assert _run_json(run_dir)["config"]["context_windows"] == [1024]
     assert summary_json["n_samples"] == 2
     assert summary_json["cells"][0]["context_length"] == 1024
     records = [json.loads(line) for line in (run_dir / "records.jsonl").read_text().splitlines()]
@@ -1457,8 +1577,8 @@ def test_model_warmup_is_short_and_not_recorded(fake_server, tmp_path):
     assert warmup["max_tokens"] == 8
     assert "warmup" in warmup["messages"][-1]["content"].lower()
     assert all(req["max_tokens"] == cfg.perf.max_tokens for req in state.chat_requests[1:])
-    summary_json = json.loads((Path(summary["run_dir"]) / "summary.json").read_text())
-    assert summary_json["run"]["warmup_per_model"] == 1
+    run_meta = _run_json(summary["run_dir"])
+    assert run_meta["config"]["run"]["warmup_per_model"] == 1
     # Cold-cache hygiene still applies to the warmup request.
     assert state.cache_store_headers and all(h == "off" for h in state.cache_store_headers)
 
@@ -1480,8 +1600,8 @@ def test_warmup_requests_are_configurable_and_discarded(fake_server, tmp_path):
     measured = [r for r in records if r["phase"] == "measured"]
     assert len(warmups) == 2
     assert len(measured) == 1
-    summary_json = json.loads((Path(summary["run_dir"]) / "summary.json").read_text())
-    assert summary_json["run"]["warmup_requests"] == 2
+    run_meta = _run_json(summary["run_dir"])
+    assert run_meta["config"]["run"]["warmup_requests"] == 2
 
 
 def test_contamination_retry_has_independent_budget(fake_server, tmp_path):
@@ -1636,3 +1756,132 @@ def test_cancel_before_preparation_records_explicit_model_skip(fake_server, tmp_
         "fake-model" in item and "not measured (cancelled by user)" in item
         for item in summary["skipped"]
     ), summary["skipped"]
+
+
+def test_tool_call_burst_suppresses_gen_tps(fake_server, tmp_path):
+    """A >=16-token tool-call delivered in one burst must not yield 100k+ TPS."""
+    server, state = fake_server
+    cfg = _fake_config(fake_server, tmp_path, repeats=1, samples=2)
+    state.completion_tokens = 50
+    state.finish_reason = "tool_calls"
+    state.stream_chunk_delay_s = 0.0  # single burst -> sub-ms decode window
+    state.tokenize_override = 1000  # inside 1K tolerance [0, 1126]
+
+    client = OMLXClient(base_url=cfg.server.base_url, api_key="fake-key")
+    writer = RunWriter(tmp_path, run_id="tool-burst")
+    try:
+        summary = Orchestrator(cfg, client, writer).run()
+    finally:
+        client.close()
+
+    run_dir = Path(summary["run_dir"])
+    records = [
+        json.loads(line)
+        for line in (run_dir / "records.jsonl").read_text().splitlines()
+    ]
+    measured = [r for r in records if r["phase"] == "measured"]
+    assert len(measured) == 2
+    for record in measured:
+        metrics = record["metrics"]
+        assert metrics["completion_tokens"] == 50
+        assert metrics["gen_tps"] is None
+        assert metrics["tpot_ms"] is None
+        assert metrics["gen_tps_invalid"] == "tool_calls"
+        assert metrics["decode_window_ms"] is not None
+
+    outcome = _run_json(run_dir)["outcome"]
+    assert outcome["n_gen_tps_invalid"] == 2
+    agg = _aggregates(run_dir)
+    assert agg["overall"][0]["n_gen_tps_invalid"] == 2
+    assert agg["cells"][0]["n_gen_tps_invalid"] == 2
+
+
+def test_actual_isl_outside_band_is_measured_but_excluded(fake_server, tmp_path):
+    """Out-of-band samples are still measured; aggregates only use in-band rows."""
+    server, state = fake_server
+    cfg = _fake_config(
+        fake_server, tmp_path, repeats=1, samples=2, tokens=8192, bucket="8k"
+    )
+    state.max_window = 16384
+    state.tokenize_override = 5000  # outside 8K tolerance [7372, 9011]
+    state.stream_chunk_delay_s = 0.04
+
+    client = OMLXClient(base_url=cfg.server.base_url, api_key="fake-key")
+    writer = RunWriter(tmp_path, run_id="isl-tolerance")
+    try:
+        summary = Orchestrator(cfg, client, writer).run()
+    finally:
+        client.close()
+
+    assert summary["n_samples"] == 2  # measured, never dropped
+    run_dir = Path(summary["run_dir"])
+    records = [
+        json.loads(line)
+        for line in (run_dir / "records.jsonl").read_text().splitlines()
+        if json.loads(line)["phase"] == "measured"
+    ]
+    assert len(records) == 2
+    for record in records:
+        assert record["metrics"]["input_context_tokens"] is not None
+        assert record["request"]["context_meta"]["isl_tolerance"]["ok"] is False
+    outcome = _run_json(run_dir)["outcome"]
+    assert outcome["n_measured"] == 2
+    assert outcome["n_isl_in_band"] == 0
+    assert outcome["n_isl_out_of_band"] == 2
+    agg = _aggregates(run_dir)
+    cell = agg["cells"][0]
+    assert cell["n_isl_in_band"] == 0
+    assert cell["n_isl_out_of_band"] == 2
+    assert cell["perf"]["ttft_ms"]["n"] == 0
+    samples = _samples_csv(run_dir)
+    assert all(row["isl_band"] == "False" for row in samples)
+
+
+def test_actual_isl_inside_tolerance_not_flagged(fake_server, tmp_path):
+    server, state = fake_server
+    cfg = _fake_config(
+        fake_server, tmp_path, repeats=1, samples=2, tokens=8192, bucket="8k"
+    )
+    state.max_window = 16384
+    state.tokenize_override = 8000  # inside [7372, 9011]
+    state.stream_chunk_delay_s = 0.04
+
+    client = OMLXClient(base_url=cfg.server.base_url, api_key="fake-key")
+    writer = RunWriter(tmp_path, run_id="isl-ok")
+    try:
+        summary = Orchestrator(cfg, client, writer).run()
+    finally:
+        client.close()
+
+    assert summary["n_samples"] == 2
+    run_dir = Path(summary["run_dir"])
+    records = [
+        json.loads(line)
+        for line in (run_dir / "records.jsonl").read_text().splitlines()
+        if json.loads(line)["phase"] == "measured"
+    ]
+    assert all(
+        r["request"]["context_meta"]["isl_tolerance"]["ok"] is True for r in records
+    )
+    outcome = _run_json(run_dir)["outcome"]
+    assert outcome["n_isl_in_band"] == 2
+    assert outcome["n_isl_out_of_band"] == 0
+
+
+def test_actual_tokenized_window_overflow_is_skipped(fake_server, tmp_path):
+    """The model-window check uses the target-tokenizer actual count."""
+    server, state = fake_server
+    cfg = _fake_config(fake_server, tmp_path, repeats=1, samples=2)
+    state.max_window = 4096
+    state.tokenize_override = 5000  # actual prompt alone exceeds the window
+    state.stream_chunk_delay_s = 0.04
+
+    client = OMLXClient(base_url=cfg.server.base_url, api_key="fake-key")
+    writer = RunWriter(tmp_path, run_id="actual-overflow")
+    try:
+        summary = Orchestrator(cfg, client, writer).run()
+    finally:
+        client.close()
+
+    assert summary["n_samples"] == 0
+    assert any("prebuilt prompt too long" in item for item in summary["skipped"])

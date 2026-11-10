@@ -26,17 +26,3 @@ class MultilingualScenario(SimpleScenario):
 
     def evaluator(self, sample: Sample, response: RawResponse) -> Score:
         return score_mc(sample, response)
-
-
-class ChineseLongContextScenario(MultilingualScenario):
-    """Chinese-only long-document QA (LongBench v1 dureader) performance probe.
-
-    The performance suite's former ``multilingual`` scenario only used the
-    Chinese dureader corpus, so it is renamed to avoid claiming cross-lingual
-    coverage.  The accuracy suite keeps its true 8-language ``multilingual``
-    scenario.
-    """
-
-    name = "chinese_long_context"
-    dataset_name = "longbench_v1:dureader"
-    system_prompt = "请阅读以下中文材料并回答问题。"

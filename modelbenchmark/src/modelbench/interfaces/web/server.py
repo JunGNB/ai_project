@@ -9,12 +9,21 @@ The console exposes:
   * run catalog (``output/index.json``), overall/cells/per-sample results;
   * raw output file view/download and "open in Finder" entry points.
 
+Schema 3.0 layout (``docs/design/31-output-contract.md``): ``output/runs/`` is flat — the
+run directory name *is* the single-segment ``run_id`` (one level, no date/method
+sub-directories), and batch metadata lives at ``output/batches/<batch_id>.json``.
+The server resolves a run through the catalog and synthesizes the old ``summary``
+shape from ``run.json`` + ``aggregates.json`` + ``batch.json`` so the console
+keeps working; per-sample rows are no longer embedded in the summary but served
+page-by-page from ``samples.csv``.
+
 It is loopback-only and unauthenticated; do not expose it.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import errno
 import json
 import mimetypes
@@ -38,6 +47,7 @@ from modelbench.adapters.config.settings import (
 from modelbench.adapters.config.testsets import load_testsets
 from modelbench.adapters.datasets.registry import get_adapter
 from modelbench.adapters.storage import catalog as run_catalog
+from modelbench.adapters.storage import layout
 from modelbench.application.plan import apply_testset, dataset_plan
 from modelbench.domain.context_windows import describe_windows
 from .jobs import JobManager, build_config, plan_counts, read_log
@@ -283,37 +293,466 @@ def _scenario_samples(
     }
 
 
+# --------------------------------------------------------------------------- #
+# schema-3.0 run access (catalog resolves the single-segment run_id)
+# --------------------------------------------------------------------------- #
+
+#: ``samples.csv`` numeric/boolean columns (schema 3.0, CONTRACT §6).  Any other
+#: column is returned as text, so a forward-compatible extra column still shows
+#: up in the API without a server change.
+_SAMPLE_INT_FIELDS = frozenset(
+    {
+        "context_length",
+        "repeat",
+        "input_context_tokens",
+        "input_context_chars",
+        "actual_prompt_tokens",
+        "completion_tokens",
+        "cached_tokens",
+    }
+)
+_SAMPLE_FLOAT_FIELDS = frozenset(
+    {
+        "ttft_ms",
+        "ttft_visible_ms",
+        "tpot_ms",
+        "gen_tps",
+        "e2e_ms",
+        "prefill_tps",
+        "total_tps",
+        "peak_memory_gb",
+        "peak_rss_mb",
+        "peak_cpu_pct",
+        "mean_cpu_pct",
+    }
+)
+_SAMPLE_BOOL_FIELDS = frozenset(
+    {"length_capped", "cache_cleared", "cache_polluted", "truncated"}
+)
+_SAMPLE_SEARCH_FIELDS = ("sample_id", "dataset", "scenario", "model", "subtask")
+#: Sentinel distinguishing "no context_length filter" from "filter rows with None".
+_UNSET = object()
+
+
+def _load_json(path: Path) -> Optional[Dict[str, Any]]:
+    """Read a JSON object; ``None`` when missing/invalid (callers decide)."""
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def _run_dir(run_id: str) -> Path:
-    candidate = (OUTPUT_DIR / run_id).resolve()
-    if candidate == OUTPUT_DIR.resolve() or OUTPUT_DIR.resolve() not in candidate.parents:
+    """Resolve ``run_id`` to its run directory, refusing anything outside output.
+
+    ``run_id`` is a single path segment (``<batch>__<method>__<slug>``); the
+    catalog maps it to ``output/runs/<run_id>``.  The resolved path is re-checked
+    against the output root so a compromised/malformed catalog entry can never
+    expose files outside ``output/``.
+    """
+    run_id = str(run_id or "").strip()
+    if (
+        not run_id
+        or "/" in run_id
+        or "\\" in run_id
+        or run_id in (".", "..")
+        or "\x00" in run_id
+    ):
+        raise ValueError(f"invalid run id: {run_id!r}")
+    try:
+        candidate = Path(run_catalog.resolve_run(OUTPUT_DIR, run_id))
+    except (KeyError, FileNotFoundError) as exc:
+        raise FileNotFoundError(run_id) from exc
+    root = Path(OUTPUT_DIR).resolve()
+    resolved = candidate.resolve()
+    if resolved == root or root not in resolved.parents:
         raise ValueError(f"invalid run id: {run_id}")
-    if not candidate.is_dir():
+    if not resolved.is_dir():
         raise FileNotFoundError(run_id)
-    return candidate
+    return resolved
+
+
+def _sample_value(column: str, raw: Any) -> Any:
+    """Coerce one ``samples.csv`` cell to the JSON type the console expects."""
+    if raw is None:
+        return None
+    text = str(raw)
+    if text.strip() == "":
+        return None
+    if column in _SAMPLE_BOOL_FIELDS:
+        lowered = text.strip().lower()
+        if lowered in ("true", "1", "yes", "y"):
+            return True
+        if lowered in ("false", "0", "no", "n"):
+            return False
+        return None
+    if column in _SAMPLE_INT_FIELDS:
+        try:
+            return int(text)
+        except ValueError:
+            try:
+                return int(float(text))
+            except ValueError:
+                return None
+    if column in _SAMPLE_FLOAT_FIELDS:
+        try:
+            return float(text)
+        except ValueError:
+            return None
+    return text
+
+
+def _read_samples_csv(run_dir: Path) -> List[Dict[str, Any]]:
+    """Read ``samples.csv`` into typed dict rows (stdlib csv, no pandas).
+
+    The file is a small projection (240 rows per run in the reference batch), so
+    a full read per request is cheap and always consistent with the run on disk;
+    no cache can go stale while a run is being written.
+    """
+    path = Path(run_dir) / layout.SAMPLES_CSV
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"{layout.SAMPLES_CSV} not found for {Path(run_dir).name}"
+        )
+    rows: List[Dict[str, Any]] = []
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for raw in reader:
+            rows.append(
+                {
+                    str(column): _sample_value(str(column), value)
+                    for column, value in raw.items()
+                    if column is not None
+                }
+            )
+    return rows
+
+
+def _query_text(query: Dict[str, str], key: str) -> str:
+    return str(query.get(key) or "").strip()
+
+
+def _query_int(query: Dict[str, str], key: str, default: int) -> int:
+    raw = _query_text(query, key)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"invalid {key}: {raw!r}") from exc
+
+
+def _context_length_filter(raw: Optional[str]) -> Any:
+    """Parse the ``context_length`` filter; ``_UNSET`` means "no filter"."""
+    text = str(raw or "").strip()
+    if not text:
+        return _UNSET
+    if text.lower() in ("null", "none", "native"):
+        return None
+    try:
+        return int(text)
+    except ValueError as exc:
+        raise ValueError(f"invalid context_length: {raw!r}") from exc
+
+
+def _filter_samples(
+    rows: List[Dict[str, Any]],
+    *,
+    scenario: str = "",
+    dataset: str = "",
+    status: str = "",
+    model: str = "",
+    query: str = "",
+    context_length: Any = _UNSET,
+) -> List[Dict[str, Any]]:
+    needle = (query or "").strip().lower()
+    filtered: List[Dict[str, Any]] = []
+    for row in rows:
+        if scenario and row.get("scenario") != scenario:
+            continue
+        if dataset and row.get("dataset") != dataset:
+            continue
+        if status and row.get("status") != status:
+            continue
+        if model and row.get("model") != model:
+            continue
+        if context_length is not _UNSET and row.get("context_length") != context_length:
+            continue
+        if needle:
+            haystack = " ".join(
+                str(row.get(key) or "") for key in _SAMPLE_SEARCH_FIELDS
+            ).lower()
+            if needle not in haystack:
+                continue
+        filtered.append(row)
+    return filtered
+
+
+def _run_samples(run_id: str, query: Dict[str, str]) -> Dict[str, Any]:
+    """One filtered page of ``samples.csv`` (CONTRACT §11)."""
+    run_dir = _run_dir(run_id)
+    rows = _read_samples_csv(run_dir)
+    offset = max(0, _query_int(query, "offset", 0))
+    limit = max(1, min(_query_int(query, "limit", 200), _MAX_SAMPLE_PAGE))
+    filtered = _filter_samples(
+        rows,
+        scenario=_query_text(query, "scenario"),
+        dataset=_query_text(query, "dataset"),
+        status=_query_text(query, "status"),
+        model=_query_text(query, "model"),
+        query=_query_text(query, "q"),
+        context_length=_context_length_filter(query.get("context_length")),
+    )
+    return {
+        "total": len(filtered),
+        "offset": offset,
+        "limit": limit,
+        "rows": filtered[offset : offset + limit],
+    }
+
+
+def _sample_facets(run_dir: Path) -> Dict[str, List[str]]:
+    """Distinct filter values for the per-sample tab (best effort)."""
+    try:
+        rows = _read_samples_csv(run_dir)
+    except FileNotFoundError:
+        rows = []
+    values: Dict[str, set] = {
+        "models": set(),
+        "datasets": set(),
+        "scenarios": set(),
+        "statuses": set(),
+    }
+    for row in rows:
+        for column, bucket in (
+            ("model", "models"),
+            ("dataset", "datasets"),
+            ("scenario", "scenarios"),
+            ("status", "statuses"),
+        ):
+            value = row.get(column)
+            if value not in (None, ""):
+                values[bucket].add(str(value))
+    return {name: sorted(items) for name, items in values.items()}
+
+
+def _batch_json_path(run_dir: Path, run_json: Dict[str, Any]) -> Optional[Path]:
+    """``output/batches/<batch_id>.json`` for a flat-layout run directory."""
+    batch_id = str(run_json.get("batch_id") or "").strip()
+    if not batch_id:
+        try:
+            batch_id = layout.parse_run_id(
+                str(run_json.get("run_id") or Path(run_dir).name)
+            )[0]
+        except ValueError:
+            return None
+    # ``run_dir`` is ``<output>/runs/<run_id>``; the output root is two levels up.
+    return layout.batch_path(Path(run_dir).parent.parent, batch_id)
+
+
+def _batch_view(run_dir: Path, run_json: Dict[str, Any]) -> Dict[str, Any]:
+    """Batch context shown in the console (grouping/index/size badges)."""
+    model = run_json.get("model") or {}
+    view: Dict[str, Any] = {
+        "batch_id": run_json.get("batch_id"),
+        "method": run_json.get("method") or "performance",
+        "created_at": run_json.get("created_at"),
+        "project_version": run_json.get("project_version"),
+        "models_selected": [],
+        "models_total": None,
+        "model_index": None,
+        "model": model.get("alias") or model.get("id") or model.get("model_slug"),
+        "model_id": model.get("id"),
+        "model_slug": model.get("model_slug"),
+        "model_size_gb": None,
+    }
+    batch_path = _batch_json_path(run_dir, run_json)
+    meta = _load_json(batch_path) if batch_path else None
+    if meta:
+        view["batch_id"] = meta.get("batch_id") or view["batch_id"]
+        view["method"] = meta.get("method") or view["method"]
+        view["created_at"] = meta.get("created_at") or view["created_at"]
+        view["models_selected"] = [str(item) for item in (meta.get("models_selected") or [])]
+        total = meta.get("models_total") or meta.get("n_models_selected")
+        if total is not None:
+            try:
+                view["models_total"] = int(total)
+            except (TypeError, ValueError):
+                view["models_total"] = None
+        model_runs = [item for item in (meta.get("model_runs") or []) if isinstance(item, dict)]
+        if model_runs:
+            if view["models_total"] is None:
+                view["models_total"] = len(model_runs)
+            expected_path = f"{layout.RUNS}/{run_json.get('run_id')}"
+            for index, item in enumerate(model_runs, start=1):
+                same_run = item.get("run_id") == run_json.get("run_id")
+                if not same_run:
+                    # Flat layout: ``model_runs[]`` carries ``run_path`` (no run_dir).
+                    same_run = str(item.get("run_path") or "").rstrip("/") == expected_path
+                same_slug = bool(
+                    item.get("model_slug")
+                    and item.get("model_slug") == model.get("model_slug")
+                )
+                if same_run or same_slug:
+                    view["model_index"] = item.get("model_index") or index
+                    view["model"] = item.get("model") or view["model"]
+                    view["model_id"] = item.get("model_id") or view["model_id"]
+                    view["model_size_gb"] = item.get("model_size_gb")
+                    break
+    if not view["models_selected"] and view["model_id"]:
+        view["models_selected"] = [view["model_id"]]
+    if view["models_total"] is None:
+        view["models_total"] = 1
+    if view["model_index"] is None:
+        view["model_index"] = 1
+    return view
+
+
+def _model_size_gb(run_json: Dict[str, Any], batch: Dict[str, Any]) -> Optional[float]:
+    """Model weights size in GiB derived from ``run.json`` (batch hint first)."""
+    size = batch.get("model_size_gb")
+    if size is not None:
+        try:
+            return round(float(size), 2)
+        except (TypeError, ValueError):
+            pass
+    model = run_json.get("model") or {}
+    wanted = {
+        str(model.get("id") or ""),
+        str(model.get("alias") or ""),
+        str(model.get("model_slug") or ""),
+    } - {""}
+    env = run_json.get("env") or {}
+    candidates: List[Dict[str, Any]] = []
+    omlx_models = ((env.get("omlx") or {}).get("models")) or {}
+    if isinstance(omlx_models, dict):
+        candidates.extend(item for item in omlx_models.values() if isinstance(item, dict))
+    model_env = env.get("model_env") or {}
+    if isinstance(model_env, dict):
+        candidates.extend(item for item in model_env.values() if isinstance(item, dict))
+    ordered = sorted(
+        candidates,
+        key=lambda item: 0
+        if str(item.get("id") or item.get("model_name") or "") in wanted
+        else 1,
+    )
+    for item in ordered:
+        raw = item.get("estimated_size") or item.get("resident_estimated_size")
+        if not raw:
+            continue
+        try:
+            return round(float(raw) / (1024 ** 3), 2)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _synthesize_summary(
+    run_json: Dict[str, Any],
+    aggregates: Dict[str, Any],
+    batch: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Rebuild the schema-2.x ``summary`` shape the console consumes.
+
+    Data sources: ``run.json`` (metadata/outcome/config/environment pointer),
+    ``aggregates.json`` (``overall``/``cells``) and ``batch.json`` (grouping).
+    Per-sample rows are deliberately *not* included (CONTRACT §11); they are
+    served by ``/api/runs/<run_id>/samples`` from ``samples.csv``.
+    """
+    config = run_json.get("config") or {}
+    outcome = run_json.get("outcome") or {}
+    aggregates = aggregates or {}
+    perf = dict(config.get("perf") or {})
+    context_windows = list(
+        config.get("context_windows") or perf.get("context_windows") or []
+    )
+    if context_windows:
+        perf["context_windows"] = context_windows
+
+    def metric(key: str) -> Any:
+        value = outcome.get(key)
+        if value is None:
+            value = aggregates.get(key)
+        return value
+
+    return {
+        "run_id": run_json.get("run_id"),
+        "schema_version": run_json.get("schema_version"),
+        "mode": run_json.get("method") or "performance",
+        "batch": batch,
+        "perf": perf,
+        "run": dict(config.get("run") or {}),
+        "n_records": metric("n_records"),
+        "n_samples": metric("n_samples"),
+        "n_cells": metric("n_cells"),
+        "overall": list(aggregates.get("overall") or []),
+        "cells": list(aggregates.get("cells") or []),
+        # All three environment blocks live in run.json now (one authoritative
+        # copy); the values are file names, like the old summary's pointers.
+        "environment": {
+            "run": layout.RUN_JSON,
+            "hardware": layout.RUN_JSON,
+            "omlx": layout.RUN_JSON,
+        },
+        "skipped": list(outcome.get("skipped") or []),
+        "n_gen_tps_invalid": outcome.get("n_gen_tps_invalid") or 0,
+        "n_isl_in_band": outcome.get("n_isl_in_band") or 0,
+        "n_isl_out_of_band": outcome.get("n_isl_out_of_band") or 0,
+        "warnings": list(outcome.get("warnings") or []),
+        "cancelled": bool(outcome.get("cancelled")),
+        "memory_errors": int(outcome.get("memory_errors") or 0),
+        "duration_s": run_json.get("duration_s"),
+        "generated_at": (
+            aggregates.get("generated_at")
+            or run_json.get("finished_at")
+            or run_json.get("created_at")
+        ),
+        "legacy": False,
+        "context_windows": context_windows,
+    }
 
 
 def _run_detail(run_id: str) -> Dict[str, Any]:
+    """Run detail: synthesized summary + file listing + report.
+
+    ``run`` carries the raw ``run.json`` so the environment tab reads the single
+    authoritative environment snapshot instead of the removed
+    ``hardware.json``/``omlx.json``/``manifest.json`` files.
+    """
     run_dir = _run_dir(run_id)
-    summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
-    manifest_path = run_dir / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else {}
-    omlx_path = run_dir / "omlx.json"
-    omlx = json.loads(omlx_path.read_text(encoding="utf-8")) if omlx_path.is_file() else {}
-    report_path = run_dir / "report.md"
+    run_json = _load_json(run_dir / layout.RUN_JSON)
+    if run_json is None:
+        raise FileNotFoundError(f"{layout.RUN_JSON} not found for {run_dir.name}")
+    aggregates = _load_json(run_dir / layout.AGGREGATES_JSON) or {}
+    batch = _batch_view(run_dir, run_json)
+    summary = _synthesize_summary(run_json, aggregates, batch)
+    report_path = run_dir / layout.REPORT_MD
     report = report_path.read_text(encoding="utf-8") if report_path.is_file() else ""
-    entry = run_catalog.run_entry(run_dir, summary=summary, manifest=manifest) or {}
+    measured = sorted(
+        {
+            str(entry.get("model"))
+            for entry in summary["overall"]
+            if isinstance(entry, dict) and entry.get("model")
+        }
+    )
+    if not measured and int(summary.get("n_samples") or 0) > 0:
+        label = batch.get("model_id") or batch.get("model")
+        if label:
+            measured = [str(label)]
     return {
         "summary": summary,
-        "manifest": manifest,
-        "omlx": omlx,
-        "report": report,
         "files": run_catalog.run_file_listing(run_dir),
+        "report": report,
+        "run": run_json,
         "run_dir": str(run_dir),
-        "models_selected": entry.get("models_selected") or [],
-        "models_measured": entry.get("models_measured") or [],
-        "skipped": summary.get("skipped") or [],
-        "warnings": summary.get("warnings") or [],
-        "legacy": bool(entry.get("legacy")),
+        "models_selected": list(batch.get("models_selected") or []),
+        "models_measured": measured,
+        "model_size_gb": _model_size_gb(run_json, batch),
+        "skipped": summary["skipped"],
+        "warnings": summary["warnings"],
+        "legacy": False,
+        "sample_facets": _sample_facets(run_dir),
     }
 
 
@@ -431,13 +870,14 @@ def _server_overview() -> Dict[str, Any]:
                 "batch_id",
                 "method",
                 "model",
+                "model_size_gb",
                 "batch_index",
                 "batch_models_total",
             )
         }
         for entry in index.get("runs", [])
     ]
-    index_path = OUTPUT_DIR / run_catalog.INDEX_NAME
+    index_path = layout.index_path(OUTPUT_DIR)
     return {
         "server": {"base_url": cfg.server.base_url, "error": server_error},
         "models": models,
@@ -559,6 +999,35 @@ class Handler(BaseHTTPRequestHandler):
         parsed = parse_qs(urlparse(self.path).query)
         return {key: values[0] for key, values in parsed.items() if values}
 
+    def _reject_cross_site_write(self) -> bool:
+        """Reject browser POSTs whose Origin does not match this Host.
+
+        The console is unauthenticated and loopback-only by default, but a
+        malicious page in the user's browser can still POST to 127.0.0.1.
+        Modern browsers send ``Origin`` on cross-site writes; same-origin
+        writes match the ``Host`` header.  Non-browser clients (curl/CLI) do
+        not send Origin and are allowed.  Returns True when the request was
+        rejected and a response already sent.
+        """
+        origin = self.headers.get("Origin")
+        if not origin:
+            return False
+        host = self.headers.get("Host") or ""
+        try:
+            parsed = urlparse(origin)
+            origin_netloc = parsed.netloc
+            scheme_ok = parsed.scheme in ("http", "https")
+        except ValueError:
+            origin_netloc, scheme_ok = "", False
+        if not scheme_ok or not origin_netloc or origin_netloc != host:
+            self._error(
+                "cross-origin write rejected (Origin/Host mismatch); "
+                "use the local console origin",
+                403,
+            )
+            return True
+        return False
+
     def _static(self, path: str) -> None:
         rel = path.lstrip("/") or "index.html"
         candidate = (STATIC_DIR / rel).resolve()
@@ -578,9 +1047,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def _serve_run_file(self, run_id: str) -> None:
         query = self._query()
-        rel = (query.get("path") or "").strip()
+        rel = (query.get("path") or "").strip().replace("\\", "/")
         if not rel:
             self._error("path is required", 400)
+            return
+        # Only the schema-3.0 run artifacts are downloadable; this keeps the
+        # endpoint from turning into an arbitrary file reader if a run directory
+        # ever receives an unexpected file.
+        if rel not in tuple(run_catalog.VIEWABLE_FILES):
+            self._error(f"file not downloadable: {rel}", 403)
             return
         run_dir = _run_dir(run_id)
         path = run_catalog.resolve_run_file(run_dir, rel)
@@ -663,6 +1138,9 @@ class Handler(BaseHTTPRequestHandler):
                     self._error("not found", 404)
             elif path == "/api/runs":
                 self._json({"runs": _catalog().get("runs", [])})
+            elif path.startswith("/api/runs/") and path.endswith("/samples"):
+                run_id = path[len("/api/runs/") : -len("/samples")].strip("/")
+                self._json(_run_samples(unquote(run_id), self._query()))
             elif path.startswith("/api/runs/") and path.endswith("/file"):
                 run_id = path[len("/api/runs/") : -len("/file")].strip("/")
                 self._serve_run_file(unquote(run_id))
@@ -682,6 +1160,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         _touch()
+        if self._reject_cross_site_write():
+            return
         path = unquote(urlparse(self.path).path)
         try:
             if path == "/api/estimate":
@@ -761,7 +1241,7 @@ class Handler(BaseHTTPRequestHandler):
                     {
                         "ok": True,
                         "n_runs": index.get("n_runs"),
-                        "path": str(OUTPUT_DIR / run_catalog.INDEX_NAME),
+                        "path": str(layout.index_path(OUTPUT_DIR)),
                     }
                 )
             else:

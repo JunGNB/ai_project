@@ -4,8 +4,9 @@ The benchmark core is written against this interface so a new served
 application (oMLX today; Ollama / LM Studio / vLLM later) only needs an
 adapter that implements model lifecycle + inference + cache administration.
 
-`src/app_test/omlx` is the first implementation.  Keeping this contract small
-is intentional: anything application-specific belongs in the adapter.
+`src/modelbench/adapters/omlx` is the first implementation.  Keeping this
+contract small is intentional: anything application-specific belongs in the
+adapter.
 """
 
 from __future__ import annotations
@@ -81,3 +82,31 @@ class AppBackend(ABC):
     @abstractmethod
     def close(self) -> None:
         ...
+
+
+#: Structural contract used by factories/tests for a substituted backend.
+#: This is deliberately duck-typed (OMLXBackend wraps OMLXClient) but gives a
+#: single check that a new backend exposes every method the runner/Web call.
+REQUIRED_BACKEND_METHODS = (
+    "probe",
+    "list_models",
+    "model_info",
+    "apply_model_settings",
+    "load_model",
+    "wait_until_loaded",
+    "unload_model",
+    "wait_until_unloaded",
+    "clear_caches",
+    "tokenize_messages",
+    "chat_stream",
+    "close",
+)
+
+
+def backend_contract_errors(backend: Any) -> List[str]:
+    """Return missing/not-callable members required by the backend contract."""
+    missing: List[str] = []
+    for name in REQUIRED_BACKEND_METHODS:
+        if not callable(getattr(backend, name, None)):
+            missing.append(name)
+    return missing

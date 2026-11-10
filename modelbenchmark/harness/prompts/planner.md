@@ -8,11 +8,12 @@
 ## 输入（按顺序读）
 
 1. `AGENTS.md`（硬契约）
-2. `docs/ARCHITECTURE.md`（模块、不变量、§11 技术债）
-3. `docs/archive/AUDIT.md`（历史审计，仅供参考；当前结论以最新审计/门禁为准）
-4. `harness/reports/latest.json`（最近门禁状态）
-5. `harness/tasks/*.json`（已有任务，避免重复）
-6. 相关源码/文档的具体章节（不要通读 `dataset/raw/`、`output/`）
+2. `docs/design/30-architecture.md`（模块、不变量、§9 技术债）
+3. `docs/spec/20-methodology.md` 与 `docs/process/50-validation-plan.md`（测量口径与 V&V 判据）
+4. `docs/archive/AUDIT.md`（历史审计，仅供参考；当前结论以最新审计/门禁为准）
+5. `harness/reports/latest.json`（最近门禁状态）
+6. `harness/tasks/` 下已有任务 JSON（本地任务板，避免重复）
+7. 相关源码/文档的具体章节（不要通读 `dataset/raw/`、`output/`）
 
 ## 输出
 
@@ -26,7 +27,7 @@
   --acceptance "可执行/可观察的验收条件" \
   --acceptance "python -m harness.gate 通过" \
   --context "现状问题 + 证据来源（审计编号/指标/文档章节）" \
-  --link docs/ARCHITECTURE.md#11-技术债与演进
+  --link docs/design/30-architecture.md#9-技术债与演进
 ```
 
 要求：

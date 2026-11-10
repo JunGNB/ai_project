@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# Unified entry point for the benchmark project.
+# Unified entry point for the benchmark project (macOS/Linux/Git Bash).
 #
 #   ./modelbench setup                 # create .venv and install dependencies
 #   ./modelbench web [--port 8765]     # local web console
 #   ./modelbench run --models minicpm5-1b   # CLI benchmark
 #   ./modelbench validate | list | hardware | download | analyze ...
+#
+# Windows uses the native launchers instead: modelbench.cmd (cmd.exe) or
+# modelbench.ps1 (PowerShell); all three call the same stdlib-only
+# tool/bootstrap.py for `setup`.
 #
 # .venv is only the isolated Python environment created by `setup`; it is not
 # another entry point and should not be copied between machines.
@@ -21,38 +25,53 @@ fi
 if [ "$cmd" = "setup" ]; then
   shift || true
   cd "$ROOT"
-  mkdir -p output/build
+  # `--dry-run` must not create directories or a uv venv as a side effect.
+  DRY_RUN=0
+  for arg in "$@"; do
+    if [ "$arg" = "--dry-run" ]; then DRY_RUN=1; fi
+  done
+  if [ "$DRY_RUN" -eq 0 ]; then
+    mkdir -p output/build
+  fi
   export UV_CACHE_DIR="${UV_CACHE_DIR:-$ROOT/.uv-cache}"
   export UV_DEFAULT_INDEX="${UV_DEFAULT_INDEX:-https://pypi.tuna.tsinghua.edu.cn/simple}"
   PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
+
+  # 1) Pick the base interpreter for the bootstrap.  tool/bootstrap.py validates
+  #    the version (>= 3.10, see pyproject.toml) and prints an actionable error.
+  if [ -z "${PYTHON:-}" ]; then
+    for candidate in "python$PYTHON_VERSION" python3 python; do
+      if command -v "$candidate" >/dev/null 2>&1; then
+        PYTHON="$candidate"
+        break
+      fi
+    done
+  fi
+  if [ -z "${PYTHON:-}" ]; then
+    echo "python $PYTHON_VERSION not found; set PYTHON=/path/to/python3.12" >&2
+    exit 1
+  fi
+
+  # 2) Optional uv fast path: create the venv with uv when it is available.
+  #    (Installs still go through the venv's pip so Windows/POSIX share one path.)
   UV="${UV:-}"
   if [ -z "$UV" ]; then
     if command -v uv >/dev/null 2>&1; then UV="$(command -v uv)";
     elif [ -x "$HOME/.local/bin/uv" ]; then UV="$HOME/.local/bin/uv"; fi
   fi
-  if [ ! -x "$VENV/bin/python" ]; then
-    if [ -n "$UV" ]; then
-      "$UV" venv --python "$PYTHON_VERSION" .venv
-    else
-      PYTHON="${PYTHON:-python3.12}"
-      command -v "$PYTHON" >/dev/null 2>&1 || {
-        echo "python $PYTHON_VERSION not found; set PYTHON=/path/to/python3.12" >&2
-        exit 1
-      }
-      "$PYTHON" -m venv .venv
-      "$VENV/bin/python" -m pip install --upgrade pip
-    fi
+  if [ -n "$UV" ] && [ "$DRY_RUN" -eq 0 ] && [ ! -x "$VENV/bin/python" ]; then
+    "$UV" venv --python "$PYTHON_VERSION" "$VENV"
   fi
-  if [ -n "$UV" ]; then
-    "$UV" pip install --python "$VENV/bin/python" -e ".[dev]"
-  else
-    "$VENV/bin/python" -m pip install -e ".[dev]"
+
+  # 3) Create/repair the venv and install the package via the portable bootstrap.
+  bootstrap_args=(--venv "$VENV")
+  if [ -n "${PIP_INDEX_URL:-}" ]; then
+    : # pip reads PIP_INDEX_URL from the environment; do not override the user.
+  elif [ -n "${UV_DEFAULT_INDEX:-}" ]; then
+    bootstrap_args+=(--index-url "$UV_DEFAULT_INDEX")
   fi
-  echo
-  echo "environment ready. next:"
-  echo "  ./modelbench web"
-  echo "  ./modelbench run --models minicpm5-1b"
-  exit 0
+  "$PYTHON" "$ROOT/tool/bootstrap.py" "${bootstrap_args[@]}" "$@"
+  exit $?
 fi
 
 if [ ! -x "$VENV/bin/python" ]; then

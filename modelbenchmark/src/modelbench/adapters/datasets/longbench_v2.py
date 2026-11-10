@@ -1,8 +1,8 @@
 """LongBench-v2 dataset adapter (required deliverable).
 
 Source: https://huggingface.co/datasets/zai-org/LongBench-v2 (formerly THUDM)
-Raw file: ``data/raw/longbench_v2/data.json`` (single JSON array, 503 items,
-SHA-256 ``15d61c2...`` recorded in docs/DATASETS.md).
+Raw file: ``dataset/raw/longbench_v2/data.json`` (single JSON array, 503 items,
+SHA-256 ``15d61c2...`` recorded in docs/design/32-dataset-sources.md).
 
 Format (official):
     {_id, domain, sub_domain, difficulty, length, question,

@@ -1,7 +1,7 @@
 # 独立验证与问题修复记录
 
 > **历史归档**：本文记录重构前的设计/审计，目录、命令与路径已过时，仅用于追溯；
-> 当前设计见 [../ARCHITECTURE.md](../ARCHITECTURE.md)，测试方案见 [../TEST_PLAN.md](../TEST_PLAN.md)。
+> 当前设计见 [../ARCHITECTURE.md](../design/30-architecture.md)，测试方案见 [../TEST_PLAN.md](../spec/21-test-plan.md)。
 
 本文件记录一次**独立只读审计**（审计者不修改项目文件、不重跑真实 benchmark）的结论，以及审计后 Lead 的修复与复验。审计对象为 commit `e04bc0e` 之前的实现，修复后代码见当前仓库 HEAD。
 

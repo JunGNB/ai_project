@@ -37,8 +37,11 @@ def _print_plan(cfg: ProjectConfig) -> None:
     )
     print(f"context filter: {plan['context_filter']} (1K: 0-1.5K; others: N +/- 0.5K)")
     print(
-        "output layout: output/<batch_id>_performance_<model>/ "
-        "(one bundle per model; batch metadata under output/batches/)"
+        "output layout: output/runs/<run_id>/ (flat; run_id = "
+        "<batch_id>__<method>__<model_slug>) + output/batches/<batch_id>.json "
+        "(run.json + MANIFEST.json + records.jsonl + samples.csv + "
+        "aggregates.json + report.md + logs/run.log; prompt bodies in "
+        "output/blobs/prompts/)"
     )
     for group in plan["groups"]:
         context = group.get("context_length")
@@ -489,8 +492,12 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     argv = list(args.runs)
     if args.metrics:
         argv += ["--metrics", *args.metrics]
-    if args.json:
+    if getattr(args, "json", False):
         argv.append("--json")
+    if getattr(args, "paired", False):
+        argv.append("--paired")
+    if getattr(args, "output_dir", None):
+        argv += ["--output-dir", args.output_dir]
     return analysis_main(argv)
 
 
@@ -533,10 +540,130 @@ def cmd_export_analysis(args: argparse.Namespace) -> int:
                 print("ERROR: provide batch id(s) or --all", file=sys.stderr)
                 return 2
             results = [generate_for_batch(root, batch_id) for batch_id in args.batch_ids]
+    except (FileNotFoundError, KeyError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    # Excel entry points return ``Path`` objects; JSON needs plain strings.
+    print(json.dumps({"generated": [str(Path(item)) for item in results]}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_gc(args: argparse.Namespace) -> int:
+    from modelbench.adapters.storage import tools
+    from modelbench.adapters.storage.catalog import human_size
+
+    cfg = build_config(args)
+    root = Path(cfg.run.output_dir)
+    try:
+        result = tools.gc_blobs(root, dry_run=bool(args.dry_run))
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    elif result.get("refused"):
+        print(f"gc refused: {result.get('reason')}", file=sys.stderr)
+    else:
+        verb = "would delete" if result.get("dry_run") else "deleted"
+        print(
+            f"prompt blobs: {verb} {result['deleted_count']} "
+            f"({human_size(result['freed_bytes'])}); kept {result['kept']}, "
+            f"referenced {result['referenced']}"
+        )
+    return 0 if result.get("ok") else 1
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    from modelbench.adapters.storage import tools
+
+    cfg = build_config(args)
+    root = Path(cfg.run.output_dir)
+    result = tools.verify_output(root)
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        stats = result["stats"]
+        summary = (
+            f"{stats['batches']} batches, {stats['runs']} runs, "
+            f"{stats['records']} records ({stats['measured_ok']} measured+ok), "
+            f"{stats['blobs']} prompt blobs"
+        )
+        if result["ok"]:
+            print(f"verify OK: {summary}")
+        else:
+            for issue in result["issues"]:
+                print(f"  - {issue}")
+            print(f"verify FAILED ({len(result['issues'])} issue(s)): {summary}")
+    return 0 if result["ok"] else 1
+
+
+def cmd_rebuild(args: argparse.Namespace) -> int:
+    from modelbench.adapters.storage import catalog, tools
+
+    cfg = build_config(args)
+    root = Path(cfg.run.output_dir)
+    try:
+        if args.run_id:
+            run_dirs = [catalog.resolve_run(root, args.run_id)]
+        else:
+            run_dirs = catalog.iter_run_dirs(root)
+    except KeyError as exc:
+        print(f"ERROR: unknown run id: {exc.args[0] if exc.args else exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    if not run_dirs:
+        print(f"no runs under {root}")
+        return 0
+    rebuilt = [tools.rebuild_run(root, run_dir) for run_dir in run_dirs]
+    index = catalog.rebuild_index(root)
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "rebuilt": rebuilt,
+                    "index": {
+                        "schema_version": index["schema_version"],
+                        "n_runs": index["n_runs"],
+                        "n_batches": index["n_batches"],
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    else:
+        for item in rebuilt:
+            print(
+                f"rebuilt {item['run_id']}: {item['n_records']} records, "
+                f"{item['n_samples']} samples, {item['n_cells']} cells, "
+                f"{catalog.human_size(item['bytes_total'])}"
+            )
+        print(
+            f"index: {root / 'index.json'} "
+            f"({index['n_runs']} runs, {index['n_batches']} batches)"
+        )
+    return 0
+
+
+def cmd_pack(args: argparse.Namespace) -> int:
+    from modelbench.adapters.storage import tools
+
+    cfg = build_config(args)
+    root = Path(cfg.run.output_dir)
+    try:
+        path = tools.pack_batch(root, args.batch_id, Path(args.out))
+    except KeyError:
+        print(f"ERROR: unknown batch id: {args.batch_id}", file=sys.stderr)
+        return 1
     except FileNotFoundError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
-    print(json.dumps({"generated": results}, ensure_ascii=False, indent=2))
+    except OSError as exc:
+        print(f"ERROR: cannot write archive: {exc}", file=sys.stderr)
+        return 1
+    print(f"packed batch {args.batch_id}: {path}")
     return 0
 
 
@@ -556,18 +683,20 @@ def cmd_runs(args: argparse.Namespace) -> int:
     by_id = {entry.get("run_id"): entry for entry in runs}
     batches = index.get("batches") or []
     print(
-        "batches are grouped by one test action; each model has its own bundle "
-        "(time + method + model)."
+        "batches are grouped by one test action: output/batches/<batch_id>.json "
+        "lists output/runs/<run_id>/ (flat; one run per model)."
     )
     for batch in batches:
+        methods = "/".join(batch.get("methods") or []) or "-"
         print(
-            f"\n[{batch['batch_id']}] method={batch.get('method')} "
+            f"\n[{batch['batch_id']}] method={methods} "
             f"models={batch.get('n_models')} samples={batch.get('n_samples')} "
-            f"duration={batch.get('duration_s')}s created={batch.get('created_at')}"
+            f"duration={batch.get('duration_s')}s created={batch.get('created_at')} "
+            f"path={batch.get('path') or '-'}"
         )
         for model_entry in batch.get("models") or []:
             entry = by_id.get(model_entry.get("run_id")) or {}
-            skipped = f" skipped={len(entry.get('skipped') or [])}" if entry.get("skipped") else ""
+            skipped = f" skipped={entry.get('n_skipped')}" if entry.get("n_skipped") else ""
             print(
                 f"  - {entry.get('model') or model_entry.get('model') or '-':<30} "
                 f"run_id={entry.get('run_id')} "
@@ -580,10 +709,10 @@ def cmd_runs(args: argparse.Namespace) -> int:
         for batch in batches
         for model_entry in batch.get("models") or []
     }
-    legacy = [entry for entry in runs if entry.get("run_id") not in grouped_ids]
-    if legacy:
-        print("\nlegacy / ungrouped runs:")
-        for entry in legacy:
+    ungrouped = [entry for entry in runs if entry.get("run_id") not in grouped_ids]
+    if ungrouped:
+        print("\nungrouped runs (no batch.json):")
+        for entry in ungrouped:
             print(
                 f"  - {entry.get('run_id'):<40} sample(s)={entry.get('n_samples') or '-'} "
                 f"duration={entry.get('duration_s') or '-'}s "
@@ -594,6 +723,7 @@ def cmd_runs(args: argparse.Namespace) -> int:
         f"({len(runs)} runs, {len(batches)} batches)"
     )
     return 0
+
 
 
 # --------------------------------------------------------------------------- #
@@ -659,9 +789,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="model thinking behavior (default: config, disabled)",
     )
     p_run.add_argument("--output-dir", help="results directory")
-    p_run.add_argument("--run-id", help="explicit run id (default: UTC timestamp)")
+    p_run.add_argument(
+        "--run-id",
+        help=(
+            "explicit batch id used for output/batches/<batch_id>.json and the "
+            "run ids (default: UTC timestamp; each model gets "
+            "runs/<batch_id>__<method>__<model_slug>/)"
+        ),
+    )
     p_run.add_argument("--max-requests", type=int, help="global cap on measured requests")
-    p_run.add_argument("--overwrite", action="store_true", help="overwrite existing run dir")
+    p_run.add_argument(
+        "--overwrite", action="store_true", help="overwrite an existing batch/run directory"
+    )
     p_run.add_argument("--dry-run", action="store_true", help="print the plan only")
     p_run.set_defaults(func=cmd_run)
 
@@ -704,19 +843,30 @@ def build_parser() -> argparse.ArgumentParser:
     p_dl.add_argument("--list", action="store_true", help="list registered datasets")
     p_dl.set_defaults(func=cmd_download)
 
-    p_an = sub.add_parser("analyze", help="compare 2+ run summaries")
-    p_an.add_argument("runs", nargs="+", help="run directories or summary.json paths")
+    p_an = sub.add_parser("analyze", help="compare 2+ runs (aggregates.json)")
+    p_an.add_argument(
+        "runs",
+        nargs="+",
+        help="run directories or single-segment run_ids (resolved via output/index.json)",
+    )
     p_an.add_argument(
         "--metrics",
         nargs="+",
         help="metrics to compare (default: ttft_ms gen_tps tpot_ms e2e_ms peak_memory_gb input_context_tokens)",
     )
     p_an.add_argument("--json", action="store_true", help="emit summaries as JSON")
+    p_an.add_argument(
+        "--paired",
+        action="store_true",
+        help="compare exactly two runs on common sample_id values (paired bootstrap 95%% CI)",
+    )
+    p_an.add_argument("--output-dir", help="results directory (default: config run.output_dir)")
+    p_an.add_argument("--config")
     p_an.set_defaults(func=cmd_analyze)
 
     p_export = sub.add_parser(
         "export-analysis",
-        help="generate Excel result analysis (result_analysis/) for batch(es)",
+        help="generate the batch Excel workbook under output/exports/<batch_id>.xlsx",
     )
     p_export.add_argument("batch_ids", nargs="*", help="batch id(s)")
     p_export.add_argument("--all", action="store_true", help="regenerate for all batches")
@@ -735,6 +885,58 @@ def build_parser() -> argparse.ArgumentParser:
     p_index.add_argument("--config")
     p_index.add_argument("--output-dir", help="results directory (default: config run.output_dir)")
     p_index.set_defaults(func=cmd_index)
+
+    p_gc = sub.add_parser(
+        "gc",
+        help="delete prompt blobs no surviving run references (runs/ + archive/)",
+    )
+    p_gc.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report what would be deleted without touching the blob pool",
+    )
+    p_gc.add_argument("--json", action="store_true", help="emit the report as JSON")
+    p_gc.add_argument("--output-dir", help="results directory (default: config run.output_dir)")
+    p_gc.add_argument("--config")
+    p_gc.set_defaults(func=cmd_gc)
+
+    p_verify = sub.add_parser(
+        "verify",
+        help="reconcile batch.json/model_runs/records/MANIFEST and the prompt pool",
+    )
+    p_verify.add_argument("--json", action="store_true", help="emit the report as JSON")
+    p_verify.add_argument("--output-dir", help="results directory (default: config run.output_dir)")
+    p_verify.add_argument("--config")
+    p_verify.set_defaults(func=cmd_verify)
+
+    p_rebuild = sub.add_parser(
+        "rebuild",
+        help="rebuild samples.csv/aggregates.json/report.md/MANIFEST.json from records.jsonl",
+    )
+    p_rebuild.add_argument(
+        "run_id",
+        nargs="?",
+        help="single-segment run id (default: every run under output/runs)",
+    )
+    p_rebuild.add_argument("--json", action="store_true", help="emit the report as JSON")
+    p_rebuild.add_argument("--output-dir", help="results directory (default: config run.output_dir)")
+    p_rebuild.add_argument("--config")
+    p_rebuild.set_defaults(func=cmd_rebuild)
+
+    p_pack = sub.add_parser(
+        "pack",
+        help="zip one batch directory plus the prompt blobs it references",
+    )
+    p_pack.add_argument("batch_id", help="batch id (output/batches/<batch_id>.json)")
+    p_pack.add_argument(
+        "--out",
+        required=True,
+        metavar="ZIP",
+        help="destination zip path (laid out relative to the output root)",
+    )
+    p_pack.add_argument("--output-dir", help="results directory (default: config run.output_dir)")
+    p_pack.add_argument("--config")
+    p_pack.set_defaults(func=cmd_pack)
 
     p_web = sub.add_parser("web", help="launch the local web console (opens the browser)")
     p_web.add_argument("--host", default="127.0.0.1")

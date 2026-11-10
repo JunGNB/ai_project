@@ -1,0 +1,206 @@
+{
+  "schema_version": 1,
+  "mirror_default": "https://hf-mirror.com",
+  "files": [
+    {
+      "dataset": "longbench_v2",
+      "path": "longbench_v2/data.json",
+      "url": "https://huggingface.co/datasets/zai-org/LongBench-v2/resolve/main/data.json",
+      "bytes": 465490535,
+      "sha256": "15d61c22d92c96900b3c4948b6aeea218d3214b676a65df48e7b8555604c7fe2",
+      "kind": "data",
+      "required_for": [
+        "performance"
+      ]
+    },
+    {
+      "dataset": "ifeval",
+      "path": "ifeval/ifeval_input_data.jsonl",
+      "url": "https://huggingface.co/datasets/google/IFEval/resolve/main/ifeval_input_data.jsonl",
+      "bytes": 207111,
+      "sha256": "6a85310ca8ce15eff755aa08a3a4ff931c7e273e7515ebb3c492ea85fd8288f2",
+      "kind": "data",
+      "required_for": [
+        "performance"
+      ]
+    },
+    {
+      "dataset": "gsm8k",
+      "path": "gsm8k/main/test-00000-of-00001.parquet",
+      "url": "https://huggingface.co/datasets/openai/gsm8k/resolve/main/main/test-00000-of-00001.parquet",
+      "bytes": 419088,
+      "sha256": "ee7b8da9e381df27b9e3f7758a159ab2bdaa4dbaa910546cbbc47e0cb44e4f59",
+      "kind": "data",
+      "required_for": [
+        "performance"
+      ]
+    },
+    {
+      "dataset": "bfcl_v4",
+      "path": "bfcl/BFCL_v4_simple_python.json",
+      "url": "https://raw.githubusercontent.com/ShishirPatil/gorilla/main/berkeley-function-call-leaderboard/bfcl_eval/data/BFCL_v4_simple_python.json",
+      "bytes": 283274,
+      "sha256": "82dd63ba502eb2520c6b5d1d9a5c4b590e03ff261565175561f6228a367d1991",
+      "kind": "data",
+      "required_for": [
+        "performance"
+      ]
+    },
+    {
+      "dataset": "bfcl_v4",
+      "path": "bfcl/BFCL_v4_multiple.json",
+      "url": "https://raw.githubusercontent.com/ShishirPatil/gorilla/main/berkeley-function-call-leaderboard/bfcl_eval/data/BFCL_v4_multiple.json",
+      "bytes": 316583,
+      "sha256": "aef168155ebd74b7ac2401198b201343bc7d16d7a3d7e0d4e6d8ee82c6969b2a",
+      "kind": "data",
+      "required_for": [
+        "performance"
+      ]
+    },
+    {
+      "dataset": "bfcl_v4",
+      "path": "bfcl/BFCL_v4_parallel.json",
+      "url": "https://raw.githubusercontent.com/ShishirPatil/gorilla/main/berkeley-function-call-leaderboard/bfcl_eval/data/BFCL_v4_parallel.json",
+      "bytes": 171896,
+      "sha256": "19f51a82eff42e5d62541aa500115a056eb78f437c2ba1f10415fd7c8e5dda84",
+      "kind": "data",
+      "required_for": [
+        "performance"
+      ]
+    },
+    {
+      "dataset": "global_mmlu",
+      "path": "global_mmlu/en/test.parquet",
+      "url": "https://huggingface.co/datasets/CohereLabs/Global-MMLU/resolve/main/en/test.parquet",
+      "bytes": 3910925,
+      "sha256": "5baec81ba97243728cc9557b2cba2f03aaeedf8232473db9f20cf995c6b0a1a9",
+      "kind": "data",
+      "required_for": [
+        "performance"
+      ]
+    },
+    {
+      "dataset": "global_mmlu",
+      "path": "global_mmlu/fr/test.parquet",
+      "url": "https://huggingface.co/datasets/CohereLabs/Global-MMLU/resolve/main/fr/test.parquet",
+      "bytes": 4550854,
+      "sha256": "e602201459c29c5dbacf9a3d80cfe2524496f8e0c0b51b6326ef4205bad3405e",
+      "kind": "data",
+      "required_for": [
+        "performance"
+      ]
+    },
+    {
+      "dataset": "global_mmlu",
+      "path": "global_mmlu/de/test.parquet",
+      "url": "https://huggingface.co/datasets/CohereLabs/Global-MMLU/resolve/main/de/test.parquet",
+      "bytes": 4543635,
+      "sha256": "b58a0d5994e756dabef96eb804693be153953052276d3e0b7d57bb2f2798854a",
+      "kind": "data",
+      "required_for": [
+        "performance"
+      ]
+    },
+    {
+      "dataset": "global_mmlu",
+      "path": "global_mmlu/es/test.parquet",
+      "url": "https://huggingface.co/datasets/CohereLabs/Global-MMLU/resolve/main/es/test.parquet",
+      "bytes": 4327396,
+      "sha256": "efbcc4ce1cf14f2f43f7b05be49a9a1153b2893c59d2f660c3bb58679801dccb",
+      "kind": "data",
+      "required_for": [
+        "performance"
+      ]
+    },
+    {
+      "dataset": "global_mmlu",
+      "path": "global_mmlu/pt/test.parquet",
+      "url": "https://huggingface.co/datasets/CohereLabs/Global-MMLU/resolve/main/pt/test.parquet",
+      "bytes": 4211041,
+      "sha256": "15dda0dd7dbd8eebbe66b6f8ce6087c1f0d29b18e48b7e3b225b6dba375c1048",
+      "kind": "data",
+      "required_for": [
+        "performance"
+      ]
+    },
+    {
+      "dataset": "global_mmlu",
+      "path": "global_mmlu/ru/test.parquet",
+      "url": "https://huggingface.co/datasets/CohereLabs/Global-MMLU/resolve/main/ru/test.parquet",
+      "bytes": 5884449,
+      "sha256": "9037e1aaca6aed1856fe1e427e5b3d4e3bb6563861b760a3360ef077df301bd6",
+      "kind": "data",
+      "required_for": [
+        "performance"
+      ]
+    },
+    {
+      "dataset": "global_mmlu",
+      "path": "global_mmlu/ja/test.parquet",
+      "url": "https://huggingface.co/datasets/CohereLabs/Global-MMLU/resolve/main/ja/test.parquet",
+      "bytes": 4363616,
+      "sha256": "b56ad153180d4368757891796dfad0e1a76ebeb3f7b2500b1ac63789d4e4dfe7",
+      "kind": "data",
+      "required_for": [
+        "performance"
+      ]
+    },
+    {
+      "dataset": "global_mmlu",
+      "path": "global_mmlu/ko/test.parquet",
+      "url": "https://huggingface.co/datasets/CohereLabs/Global-MMLU/resolve/main/ko/test.parquet",
+      "bytes": 4273255,
+      "sha256": "aa896380f066e8e905604bbda8c2c57818a22a7d02ab99a48edc1ad078affb27",
+      "kind": "data",
+      "required_for": [
+        "performance"
+      ]
+    },
+    {
+      "dataset": "global_mmlu",
+      "path": "global_mmlu/ar/test.parquet",
+      "url": "https://huggingface.co/datasets/CohereLabs/Global-MMLU/resolve/main/ar/test.parquet",
+      "bytes": 4854848,
+      "sha256": "e969c186f001c7548d54b420b2ddf7ae1d4abfce5720680eadcc4e8a48d0f61b",
+      "kind": "data",
+      "required_for": [
+        "performance"
+      ]
+    },
+    {
+      "dataset": "global_mmlu",
+      "path": "global_mmlu/hi/test.parquet",
+      "url": "https://huggingface.co/datasets/CohereLabs/Global-MMLU/resolve/main/hi/test.parquet",
+      "bytes": 6140551,
+      "sha256": "f0d82c7650ef47968a22058d9a83d22834d12c4f28e23738594d903ab52bcee5",
+      "kind": "data",
+      "required_for": [
+        "performance"
+      ]
+    },
+    {
+      "dataset": "global_mmlu",
+      "path": "global_mmlu/vi/test.parquet",
+      "url": "https://huggingface.co/datasets/CohereLabs/Global-MMLU/resolve/main/vi/test.parquet",
+      "bytes": 4435419,
+      "sha256": "5cd0840972e32c99d86cf287c7f9b1a8f594dd24fc2800169cce1ec0724abfba",
+      "kind": "data",
+      "required_for": [
+        "performance"
+      ]
+    },
+    {
+      "dataset": "tokenizer",
+      "path": "tokenizer/MiniCPM5-1B/tokenizer.json",
+      "url": "https://huggingface.co/openbmb/MiniCPM5-1B/resolve/main/tokenizer.json",
+      "bytes": 9894271,
+      "sha256": "3e065a558a034185fe299917b398685c1facd0169a9eea1e629eb30c171fed81",
+      "kind": "tooling",
+      "required_for": [
+        "performance"
+      ]
+    }
+  ],
+  "extract": [],
+  "generated": []
+}

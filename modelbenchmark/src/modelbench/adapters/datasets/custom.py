@@ -25,7 +25,7 @@ Example::
         --models minicpm5-1b
     # with src/modelbench/resources/config/scenarios.yaml overriding knowledge_qa:
     #   dataset: custom
-    #   params: {dataset_params: {path: data/custom/my_questions.jsonl}}
+    #   params: {dataset_params: {path: dataset/custom/my_questions.jsonl}}
 """
 
 from __future__ import annotations

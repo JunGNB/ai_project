@@ -1,47 +1,69 @@
-# tool：工程外部工具
+# tool/ — 数据构造与离线工具
 
-本目录只放**不属于测试运行时**的辅助工具，不随 Python 包安装、不被 `modelbench` 导入：
-
-- `download/`：数据集下载/校验的独立入口（`./modelbench download` 会调用它）；
-  用于在无 oMLX、只准备数据的机器上下载 LongBench-v2 等大数据集。
-- 第三方二进制/脚本（如需要）也放在这里，并在本文件说明来源与版本。
-
-测试运行时、领域逻辑、文档生成等代码不要放这里：
-- 运行时源码 → `src/modelbench/`
-- 文档/门禁/任务板 → `harness/`
-- 启动入口 → 根目录 `modelbench`
-
-## 目录分类
+`tool/` 只放工程脚本，不被运行时导入（除测试外）。当前数据根为 `dataset/`：
 
 ```
 tool/
-├── download/              # 既有：数据集下载/校验入口（`./modelbench download` 调用）
-└── dataset/               # 测评样本生成（稳定配置 + 确定性生成器，保留）
-    ├── config.py          # ★ 稳定配置：数据源/许可、配额、token 目标、seed、构造规则、判题器
-    ├── ds_common.py       # 公共库：hf-mirror 下载/校验、oMLX tokenizer、按 token 切分
-    ├── tokenize_worker.py # 离线 tokenizer worker（build_* 调用）
-    ├── build_perf.py      # 生成 performance/testset.jsonl + manifest（配额取自 config）
-    ├── build_perf_subset.py # 派生 performance_10（240 条严格子集）+ manifest_10
-    ├── build_acc.py       # 生成 accuracy/testset.jsonl + manifest（配额取自 config）
-    └── verify.py          # 只读校验：结构/manifest/逐文件 SHA-256（gate dataset_integrity 调用）
+├── bootstrap.py                 # `./modelbench setup` 的安装实现
+├── common/
+│   ├── fs.py                    # 路径（dataset/raw、dataset/test、output）+ JSONL/SHA-256
+│   └── tokenizer.py             # MiniCPM5-1B 参考 tokenizer（内容 token）
+├── dataset/
+│   ├── accuracy/                # 隐藏精度集（8 × 250）
+│   │   ├── fetch.py             # 下载/校验 → dataset/raw/
+│   │   ├── raw_spec.json        # 50 个文件的 path/url/bytes/sha256
+│   │   ├── build.py             # 2,000 行 + manifest（不写 testset.yaml）
+│   │   └── {sampling,sources,prompts}.py
+│   └── performance/             # 性能集（8 × 1K/8K/32K × 10 = 240）
+│       ├── fetch.py             # 下载/校验 → dataset/raw/
+│       ├── raw_spec.json        # 18 个文件的 path/url/bytes/sha256
+│       ├── build.py             # 240 行 + manifest + testset.yaml
+│       └── {sampling,sources}.py
+├── migrate/
+│   └── legacy_v2_to_v3.py       # 一次性：把 archive/legacy-v2 的 schema-2.x bundle 重序列化为 3.0
+├── system/                      # 离线判题工具（当前不接入 runner）
+│   ├── judges.py
+│   ├── validate_judges.py
+│   └── pilot.py
+└── download/                    # 旧数据层兼容下载入口（不是 dataset/raw 初始化路径）
 ```
 
-约定：
-
-- **保留**：`config.py` 与生成器决定"取哪些样本"，固定 seed + 固定配额，重复生成结果一致；全量生成会断言总量（performance 480、accuracy 6,589），配额漂移直接报错。
-- **不保留一次性工具**：例如原始数据下载、临时探查脚本。`dataset/raw/` 已落盘，来源/SHA-256 以两份 testset `manifest.json` 的 `provenance` 为准；换机或重下时临时写脚本即可，不放进仓库。
-
-## 常用命令
+## 1. 性能集（默认）
 
 ```bash
-PY=.venv/bin/python
-$PY tool/dataset/build_perf.py            # 性能：480 条（24 cells，无 warmup 数据）
-$PY tool/dataset/build_perf.py --only knowledge_qa math_logic   # 只重建指定场景
-$PY tool/dataset/build_acc.py             # 精度：6,589 条（250×6 + BFCL 889 + 42×100）
-$PY tool/dataset/build_perf_subset.py     # 快速性能子集：240 条
-$PY tool/dataset/build_acc.py --only coding general_agent        # 只重建指定场景
-$PY tool/dataset/verify.py                # 只读校验（gate 的 dataset_integrity 检查）
-MB_TOKEN_MODEL=Qwen3.5-9B-MLX-4bit $PY tool/dataset/build_perf.py   # 换参考 tokenizer
+PY=.venv/bin/python                       # Windows: .venv\Scripts\python.exe
+$PY tool/dataset/performance/fetch.py
+$PY tool/dataset/performance/fetch.py --verify
+$PY tool/dataset/performance/build.py
+$PY tool/dataset/performance/build.py --check
 ```
 
-约定：逐样本 `tokens` 为实测输入 token（chat template，`/v1/tokenize`），不是分档值；性能 `bucket` 仅为选样标签。`dataset/.cache/tokenize.json` 为计数缓存，不提交；大文件见 `dataset/.gitignore`。
+产物：`dataset/test/performance/{testset.jsonl,manifest.json,testset.yaml}`；
+`testset.jsonl` 与 `dataset/raw/` 不提交 git。场景 8 为 Global-MMLU `multilingual`（10 语种）。
+
+## 2. 精度集（隐藏离线资产）
+
+```bash
+$PY tool/dataset/accuracy/fetch.py
+$PY tool/dataset/accuracy/fetch.py --verify
+$PY tool/dataset/accuracy/build.py
+$PY tool/dataset/accuracy/build.py --check
+```
+
+产物：`dataset/test/accuracy/{testset.jsonl,manifest.json}`；**没有 testset.yaml**，
+`manifest.status=offline-asset`、`runner=not wired`、`hidden=true`，不会出现在 Web/CLI
+测试集列表，也不接入 run。`build.py --check` 会校验 `upstream_id` 全局唯一。
+
+## 3. 判题工具（当前不接 runner）
+
+`judges.py` 实现 5 个确定性判题族（`mc_letter` / `ifeval` / `normalized_match` /
+`code_exec` / `tool_call`）；`validate_judges.py` 用 gold 答案做自检；`pilot.py` 做小样本
+模型试点。它们是离线工具，**没有接入性能 runner**，也不构成可引用的精度结果。
+
+## 4. 路径约定
+
+- 所有构造器通过 `tool/common/fs.py` 的 `DATA_DIR` / `RAW_DIR` / `TEST_DIR` 定位数据，
+  rename 数据根时只需改这一处；
+- 参考 tokenizer 由两个 `fetch.py` 下载到 `dataset/raw/tokenizer/MiniCPM5-1B/tokenizer.json`；
+- `dataset/raw/` 里保留的历史/备用数据集文件不属于当前两套测试集，manifest 只记录
+  `raw_spec.json` 中实际使用的文件。

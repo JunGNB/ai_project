@@ -1,5 +1,6 @@
 # Developer entry points.  `make check` is the same gate as CI.
 PY ?= .venv/bin/python
+UV ?= uv
 
 .PHONY: help setup check gate test build tasks live docs docs-write verify-data clean
 
@@ -13,7 +14,7 @@ help:
 	@echo "make tasks    - list AI task board"
 	@echo "make live     - gate including a real live smoke run"
 	@echo "make docs     - check docs links + docs/code contract"
-	@echo "make docs-write - regenerate docs/PROJECT_STRUCTURE.md"
+	@echo "make docs-write - regenerate docs/design/33-project-structure.md"
 
 setup:
 	./modelbench setup
@@ -27,11 +28,14 @@ test:
 	$(PY) -m pytest test/
 
 verify-data:
-	$(PY) tool/dataset/verify.py
+	$(PY) tool/dataset/performance/fetch.py --verify
+	$(PY) tool/dataset/performance/build.py --check
+	$(PY) tool/dataset/accuracy/fetch.py --verify
+	$(PY) tool/dataset/accuracy/build.py --check
 
 build:
 	mkdir -p output/build
-	UV_CACHE_DIR=$$PWD/.uv-cache /Users/huawei/.local/bin/uv build --wheel --no-build-isolation --out-dir output/build/dist
+	UV_CACHE_DIR=$$PWD/.uv-cache $(UV) build --wheel --no-build-isolation --out-dir output/build/dist
 
 tasks:
 	$(PY) -m harness.taskctl list

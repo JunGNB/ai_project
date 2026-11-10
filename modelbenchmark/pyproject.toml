@@ -17,7 +17,21 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-timeout>=2.3"]
-datasets = ["pyarrow>=15.0"]
+# Dataset rebuild (`tool/dataset/build_*.py`): parquet readers + the portable
+# tokenizer backend used when oMLX.app is not available (Windows/CI).
+datasets = ["pyarrow>=15.0", "tokenizers>=0.15", "jinja2>=3.1"]
+# Accuracy judging (`tool/system/judges.py`): the official IFEval checker code
+# imports absl/langdetect/nltk; LongBench's Chinese QA/ROUGE metrics need jieba
+# and the `rouge` package.  The local judge self-check also reads parquet
+# (already covered by the `datasets` extra).
+eval = [
+  "nltk>=3.9",
+  "langdetect>=1.0.9",
+  "absl-py>=2.0",
+  "immutabledict>=4.0",
+  "jieba>=0.42",
+  "rouge>=1.0",
+]
 
 
 [tool.pytest.ini_options]

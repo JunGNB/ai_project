@@ -1,13 +1,13 @@
 # 本地模型基准测试系统设计（oMLX Benchmark Harness）
 
 > **历史归档**：本文记录重构前的设计/审计，目录、命令与路径已过时，仅用于追溯；
-> 当前设计见 [../ARCHITECTURE.md](../ARCHITECTURE.md)，测试方案见 [../TEST_PLAN.md](../TEST_PLAN.md)。
+> 当前设计见 [../ARCHITECTURE.md](../design/30-architecture.md)，测试方案见 [../TEST_PLAN.md](../spec/21-test-plan.md)。
 
 > 版本：v0.1（2026-11-02）
 >
 > **现状说明**：本文是最初的方案设计（历史文档），其中的目录/命令已过时，仅保留设计推导与取舍背景。
-> **当前实现架构以 [ARCHITECTURE.md](ARCHITECTURE.md) 为准**；操作说明见
-> [USER_GUIDE.md](USER_GUIDE.md)，测试方案见 [TEST_PLAN.md](TEST_PLAN.md)。
+> **当前实现架构以 [30-architecture.md](../design/30-architecture.md) 为准**；操作说明见
+> [41-user-guide.md](../guides/41-user-guide.md)，测试方案见 [21-test-plan.md](../spec/21-test-plan.md)。
 > 目标平台：macOS (Apple Silicon) + oMLX 本地推理服务（OpenAI 兼容 API）
 > 项目路径：`/Users/huawei/Desktop/模型管家相关资料/modelbenchmark`
 
@@ -294,7 +294,7 @@ modelbenchmark/
 
 ---
 
-## 13. 可行性评估（详见 `docs/FEASIBILITY.md`）
+## 13. 可行性评估（详见 `docs/design/34-feasibility.md`）
 
 - oMLX HTTP API 已实测支持：流式 usage、`/v1/tokenize` 精确计数、`/v1/models/status` 模型配置、admin 登录、hot/SSD 缓存清理、模型 load/unload。**方案所需接口全部具备**。
 - 缓存污染问题已实测复现（25× TTFT 差异），治理接口有效 → 设计成立且必要。

@@ -45,6 +45,7 @@ from modelbench.domain.models import (
     ToolCall,
     Usage,
 )
+from modelbench.domain.context_tolerance import tolerance_for_bucket
 from modelbench.domain.context_windows import describe_windows, in_context_windows
 from modelbench.domain.scenarios.base import (
     ScenarioAdapter,
@@ -134,6 +135,7 @@ class Orchestrator:
         self.writer = writer
         self.progress_cb = progress_cb
         self.cancel_event = cancel_event
+        self._tokenize_warning_issued = False
         self.controller = CacheController(
             client,
             mode=cfg.run.cache_mode,
@@ -175,9 +177,14 @@ class Orchestrator:
         except Exception:  # noqa: BLE001 - progress must never break a run
             pass
 
-    def _log(self, message: str) -> None:
+    def _log(self, message: str, *, persist: bool = True) -> None:
         line = f"[{time.strftime('%H:%M:%S')}] {message}"
         print(line, file=sys.stderr, flush=True)
+        if not persist:
+            # ``finalize()`` already wrote MANIFEST.json, which hashes run.log.
+            # Appending after that would invalidate the manifest (verify would
+            # fail on every fresh run); terminal-only messages must not persist.
+            return
         if self._log_fh is None:
             self._log_fh = (self.writer.run_dir / "logs" / "run.log").open("a", encoding="utf-8")
         self._log_fh.write(line + "\n")
@@ -293,27 +300,73 @@ class Orchestrator:
             f"used={memory.get('used_gb')}GB ({memory.get('percent')}%) "
             f"swap={memory.get('swap_used_gb')}GB | oMLX dynamic ceiling={ceiling_text}"
         )
+        selected = self.cfg.selected_models()
+        primary = selected[0] if selected else None
+        started_at = datetime.now(timezone.utc).isoformat()
+        config_snapshot = self.cfg.redacted_snapshot()
         manifest = RunManifest(
             run_id=self.writer.run_id,
-            created_at=datetime.now(timezone.utc).isoformat(),
-            project_version=__version__,
-            mode="performance",
-            batch=dict(getattr(self.writer, "batch", {}) or {}),
-            config_snapshot=self.cfg.redacted_snapshot(),
-            hardware=hardware,
-            omlx=self._omlx_env,
-            server={
-                "base_url": self.cfg.server.base_url,
-                "pid": self.server_pid,
-                "cache_mode": self.cfg.run.cache_mode.value,
+            batch_id=getattr(self.writer, "batch_id", None),
+            method=getattr(self.writer, "method", "performance"),
+            model={
+                "id": getattr(primary, "id", None),
+                "alias": getattr(self.writer, "model_slug", None),
+                "model_slug": getattr(self.writer, "model_slug", None),
             },
-            models=self._models_snapshot(),
-            scenarios=list(self.cfg.selected_scenarios()),
-            host={"python": sys.version.split()[0], "cwd": str(Path.cwd())},
-            git_commit=git_commit,
-            git_dirty=git_dirty,
+            project_version=__version__,
+            created_at=started_at,
+            started_at=started_at,
+            git={"commit": git_commit, "dirty": git_dirty},
+            config={
+                "snapshot": config_snapshot,
+                "perf": self.cfg.perf.model_dump(mode="json"),
+                "run": {
+                    "repeats": self.cfg.run.repeats,
+                    "warmup_requests": self.cfg.run.warmup_requests,
+                    "warmup_per_model": self.cfg.run.warmup_per_model,
+                    "cache_mode": self.cfg.run.cache_mode.value,
+                    "thinking_mode": self.cfg.run.thinking_mode,
+                    "max_requests": self.cfg.run.max_requests,
+                },
+                "scenarios": list(self.cfg.selected_scenarios()),
+                "context_windows": list(
+                    getattr(self.cfg.perf, "context_windows", None) or []
+                ),
+                "server": {
+                    "base_url": self.cfg.server.base_url,
+                    "pid": self.server_pid,
+                    "cache_mode": self.cfg.run.cache_mode.value,
+                },
+                "host": {"python": sys.version.split()[0], "cwd": str(Path.cwd())},
+            },
+            env={
+                "hardware": hardware,
+                "omlx": self._omlx_env,
+                # Server-wide /v1/models/status snapshot.  schema 2.1 stored this as
+                # a separate models.json; it carries the memory ceiling, load
+                # timings and the full model inventory, which no other artifact
+                # reproduces.  It is cheap (~13 KB) and it is environment
+                # evidence, so it is kept as one block here.
+                "server_models": self._models_snapshot(),
+                # Filled lazily by RunWriter.register_model_env so the per-model
+                # config snapshot is stored once per run instead of per record.
+                "model_env": {},
+            },
+            outcome={
+                "status": "running",
+                "cancelled": False,
+                "memory_errors": 0,
+                "n_selected": 0,
+                "n_measured": 0,
+                "n_ok": 0,
+                "n_records": 0,
+                "n_samples": 0,
+                "n_cells": 0,
+                "skipped": [],
+                "warnings": [],
+            },
         )
-        self.writer.initialize(manifest, hardware, manifest.models, self._omlx_env)
+        self.writer.initialize(manifest)
         self._log(
             f"run {self.writer.run_id} | mode=performance "
             f"models={[m.label for m in self.cfg.selected_models()]} "
@@ -418,7 +471,8 @@ class Orchestrator:
         )
         self._log(
             f"done: {summary['n_records']} records, {summary['n_samples']} samples, "
-            f"{summary['n_cells']} cells, {summary['duration_s']}s -> {summary['run_dir']}"
+            f"{summary['n_cells']} cells, {summary['duration_s']}s -> {summary['run_dir']}",
+            persist=False,
         )
         return summary
 
@@ -686,33 +740,92 @@ class Orchestrator:
         if request.context_meta.get("prebuilt"):
             # Pre-constructed samples are sent verbatim except for the optional
             # decode guard appended below.  They must NEVER be silently
-            # truncated: an overflowing prompt raises ValueError so the existing
-            # per-sample skip path records the reason instead.
+            # truncated.
             declared = request.actual_prompt_tokens
-            if server_ctx and declared is not None:
-                room = (
-                    int(server_ctx)
-                    - int(declared)
-                    - max_tokens
-                    - self.cfg.run.context_safety_margin_tokens
-                    - guard_reserve
+            self._apply_decode_guard(request)
+            # Tokenize the final messages+tools with the target model tokenizer.
+            # The count includes the chat template and decode guard, i.e. what
+            # the server will actually charge to the context window; it is the
+            # only sound basis for the window check and the 10% bucket
+            # tolerance (the declared value comes from the reference tokenizer).
+            tokenized: Optional[int] = None
+            tokenize_started = time.perf_counter()
+            try:
+                tokenized = int(
+                    self.client.tokenize_messages(
+                        request.messages, model=model_id, tools=request.tools
+                    )
                 )
+                request.tokenized_prompt_tokens = tokenized
+                request.context_meta["tokenized_prompt_tokens"] = tokenized
+            except Exception as exc:  # noqa: BLE001 - fall back to declared tokens
+                request.context_meta["tokenize_error"] = (
+                    f"{type(exc).__name__}: {exc}"
+                )
+                if not self._tokenize_warning_issued:
+                    message = (
+                        f"target tokenizer unavailable for {model_id}: {exc}; "
+                        "falling back to declared tokens for the window check "
+                        "(actual ISL cannot be verified for this run)"
+                    )
+                    self.stats.warnings.append(message)
+                    self._log(f"WARNING: {message}")
+                    self._tokenize_warning_issued = True
+            request.context_meta["tokenize_latency_ms"] = round(
+                (time.perf_counter() - tokenize_started) * 1000.0, 2
+            )
+            if server_ctx:
                 request.context_meta["model_context_window"] = int(server_ctx)
-                if room < _MIN_GENERATION_ROOM:
+                if tokenized is not None:
+                    room = (
+                        int(server_ctx)
+                        - tokenized
+                        - max_tokens
+                        - self.cfg.run.context_safety_margin_tokens
+                    )
+                    basis = "tokenized"
+                    reserve = (
+                        max_tokens + self.cfg.run.context_safety_margin_tokens
+                    )
+                    actual_value = tokenized
+                else:
+                    room = (
+                        int(server_ctx)
+                        - int(declared or 0)
+                        - max_tokens
+                        - self.cfg.run.context_safety_margin_tokens
+                        - guard_reserve
+                    )
+                    basis = "declared"
                     reserve = (
                         max_tokens
                         + self.cfg.run.context_safety_margin_tokens
                         + guard_reserve
                     )
+                    actual_value = declared
+                request.context_meta["window_check_basis"] = basis
+                if actual_value is not None and room < _MIN_GENERATION_ROOM:
                     raise ValueError(
                         f"prebuilt prompt too long for {model_id}: "
-                        f"declared {declared} + generation {max_tokens} + "
-                        f"safety_margin {self.cfg.run.context_safety_margin_tokens} + "
-                        f"decode_guard_reserve {guard_reserve} = "
-                        f"{declared + reserve} exceeds context window {server_ctx} "
-                        f"(not-testable; no silent truncation)"
+                        f"{basis} {actual_value} + generation {max_tokens} + "
+                        f"safety/reserve {reserve - max_tokens} = "
+                        f"{int(actual_value) + reserve} exceeds context window "
+                        f"{server_ctx} (not-testable; no silent truncation)"
                     )
-            self._apply_decode_guard(request)
+            bucket = sample.metadata.get("bucket") or request.context_meta.get("bucket")
+            bounds = tolerance_for_bucket(bucket, declared)
+            if tokenized is not None and bounds is not None:
+                low, high = bounds
+                ok = low <= tokenized <= high
+                request.context_meta["isl_tolerance"] = {
+                    "target": int(declared) if declared is not None else None,
+                    "low": low,
+                    "high": high,
+                    "actual": tokenized,
+                    "ok": ok,
+                }
+            # No tokenizer-based skip: the sample is always measured, and the
+            # aggregate layer only uses actual counts inside the ±10% band.
             self._request_cache[key] = request
             return request
         # Keep prompt + generation inside the model's context window.  The
@@ -1081,7 +1194,7 @@ class Orchestrator:
             if metadata.get("prebuilt") and metadata.get("tokens") is not None:
                 # Pre-built samples are filtered by the declared (reference
                 # tokenizer) token count that defines their bucket -- not by the
-                # target model tokenizer.  See docs/METHODOLOGY.md §5.
+                # target model tokenizer.  See docs/spec/20-methodology.md §5.
                 tokens = int(metadata["tokens"])
             else:
                 try:
@@ -1293,7 +1406,6 @@ class Orchestrator:
                     if self.cfg.run.fail_fast:
                         raise
                     continue
-                self._write_sample(scenario, sample)
                 for repeat in range(repeats):
                     current_repeat = repeat
                     self._check_cancel()
@@ -1365,7 +1477,7 @@ class Orchestrator:
         self._check_cancel()
         max_retries = self.cfg.run.max_retries
         # Transport retries and cold-cache contamination retries have separate
-        # budgets (docs/METHODOLOGY.md §8).  They used to share one loop counter,
+        # budgets (docs/spec/20-methodology.md §8).  They used to share one loop counter,
         # which meant a contamination retry could be silently skipped after a
         # couple of transport errors -- the log said "retrying" but no request
         # was made.  ``transport_retries`` only counts transient failures.
@@ -1417,7 +1529,7 @@ class Orchestrator:
                             f"oMLX memory guard rejected requests for model {model_id} "
                             f"({sample.sample_id}): free system memory, raise oMLX "
                             "memory_guard_tier, or run a smaller model/shorter samples. "
-                            "See docs/USER_GUIDE.md (内存不足)."
+                            "See docs/guides/41-user-guide.md (内存不足)."
                         )
                         self.stats.warnings.append(message)
                         self._log(f"WARNING: {message}")
@@ -1498,6 +1610,11 @@ class Orchestrator:
             completion = usage.completion_tokens
             prompt = usage.prompt_tokens
             if prompt is None:
+                # Fallback chain (20-methodology): reported usage, then the
+                # target model's own /v1/tokenize count for the exact prompt
+                # (tokenized ISL), then the declared construction estimate.
+                prompt = request.tokenized_prompt_tokens
+            if prompt is None:
                 prompt = request.actual_prompt_tokens
             metrics = compute_metrics(
                 ttft_s=stream.first_token_ts,
@@ -1508,6 +1625,8 @@ class Orchestrator:
                 completion_tokens=completion,
                 usage=usage,
                 input_context_chars=input_context_chars,
+                num_chunks=getattr(stream, "num_chunks", None),
+                finish_reason=getattr(stream, "finish_reason", None),
             )
             if report is not None:
                 metrics.peak_cpu_pct = report.peak_cpu_pct
@@ -1527,7 +1646,7 @@ class Orchestrator:
         record = SampleRecord(
             run_id=self.writer.run_id,
             model=model_id,
-            model_config_snapshot=model_snapshot,
+            model_env_ref=self.writer.register_model_env(model_snapshot),
             scenario=scenario.name,
             context_length=self._context_length(sample),
             dataset=sample.dataset,
@@ -1751,22 +1870,10 @@ class Orchestrator:
                 "truncated": request.truncated,
                 "truncation_ratio": request.context_meta.get("truncation_ratio"),
             },
-            "raw_sample_path": self._sample_relpath(scenario, sample),
         }
         if trace:
             meta["agent_trace"] = trace
         return meta
-
-    def _sample_relpath(self, scenario: ScenarioAdapter, sample: Sample) -> str:
-        # Samples are context-length independent at this level: the original
-        # (untruncated) sample is written once and every record points at it.
-        return str(
-            Path("raw")
-            / "samples"
-            / sanitize_name(sample.dataset)
-            / sanitize_name(scenario.name)
-            / f"{sanitize_name(sample.sample_id)}.json"
-        )
 
     def _clear_required(self, state: CacheState) -> bool:
         """A cold measurement is only valid if the cache clear actually happened.
@@ -1781,13 +1888,3 @@ class Orchestrator:
             return not state.cleared_before_request and not self.controller.warm_cleared
         return False
 
-    def _write_sample(self, scenario: ScenarioAdapter, sample: Sample) -> None:
-        rel = self._sample_relpath(scenario, sample)
-        path = self.writer.run_dir / rel
-        if path.exists():
-            return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(sample.model_dump(mode="json"), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )

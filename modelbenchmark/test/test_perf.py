@@ -28,18 +28,18 @@ requires_perf_data = pytest.mark.skipif(
     not PERF_DATA, reason="dataset/test/performance/testset.jsonl is not on disk"
 )
 
-#: Default test-set scenario -> expected sample count (480 total, 8 scenarios).
+#: Default test-set scenario -> expected sample count (240 total, 8 scenarios).
 DEFAULT_SCENARIO_COUNTS = {
-    "knowledge_qa": 60,
-    "instruction_following": 60,
-    "long_context": 60,
-    "math_logic": 60,
-    "coding": 60,
-    "general_agent": 60,
-    "search_agent": 60,
-    "chinese_long_context": 60,
+    "knowledge_qa": 30,
+    "instruction_following": 30,
+    "long_context": 30,
+    "math_logic": 30,
+    "coding": 30,
+    "general_agent": 30,
+    "search_agent": 30,
+    "multilingual": 30,
 }
-DEFAULT_SAMPLES = 480
+DEFAULT_SAMPLES = 240
 DEFAULT_CELLS = 24
 FIVE_SAMPLE_CELLS = 24  # 8 scenarios x 3 buckets; 5 samples still touch all cells
 
@@ -553,7 +553,7 @@ def test_web_build_config_context_windows_and_warmup():
 
 
 @requires_perf_data
-def test_perf_jsonl_file_has_480_unique_samples():
+def test_perf_jsonl_file_has_240_unique_samples():
     rows = [
         json.loads(line)
         for line in PERF_JSONL.read_text(encoding="utf-8").splitlines()
@@ -577,35 +577,14 @@ def test_performance_manifest_declares_token_semantics():
             encoding="utf-8"
         )
     )
-    assert "messages + tools" in manifest["tokens_semantics"]
-    assert "total prompt" in manifest["bucket_basis"]
+    assert "content tokens" in manifest["tokens_semantics"]
+    assert "messages[0].content" in manifest["tokens_semantics"]
+    assert "content tokens" in manifest["bucket_basis"]
     assert manifest["tokens_mean"] > 0
-    assert manifest["default_run"]["measured_requests"] == 480
+    assert manifest["default_run"]["measured_requests"] == 240
     assert manifest["default_run"]["cells"] == 24
     for stat in manifest["stats"].values():
         assert "tokens_mean" in stat
-
-
-@requires_perf_data
-def test_perf_quick_subset_file_is_10_per_cell():
-    import json as _json
-
-    from modelbench.paths import PROJECT_ROOT
-
-    path = PROJECT_ROOT / "dataset" / "test" / "performance" / "testset_10.jsonl"
-    rows = [_json.loads(line) for line in path.open() if line.strip()]
-    assert len(rows) == 240
-    cells = {}
-    targets = {}
-    for r in rows:
-        cells[(r["scenario"], r["bucket"])] = cells.get((r["scenario"], r["bucket"]), 0) + 1
-        targets.setdefault(r["scenario"], set()).add(r["target_id"])
-    assert len(cells) == 24 and set(cells.values()) == {10}
-    assert all(len(v) == 10 for v in targets.values())
-    by_target = {}
-    for r in rows:
-        by_target.setdefault(r["target_id"], []).append(r["bucket"])
-    assert all(sorted(v) == ["1k", "32k", "8k"] for v in by_target.values())
 
 
 @requires_perf_data
@@ -649,9 +628,9 @@ def test_perf_jsonl_plan_matches_load_and_bucket_mapping():
     plan = adapter.plan()
     assert plan is not None
     assert sum(item["n"] for item in plan) == len(adapter.load())
-    # long_context now has all three buckets, 20 samples each.
+    # long_context now has all three buckets, 10 samples each.
     assert {item["context_length"] for item in plan} == {1024, 8192, 32768}
-    assert sum(item["n"] for item in plan if item["context_length"] == 32768) == 20
+    assert sum(item["n"] for item in plan if item["context_length"] == 32768) == 10
     # bucket filter narrows the plan and the load identically.
     filtered = get_adapter(
         "perf_jsonl",
@@ -660,8 +639,8 @@ def test_perf_jsonl_plan_matches_load_and_bucket_mapping():
         params={**spec.params["dataset_params"], "buckets": ["32k"]},
         testset_dir=Path(cfg.datasets.testset_dir),
     )
-    assert sum(item["n"] for item in filtered.plan()) == 20
-    assert len(filtered.load()) == 20
+    assert sum(item["n"] for item in filtered.plan()) == 10
+    assert len(filtered.load()) == 10
     assert {sample.metadata["context_length"] for sample in filtered.load()} == {32768}
 
 
@@ -925,9 +904,9 @@ def test_plan_overview_reports_default_requests_and_cell_groups():
     # Context-window filtering is exact for perf_jsonl (declared tokens).
     cfg.perf.context_windows = [1024]
     filtered = plan_overview(cfg)
-    assert filtered["request_estimate"] == 160
+    assert filtered["request_estimate"] == 80
     assert filtered["cells_estimate"] == 8
-    assert filtered["samples_total"] == 160
+    assert filtered["samples_total"] == 80
 
 
 @requires_perf_data
@@ -1098,8 +1077,8 @@ def test_plan_overview_exact_for_sample_count_and_windows():
     cfg.perf.samples_per_dataset = None
     cfg.perf.context_windows = [1024, 8192]
     windows = plan_overview(cfg)
-    assert windows["samples_total"] == 320
-    assert windows["request_estimate"] == 320
+    assert windows["samples_total"] == 160
+    assert windows["request_estimate"] == 160
     assert windows["cells_estimate"] == 16
 
 
@@ -1119,7 +1098,7 @@ def test_web_plan_counts_exact_for_sample_count_and_windows():
             }
         )
     )
-    assert windows["samples_total"] == 320
+    assert windows["samples_total"] == 160
     assert windows["cells_total"] == 16
 
 
@@ -1157,3 +1136,37 @@ def test_perf_jsonl_plan_honours_samples_windows_and_ids(tmp_path):
     by_id = adapter.plan({**base, "sample_ids": ["test-knowledge_qa-002"]})
     assert sum(item["n"] for item in by_id) == 1
     assert by_id[0]["dataset"] == "longbench_v1:gov_report"
+
+
+def test_stratified_sample_matches_plan_for_multilingual(tmp_path):
+    """The runner and dry-run plan must select the same buckets/languages."""
+    from collections import Counter
+
+    from modelbench.domain.scenarios.base import stratified_sample
+
+    langs = ["ar", "de", "en", "es", "fr", "hi", "ja", "ko", "pt", "ru", "vi"]
+    rows = []
+    idx = 0
+    for bucket, tokens in (("1k", 1024), ("8k", 8192), ("32k", 32768)):
+        for lang in langs:
+            rows.append(
+                _perf_row(
+                    idx,
+                    scenario="multilingual",
+                    bucket=bucket,
+                    tokens=tokens,
+                    dataset="global_mmlu",
+                    meta={"lang": lang},
+                )
+            )
+            idx += 1
+    adapter = _perf_adapter(tmp_path, rows, {"scenario": "multilingual"})
+    for n in (3, 5, 10):
+        plan = adapter.plan({"scenario": "multilingual", "samples": n})
+        planned = Counter()
+        for item in plan:
+            planned[int(item["context_length"])] += int(item["n"])
+        chosen = stratified_sample(adapter.load(), n)
+        actual = Counter(int(sample.metadata["context_length"]) for sample in chosen)
+        assert actual == planned
+        assert set(actual) == {1024, 8192, 32768}

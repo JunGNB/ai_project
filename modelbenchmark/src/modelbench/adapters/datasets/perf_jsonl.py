@@ -1,7 +1,7 @@
 """Pre-constructed performance test set adapter (``dataset/test/performance``).
 
-Reads ``testset.jsonl`` (one JSON object per line, 480 samples) that is built by
-``tool/dataset`` from the upstream corpora.  Each row is already a fully
+Reads ``testset.jsonl`` (one JSON object per line, 240 samples) that is built by
+``tool/dataset/performance`` from the upstream corpora.  Each row is already a fully
 materialised chat request::
 
     {"id": "perf-knowledge_qa-1k-en-000",
@@ -44,7 +44,6 @@ _TOKENS_TO_BUCKET = {tokens: bucket for bucket, tokens in BUCKET_TOKENS.items()}
 _ANSWER_TYPES: Dict[str, AnswerType] = {
     "knowledge_qa": AnswerType.MC_LETTER,
     "multilingual": AnswerType.MC_LETTER,
-    "chinese_long_context": AnswerType.MC_LETTER,
     "instruction_following": AnswerType.CONSTRAINTS,
     "math_logic": AnswerType.NUMERIC,
     "coding": AnswerType.CODE,
@@ -54,7 +53,7 @@ _ANSWER_TYPES: Dict[str, AnswerType] = {
 }
 
 #: path -> (mtime_ns, size, [(id, scenario, dataset, bucket, tokens, lang), ...])
-#: A lightweight index (480 rows) is enough to answer plan/estimate questions
+#: A lightweight index (240 rows) is enough to answer plan/estimate questions
 #: without materialising the 25 MB JSONL into Sample objects.
 _INDEX_CACHE: Dict[str, Tuple[int, int, List[Tuple[str, str, str, str, int, str]]]] = {}
 
@@ -77,7 +76,7 @@ _META_KEYS = (
 class PerfJSONLAdapter(DatasetAdapter):
     name = "perf_jsonl"
     scenario = ""
-    source = "dataset/test/performance/testset.jsonl (built by tool/dataset)"
+    source = "dataset/test/performance/testset.jsonl (built by tool/dataset/performance)"
     license = "see dataset/test/performance/manifest.json provenance"
 
     # ------------------------------------------------------------------ #
@@ -256,15 +255,28 @@ class PerfJSONLAdapter(DatasetAdapter):
         if samples_n is None or int(samples_n) <= 0 or int(samples_n) >= len(rows):
             return rows
         ordered = sorted(rows, key=lambda row: row[0])
-        strata: Dict[Tuple[int, str], List[Tuple[str, str, str, str, int, str]]] = {}
+        # Allocate across context buckets first, then across languages inside
+        # each bucket.  This keeps small smoke counts (e.g. --samples 5) from
+        # collapsing a multilingual scenario into its 1K bucket only.
+        by_bucket: Dict[int, List[Tuple[str, str, str, str, int, str]]] = {}
         for row in ordered:
-            strata.setdefault((BUCKET_TOKENS[row[3]], row[5]), []).append(row)
-        allocation = largest_remainder_allocation(
-            {key: len(group) for key, group in strata.items()}, int(samples_n)
+            by_bucket.setdefault(BUCKET_TOKENS[row[3]], []).append(row)
+        bucket_allocation = largest_remainder_allocation(
+            {bucket: len(group) for bucket, group in by_bucket.items()}, int(samples_n)
         )
         chosen: List[Tuple[str, str, str, str, int, str]] = []
-        for key in sorted(strata, key=lambda item: (str(item[0]), item[1])):
-            chosen.extend(strata[key][: allocation.get(key, 0)])
+        for bucket in sorted(by_bucket):
+            quota = int(bucket_allocation.get(bucket, 0))
+            if quota <= 0:
+                continue
+            by_lang: Dict[str, List[Tuple[str, str, str, str, int, str]]] = {}
+            for row in by_bucket[bucket]:
+                by_lang.setdefault(str(row[5]), []).append(row)
+            lang_allocation = largest_remainder_allocation(
+                {lang: len(group) for lang, group in by_lang.items()}, quota
+            )
+            for lang in sorted(by_lang):
+                chosen.extend(by_lang[lang][: int(lang_allocation.get(lang, 0))])
         return sorted(chosen, key=lambda row: row[0])
 
     def strata(

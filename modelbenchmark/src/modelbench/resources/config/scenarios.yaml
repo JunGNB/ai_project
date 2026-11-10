@@ -1,8 +1,8 @@
 # Scenario -> dataset mapping for the performance benchmark.
 #
 # All eight default scenarios read the pre-constructed performance test set
-# (dataset/test/performance/testset.jsonl, 480 samples = 8 scenarios x 3 buckets
-# x 20).  `dataset_params.scenario` selects the scenario slice;
+# (dataset/test/performance/testset.jsonl, 240 samples = 8 scenarios x 3 buckets
+# x 10 targets).  `dataset_params.scenario` selects the scenario slice;
 # `dataset_params.buckets` (optional) limits it to 1k/8k/32k and `limit` caps the
 # sample count.  speculative decoding is NOT part of the default benchmark: it
 # needs non-default acceleration settings and belongs to a separate experiment.
@@ -52,10 +52,10 @@ scenarios:
       # run the tool loop.
       max_steps: 3
 
-  # Chinese-only LongBench v1 dureader workload; kept separate from the
-  # accuracy suite's true 8-language ``multilingual`` scenario.
-  chinese_long_context:
+  # Global-MMLU multilingual workload (10 languages x 1 target each); the
+  # accuracy suite keeps its own hidden multilingual data asset.
+  multilingual:
     dataset: perf_jsonl
     params:
       dataset_params:
-        scenario: chinese_long_context
+        scenario: multilingual

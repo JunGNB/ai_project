@@ -3,10 +3,12 @@
 Everything that is persisted to a run bundle is defined here, together with a
 stable ``SCHEMA_VERSION`` so that downstream comparison tools can migrate.
 
-Schema 2.1 is the performance-only bundle shape: per-sample metrics plus
-per-context overall/cell aggregates and an environment snapshot; accuracy
-fields are gone.  ``overall`` rows are keyed by ``model`` + ``context_length``
-so 1K/8K/32K buckets are never mixed into one average.
+Schema 3.0 is the performance-only bundle shape: per-sample metrics plus
+per-context overall/cell aggregates and a single environment snapshot per run
+(``run.json``).  ``overall`` rows are keyed by ``model`` + ``context_length`` so
+1K/8K/32K buckets are never mixed into one average.  Prompt bodies are not
+stored in ``records.jsonl``; each record carries ``request.prompt_sha256`` and
+the text lives once in ``output/blobs/prompts`` (see ``adapters/storage/blobstore``).
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-SCHEMA_VERSION = "2.1"
+SCHEMA_VERSION = "3.0"
 
 
 # --------------------------------------------------------------------------- #
@@ -113,7 +115,18 @@ class RequestSpec(BaseModel):
     # ``target_context_tokens`` stays None and the sample's native prompt is
     # used (truncated only when it exceeds the model window).
     target_context_tokens: Optional[int] = None
+    #: Declared dataset token count (reference tokenizer); kept for comparison.
     actual_prompt_tokens: Optional[int] = None
+    #: Actual prompt token count returned by the target model's tokenizer
+    #: (``/v1/tokenize`` on the final messages+tools, including chat template
+    #: and decode guard).  None when tokenization failed / legacy sample.
+    tokenized_prompt_tokens: Optional[int] = None
+    #: Content address of the prompt body; ``messages`` is dropped when the
+    #: record is persisted and resolved from ``output/blobs/prompts`` instead.
+    prompt_sha256: Optional[str] = None
+    #: Concatenated character length of ``messages`` (kept next to the digest so
+    #: size attribution needs no blob read).
+    prompt_chars: Optional[int] = None
     truncated: bool = False
     padded: bool = False
     context_meta: Dict[str, Any] = Field(default_factory=dict)
@@ -184,6 +197,14 @@ class PerfMetrics(BaseModel):
     prompt_tokens: Optional[int] = None
     completion_tokens: Optional[int] = None
     cached_tokens: Optional[int] = None
+    #: Decode window (last token - first token).  Recorded even when the
+    #: window is too short for a meaningful TG TPS, for auditability.
+    decode_window_ms: Optional[float] = None
+    #: Why ``gen_tps``/``tpot_ms`` were suppressed despite >=16 completion
+    #: tokens (``tool_calls`` | ``decode_window_too_short`` |
+    #: ``missing_timestamps`` | ``implausible_tps``).  None when valid or when
+    #: the sample had fewer than 16 completion tokens.
+    gen_tps_invalid: Optional[str] = None
 
 
 class Score(BaseModel):
@@ -210,8 +231,10 @@ class SampleRecord(BaseModel):
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
     model: str
-    # ``model_config`` is reserved by pydantic, hence the explicit suffix.
-    model_config_snapshot: Dict[str, Any] = Field(default_factory=dict)
+    #: Key into ``run.json.env.model_env`` describing the model configuration in
+    #: force for this request.  The snapshot itself is stored once per run, not
+    #: repeated on every record.
+    model_env_ref: Optional[str] = None
     scenario: str
     context_length: Optional[int] = None      # always None in performance mode
     dataset: str
@@ -243,6 +266,10 @@ class Distribution(BaseModel):
     min: Optional[float] = None
     max: Optional[float] = None
     p95: Optional[float] = None
+    #: Normal-approximation 95% CI of the mean (mean +/- 1.96*std/sqrt(n)).
+    #: This is within-run sampling uncertainty, NOT run-to-run noise; n<2 -> None.
+    ci95_low: Optional[float] = None
+    ci95_high: Optional[float] = None
 
 
 class CellAggregate(BaseModel):
@@ -262,6 +289,17 @@ class CellAggregate(BaseModel):
     #: (``finish_reason == "length"``).  They are INCLUDED in every aggregate;
     #: decode metrics use the actually generated tokens, not ``max_tokens``.
     n_length_capped: int = 0
+    #: Valid measured samples where TG TPS was suppressed for a known reason
+    #: (tool call burst / too-short decode window / implausible value).
+    n_gen_tps_invalid: int = 0
+    #: Valid measured samples whose actual prompt is inside the single ±10%
+    #: bucket band.  Only these contribute to ``perf`` distributions.
+    n_isl_in_band: int = 0
+    #: Valid measured samples outside the band (measured, excluded from averages).
+    n_isl_out_of_band: int = 0
+    #: True when fewer than ``MIN_IN_BAND_SAMPLES`` in-band samples remain; the
+    #: mean is still shown for inspection but must not be used as a conclusion.
+    insufficient_samples: bool = False
     stability_cv: Optional[float] = None      # coefficient of variation of ttft
     unstable: bool = False
     perf: Dict[str, Distribution] = Field(default_factory=dict)
@@ -290,6 +328,15 @@ class OverallAggregate(BaseModel):
     #: They are included in the averages; TG TPS is measured over the emitted
     #: decode window, never extrapolated from the cap.
     n_length_capped: int = 0
+    #: Valid measured samples where TG TPS was suppressed for a known reason.
+    n_gen_tps_invalid: int = 0
+    #: Valid measured samples inside the single ±10% actual-prompt band.
+    n_isl_in_band: int = 0
+    #: Valid measured samples outside the band (measured, excluded from averages).
+    n_isl_out_of_band: int = 0
+    #: True when in-band samples are too few for a conclusion (threshold in
+    #: ``domain.metrics.MIN_IN_BAND_SAMPLES``).
+    insufficient_samples: bool = False
     stability_cv: Optional[float] = None
     unstable: bool = False
     perf: Dict[str, Distribution] = Field(default_factory=dict)
@@ -303,14 +350,27 @@ class SampleResult(BaseModel):
     """One row of the per-sample result table (retained for every sample)."""
 
     model: str
+    #: Server-side model id (same value as ``model`` when the API exposes one).
+    model_id: Optional[str] = None
     scenario: str
     dataset: str
     #: Declared bucket size in tokens (1024/8192/32768); None for legacy samples.
     context_length: Optional[int] = None
     sample_id: str
+    subtask: Optional[str] = None
     repeat: int = 0
+    phase: str = "measured"
     status: str = "ok"
+    error: Optional[str] = None
+    timestamp: Optional[str] = None
+    prompt_sha256: Optional[str] = None
     input_context_tokens: Optional[int] = None
+    actual_prompt_tokens: Optional[int] = None
+    #: True when the target-tokenizer actual prompt is inside the ±10% band
+    #: (only in-band records feed aggregates).
+    isl_band: bool = True
+    total_tps: Optional[float] = None
+    mean_cpu_pct: Optional[float] = None
     input_context_chars: Optional[int] = None
     ttft_ms: Optional[float] = None
     ttft_visible_ms: Optional[float] = None
@@ -328,22 +388,29 @@ class SampleResult(BaseModel):
     #: True when ``finish_reason == "length"`` (generation capped, not filtered).
     length_capped: bool = False
     truncated: bool = False
+    #: Cold-cache compliance is auditable from the per-sample table alone
+    #: (previously required re-reading the 14 MB ``records.jsonl``).
+    cached_tokens: Optional[int] = None
+    cache_mode: Optional[str] = None
+    cache_cleared: Optional[bool] = None
+    cache_polluted: Optional[bool] = None
 
 
 class RunManifest(BaseModel):
+    """``run.json``: run metadata plus the single environment snapshot."""
+
     schema_version: str = SCHEMA_VERSION
     run_id: str
+    batch_id: Optional[str] = None
+    method: str = "performance"
+    model: Dict[str, Any] = Field(default_factory=dict)
+    project_version: str = ""
     created_at: str
-    project_version: str
-    mode: str = "performance"
-    batch: Dict[str, Any] = Field(default_factory=dict)
-    config_snapshot: Dict[str, Any] = Field(default_factory=dict)
-    hardware: Dict[str, Any] = Field(default_factory=dict)
-    omlx: Dict[str, Any] = Field(default_factory=dict)
-    server: Dict[str, Any] = Field(default_factory=dict)
-    models: Dict[str, Any] = Field(default_factory=dict)
-    scenarios: List[str] = Field(default_factory=list)
-    host: Dict[str, Any] = Field(default_factory=dict)
-    git_commit: Optional[str] = None
-    git_dirty: Optional[bool] = None
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    duration_s: Optional[float] = None
+    git: Dict[str, Any] = Field(default_factory=dict)
+    config: Dict[str, Any] = Field(default_factory=dict)
+    env: Dict[str, Any] = Field(default_factory=dict)
+    outcome: Dict[str, Any] = Field(default_factory=dict)
     notes: Optional[str] = None

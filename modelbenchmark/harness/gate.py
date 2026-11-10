@@ -54,6 +54,7 @@ REQUIRED_GITIGNORE = (
     ".venv/",
     "dataset/raw/",
     "dataset/.cache/",
+    "dataset/processed/",
     "dataset/test/**/testset.jsonl",
     "output/",
     "harness/reports/",
@@ -158,7 +159,7 @@ def check_imports(ctx: Context) -> Result:
         "from modelbench.adapters.datasets.registry import available_datasets\n"
         "from modelbench.domain.scenarios.registry import available_scenarios\n"
         "from modelbench.application.benchmark import Orchestrator\n"
-        "from modelbench.adapters.storage import catalog\n"
+        "from modelbench.adapters.storage import catalog, tools\n"
         "ds = available_datasets(); sc = available_scenarios()\n"
         "from modelbench.adapters.config.settings import load_config\n"
         "cfg = load_config()\n"
@@ -168,6 +169,9 @@ def check_imports(ctx: Context) -> Result:
         "assert len(sc) >= 8, sc\n"
         "assert hasattr(Orchestrator, 'run')\n"
         "assert hasattr(catalog, 'rebuild_index')\n"
+        "assert hasattr(catalog, 'resolve_run')\n"
+        "assert hasattr(catalog, 'VIEWABLE_FILES')\n"
+        "assert hasattr(tools, 'verify_output')\n"
         "assert cfg.perf.max_tokens >= 1\n"
     )
     proc = _run([ctx.py, "-c", code], timeout=120)
@@ -216,11 +220,13 @@ def check_validate(ctx: Context) -> Result:
 
 
 def check_dataset_integrity(ctx: Context) -> Result:
-    """Run ``tool/dataset/verify.py`` (structure/manifest/SHA-256).
+    """Validate the new dataset layout (build --check + raw SHA-256 verify).
 
     Dataset inputs are gitignored on purpose, so a clean checkout / CI has
     nothing to verify.  That is reported as an explicit skip instead of a
-    silent pass; locally (and in any checkout with data) the verifier must pass.
+    silent pass; locally (and in any checkout with data) the checks must pass.
+    The legacy ``tool/dataset/verify.py`` pipeline was removed together with the
+    v3 test sets; the new builders own their contract checks.
     """
     testset = ctx.root / "dataset" / "test" / "performance" / "testset.jsonl"
     raw_dir = ctx.root / "dataset" / "raw"
@@ -233,16 +239,33 @@ def check_dataset_integrity(ctx: Context) -> Result:
             )
         return Result(
             ok=False,
-            detail="datasets absent: rebuild with tool/dataset/build_perf.py",
+            detail="datasets absent: rebuild with tool/dataset/performance/build.py",
             data={"skipped": "datasets absent"},
         )
-    proc = _run([ctx.py, str(ctx.root / "tool" / "dataset" / "verify.py")], timeout=300)
-    text = (proc.stdout or "") + (proc.stderr or "")
-    ok = proc.returncode == 0
-    detail = _last_line(text) or (
-        "dataset verifier passed" if ok else "dataset verifier failed"
-    )
-    return Result(ok=ok, detail=detail, data={"returncode": proc.returncode})
+
+    commands = [
+        [ctx.py, str(ctx.root / "tool" / "dataset" / "performance" / "fetch.py"), "--verify"],
+        [ctx.py, str(ctx.root / "tool" / "dataset" / "performance" / "build.py"), "--check"],
+    ]
+    accuracy_testset = ctx.root / "dataset" / "test" / "accuracy" / "testset.jsonl"
+    if accuracy_testset.is_file():
+        commands.extend(
+            [
+                [ctx.py, str(ctx.root / "tool" / "dataset" / "accuracy" / "fetch.py"), "--verify"],
+                [ctx.py, str(ctx.root / "tool" / "dataset" / "accuracy" / "build.py"), "--check"],
+            ]
+        )
+
+    failures = []
+    for command in commands:
+        proc = _run(command, timeout=300)
+        text = (proc.stdout or "") + (proc.stderr or "")
+        label = Path(command[1]).parent.name if len(command) > 2 else "dataset"
+        if proc.returncode != 0:
+            failures.append(f"{label}: {_last_line(text) or 'failed'}")
+    if failures:
+        return Result(ok=False, detail="; ".join(failures[:3]), data={"failures": failures})
+    return Result(ok=True, detail="dataset build checks + raw SHA-256 passed", data={"checks": len(commands)})
 
 
 def check_perf_plan(ctx: Context) -> Result:
@@ -274,7 +297,11 @@ def check_perf_plan(ctx: Context) -> Result:
 
 def check_docs_links(ctx: Context) -> Result:
     files = [ROOT / "README.md", ROOT / "AGENTS.md"]
-    files += sorted((ROOT / "docs").glob("*.md"))
+    # Keep link checking aligned with docs_contract: all current docs,
+    # including docs/process/*.md, but not archived historical docs.
+    files += sorted(
+        p for p in (ROOT / "docs").rglob("*.md") if "archive" not in p.parts
+    )
     files += sorted(p for p in (ROOT / "harness").rglob("*.md") if "reports" not in p.parts)
     files = [p for p in files if p.is_file()]
     link_re = re.compile(r"!?\[[^\]]*\]\(([^)\n]+)\)")
@@ -383,10 +410,10 @@ def check_hygiene(ctx: Context) -> Result:
 
     for required in (
         "AGENTS.md",
-        "docs/ARCHITECTURE.md",
-        "docs/USER_GUIDE.md",
-        "docs/TEST_PLAN.md",
-        "docs/RESULTS.md",
+        "docs/design/30-architecture.md",
+        "docs/guides/41-user-guide.md",
+        "docs/spec/21-test-plan.md",
+        "docs/design/31-output-contract.md",
         "src/modelbench/resources/config/default.yaml",
         "src/modelbench/adapters/omlx/environment.py",
         "src/modelbench/interfaces/web/static/index.html",
@@ -404,34 +431,148 @@ def check_hygiene(ctx: Context) -> Result:
     )
 
 
-def resolve_live_run_dir(root: Path, run_id: str) -> Optional[Path]:
-    """Resolve the per-model bundle produced by a live smoke run.
+def _read_json_file(path: Path) -> Dict:
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
-    ``BatchRunner`` writes ``output/<batch_id>_performance_<model>/`` plus
-    ``output/batches/<batch_id>.json``; older runs used ``output/<run_id>/``.
-    Returns the first directory that actually contains ``summary.json``.
+
+def _is_run_dir(path: Path) -> bool:
+    return (Path(path) / "run.json").is_file()
+
+
+def resolve_live_run_dir(root: Path, run_id: str) -> Optional[Path]:
+    """Locate the run directory produced by a live smoke run (schema 3.0).
+
+    The smoke run is started with ``--run-id <batch_id>`` and the flat layout
+    puts each model in ``output/runs/<batch_id>__<method>__<model_slug>/`` (the
+    directory name *is* the run id).
+
+    Resolution order:
+
+    1. ``output/index.json`` — ``runs[].run_path`` for an entry whose
+       ``run_id`` or ``batch_id`` matches;
+    2. glob ``output/runs/*/run.json`` (the index may not have been refreshed
+       for a just-finished run, or may be missing entirely), matching either the
+       full run id or the batch id prefix before ``__``.
+
+    The retired nested/2.x layouts are deliberately not searched: archived
+    bundles live under ``output/archive/`` and are not schema-3.0 evidence.
     """
-    output = root / "output"
+    output = Path(root) / "output"
     candidates: List[Path] = []
-    batch_file = output / "batches" / f"{run_id}.json"
-    if batch_file.is_file():
-        try:
-            batch = json.loads(batch_file.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            batch = {}
-        for entry in batch.get("model_runs") or []:
-            value = entry.get("run_dir") or entry.get("summary_path")
-            if value:
-                path = Path(value)
-                candidates.append(path if path.is_absolute() else (root / path))
-    candidates += sorted(output.glob(f"{run_id}_performance_*"))
-    legacy = output / run_id
-    if legacy.is_dir():
-        candidates.append(legacy)
+
+    index = _read_json_file(output / "index.json")
+    for entry in index.get("runs") or []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("run_id") != run_id and entry.get("batch_id") != run_id:
+            continue
+        rel = entry.get("run_path")
+        if not rel:
+            continue
+        text = str(rel).replace("\\", "/")
+        if text.startswith("/") or ".." in text.split("/"):
+            continue
+        candidates.append(output / text)
+
+    runs_root = output / "runs"
+    if runs_root.is_dir():
+        batch_prefix = str(run_id).split("__", 1)[0]
+        for run_json_path in sorted(runs_root.glob("*/run.json")):
+            run_dir = run_json_path.parent
+            name = run_dir.name
+            run_json = _read_json_file(run_json_path)
+            declared_batch = str(run_json.get("batch_id") or "")
+            if name == run_id or declared_batch == run_id:
+                candidates.append(run_dir)
+            elif not declared_batch and name.split("__", 1)[0] == batch_prefix:
+                # Defensive: a half-written run.json without batch_id.
+                candidates.append(run_dir)
+
     for candidate in candidates:
-        if (candidate / "summary.json").is_file():
+        if _is_run_dir(candidate):
             return candidate
     return None
+
+
+def _live_smoke_evidence(run_dir: Optional[Path]) -> Dict:
+    """Evaluate the schema-3.0 smoke-run invariants from a run directory.
+
+    Reads only ``run.json`` + ``aggregates.json`` + ``records.jsonl`` (the
+    retired ``summary.json``/``omlx.json`` are gone).  Returns
+    ``{"ok", "detail", "data"}`` so the check stays unit-testable without a
+    live oMLX server.
+    """
+    if run_dir is None:
+        return {"ok": False, "detail": "no run directory found", "data": {}}
+    run_dir = Path(run_dir)
+    run_json_path = run_dir / "run.json"
+    if not run_json_path.is_file():
+        return {"ok": False, "detail": f"no run.json under {run_dir}", "data": {}}
+    run_json = _read_json_file(run_json_path)
+    aggregates = _read_json_file(run_dir / "aggregates.json")
+    records_path = run_dir / "records.jsonl"
+    try:
+        records = [
+            json.loads(line)
+            for line in records_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    except OSError as exc:
+        return {"ok": False, "detail": f"records.jsonl unreadable: {exc}", "data": {}}
+    measured = [r for r in records if r.get("phase") == "measured"]
+    bad_cache = [
+        r
+        for r in measured
+        if not (
+            r.get("cache", {}).get("cleared_before_request")
+            and r.get("cache", {}).get("cached_tokens") == 0
+        )
+    ]
+    errors = [r for r in records if r.get("status") in ("error", "timeout")]
+    contaminated = [r for r in records if r.get("status") == "contaminated"]
+    missing_context = [
+        r for r in measured if r.get("metrics", {}).get("input_context_tokens") is None
+    ]
+    scored = [r for r in measured if r.get("score") is not None]
+    outcome = run_json.get("outcome") or {}
+    # One environment snapshot per run now lives in run.json (the old separate
+    # omlx.json is gone), and the aggregate shape lives in aggregates.json.
+    env_ok = bool(run_json.get("env"))
+    shape_ok = (
+        isinstance(aggregates.get("overall"), list)
+        and outcome.get("n_measured") == len(measured)
+    )
+    ok = (
+        not errors
+        and not contaminated
+        and not bad_cache
+        and not missing_context
+        and not scored
+        and env_ok
+        and shape_ok
+        and len(measured) > 0
+    )
+    detail = (
+        f"{len(records)} records, {len(measured)} measured, "
+        f"{len(errors)} errors, {len(contaminated)} contaminated, "
+        f"{len(bad_cache)} cache issues, {len(missing_context)} missing context, "
+        f"{len(scored)} scored, run.json={env_ok}, shape_ok={shape_ok}"
+    )
+    return {
+        "ok": ok,
+        "detail": detail,
+        "data": {
+            "run_dir": str(run_dir),
+            "records": len(records),
+            "measured": len(measured),
+            "shape_ok": shape_ok,
+            "env_ok": env_ok,
+        },
+    }
 
 
 def check_live_smoke(ctx: Context) -> Result:
@@ -456,56 +597,19 @@ def check_live_smoke(ctx: Context) -> Result:
     )
     text = (proc.stdout or "") + (proc.stderr or "")
     run_dir = resolve_live_run_dir(ROOT, run_id)
-    summary_path = (run_dir / "summary.json") if run_dir is not None else None
-    if proc.returncode != 0 or summary_path is None or not summary_path.is_file():
+    if proc.returncode != 0:
         return Result(
             ok=False,
-            detail=f"smoke run failed: {_last_line(text)} "
-            f"(no summary.json for batch {run_id})",
+            detail=f"smoke run failed: {_last_line(text)} (batch {run_id})",
         )
-    summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    records_path = summary_path.parent / "records.jsonl"
-    records = [
-        json.loads(line)
-        for line in records_path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    measured = [r for r in records if r.get("phase") == "measured"]
-    bad_cache = [
-        r
-        for r in measured
-        if not (r.get("cache", {}).get("cleared_before_request") and r.get("cache", {}).get("cached_tokens") == 0)
-    ]
-    errors = [r for r in records if r.get("status") in ("error", "timeout")]
-    contaminated = [r for r in records if r.get("status") == "contaminated"]
-    missing_context = [
-        r for r in measured if r.get("metrics", {}).get("input_context_tokens") is None
-    ]
-    scored = [r for r in measured if r.get("score") is not None]
-    env_ok = (summary_path.parent / "omlx.json").is_file()
-    shape_ok = (
-        summary.get("mode") == "performance"
-        and isinstance(summary.get("overall"), list)
-        and isinstance(summary.get("samples"), list)
-        and summary.get("n_samples", 0) == len(measured)
-    )
-    ok = (
-        not errors
-        and not contaminated
-        and not bad_cache
-        and not missing_context
-        and not scored
-        and env_ok
-        and shape_ok
-        and len(measured) > 0
-    )
-    detail = (
-        f"{len(records)} records, {len(measured)} measured, "
-        f"{len(errors)} errors, {len(contaminated)} contaminated, "
-        f"{len(bad_cache)} cache issues, {len(missing_context)} missing context, "
-        f"{len(scored)} scored, omlx.json={env_ok}, shape_ok={shape_ok}"
-    )
-    return Result(ok=ok, detail=detail, data={"run_id": run_id, "summary": str(summary_path)})
+    evidence = _live_smoke_evidence(run_dir)
+    if not evidence["ok"]:
+        return Result(
+            ok=False,
+            detail=f"{evidence['detail']} (batch {run_id})",
+            data=evidence["data"],
+        )
+    return Result(ok=True, detail=evidence["detail"], data=evidence["data"])
 
 
 CHECKS: List[Check] = [
@@ -515,7 +619,7 @@ CHECKS: List[Check] = [
     Check("validate", "modelbench.interfaces.cli validate --offline (config + dataset parsing)", check_validate),
     Check(
         "dataset_integrity",
-        "tool/dataset/verify.py (structure/manifest/SHA-256; skipped when data absent in --ci)",
+        "tool/dataset/*/build.py --check + fetch.py --verify (skipped when data absent in --ci)",
         check_dataset_integrity,
     ),
     Check("perf_plan", "performance plan resolves (config/testset/models, no strategy/matrix)", check_perf_plan),

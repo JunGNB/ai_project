@@ -38,7 +38,7 @@ cd "$PROJ"
 
 .venv/bin/python -m harness.gate            # 完整门禁（默认 10 项，离线，约 10–30 秒）
 .venv/bin/python -m harness.gate --ci       # CI 模式：允许数据集缺失、跳过校验和与数据完整性检查
-.venv/bin/python -m harness.gate --only tests,docs_links,docs_contract
+.venv/bin/python -m harness.gate --only tests,docs_links,docs_contract   # 快速子集（不能用于 taskctl complete --gate）
 .venv/bin/python -m harness.gate --live     # 额外跑真实 oMLX smoke（需要服务）
 .venv/bin/python -m harness.gate --json     # 机器可读报告
 
@@ -59,12 +59,13 @@ cd "$PROJ"
 harness/
   gate.py              # 质量门禁（10 个确定性检查 + 可选 live smoke）
   taskctl.py           # 任务板 CLI（JSON 文件 + 原子写 + journal）
-  tasks/T-XXX-*.json   # 任务定义（tracked，评审对象）
-  prompts/             # 角色提示词：planner / implementer / verifier
+  tasks/T-XXX-*.json   # 本地任务板（harness/tasks/ 被 .gitignore 忽略，不承诺 tracked）
+  prompts/             # 角色提示词：planner / implementer / verifier（docs_contract 校验）
   reports/             # 门禁报告（gitignored；latest.json 供 AI 读取）
   state/journal.jsonl  # 状态迁移日志（gitignored）
 AGENTS.md              # 根目录：AI Agent 的硬契约（必读）
-Makefile               # check/test/smoke/tasks/docs
+reports/（根目录）      # 评审/审计/一次性分析记录：**不是测试证据**，索引见 reports/README.md
+Makefile               # check/test/tasks/live/docs/docs-write
 .github/workflows/ci.yml  # 远程 CI 镜像（gate --ci）
 ```
 
@@ -80,14 +81,18 @@ Makefile               # check/test/smoke/tasks/docs
 | `compile` | `compileall src harness tool test` | 语法错误 |
 | `tests` | `pytest test/`（单元 + fake-server 集成） | 行为回归 |
 | `validate` | `modelbench.interfaces.cli validate --offline`（配置 + 数据集解析；仅对有 `download_manifest.json` 的 raw 做校验和；CI 用 `--allow-missing --no-checksum`） | 数据集/配置不可用 |
-| `dataset_integrity` | `tool/dataset/verify.py`：结构 / manifest / 逐文件 SHA-256（`--ci` 且数据缺失时显式 skipped） | 数据集或溯源证据被破坏 |
+| `dataset_integrity` | `tool/dataset/*/build.py --check` + `fetch.py --verify`：行数/manifest/逐文件 SHA-256（`--ci` 且数据缺失时显式 skipped） | 数据集或溯源证据被破坏 |
 | `perf_plan` | `run --dry-run` 可解析 perf 配置/测试集/模型并输出计划 | 性能测试计划或配置被破坏 |
 | `docs_links` | 相对 Markdown 链接全部可解析；禁止绝对路径链接 | 文档失效/不可移植 |
-| `docs_contract` | 文档中的模块/路径/CLI flag/根启动器存在；`docs/PROJECT_STRUCTURE.md` 未过期（gitignored 的生成物路径不要求存在） | 文档与代码/目录漂移 |
+| `docs_contract` | `docs/**/*.md`、`harness/prompts/*.md`、根 README/AGENTS 中的模块/路径/CLI flag/根启动器存在；`docs/design/33-project-structure.md` 未过期；**已删除产物名黑名单**（白名单：`docs/design/31-output-contract.md`、`docs/archive/OUTPUT_LAYOUT.md` 历史段、`docs/archive/`） | 文档与代码/目录/历史产物漂移 |
 | `secrets` | tracked 文本中无 key/token/私钥字面量 | 有密钥泄漏风险 |
 | `hygiene` | .gitignore 覆盖证据目录；无生成物被跟踪；打包入口存在 | 仓库卫生退化 |
 
 > 修改 `src/modelbench` 目录后运行 `make docs-write`，否则 `docs_contract` 会失败。
+>
+> 文档按编号分层：`docs/spec/`（规范）、`docs/design/`（实现/契约）、`docs/guides/`（操作）、
+> `docs/process/`（V&V）、`docs/records/`（时间性记录）、`docs/archive/`（历史）；统一索引
+> 见 `docs/README.md`。固定样本契约/跨系统比较准入见 `docs/spec/13-testset-portability.md`。
 
 > 旧的 `matrix_plans` golden 检查随上下文矩阵一起删除；新的 `perf_plan` 只验证
 > 计划可被解析（样本数/数据集/模型），不锁定具体请求数。
@@ -101,7 +106,10 @@ Makefile               # check/test/smoke/tasks/docs
 
 报告字段：`schema_version, generated_at, git_commit, git_dirty, python, platform, ci,
 live, duration_ms, checks[{name, ok, detail, data, duration_ms}], summary{total, passed,
-failed, ok}`。`complete --gate` 只检查 `summary.ok == true`。
+failed, ok}`。`complete --gate` 不仅要求 `summary.ok == true`，还要求报告包含**完整 10 项
+默认检查**（`imports/compile/tests/validate/dataset_integrity/perf_plan/docs_links/
+docs_contract/secrets/hygiene`）；`--only` 生成的子集报告会被拒绝（报 missing checks），
+必须重跑完整 `python -m harness.gate`。
 
 ### 3.3 增加检查
 
@@ -115,7 +123,9 @@ failed, ok}`。`complete --gate` 只检查 `summary.ok == true`。
 
 ### 4.1 任务文件
 
-`harness/tasks/T-001.json`（一个任务一个文件，git 可 diff）：
+`harness/tasks/T-001.json`（一个任务一个文件，便于 diff；注意 `harness/tasks/` 当前被
+`.gitignore` 忽略——它是**本地任务板**，不承诺随仓库分发，换机/协作请通过任务 `notes`
+与 commit message 交接）：
 
 ```json
 {
@@ -129,7 +139,7 @@ failed, ok}`。`complete --gate` 只检查 `summary.ok == true`。
   "context": "为什么做、现状问题",
   "acceptance": ["可验证的验收条件 1", "python -m harness.gate 通过"],
   "notes": [],                    // 完成备注/阻塞原因（结构化）
-  "links": ["docs/ARCHITECTURE.md#..."]
+  "links": ["docs/design/30-architecture.md#..."]
 }
 ```
 
@@ -145,7 +155,8 @@ done ──reopen──► pending
 规则：
 
 - `claim` 仅允许 `pending`；认领后 `owner` 必填（默认 `$AGENT_NAME` 或 `agent`）。
-- `complete` 仅允许 `in_progress`，必须 `--note`；`--gate` 要求最新门禁通过。
+- `complete` 仅允许 `in_progress`，必须 `--note`；`--gate` 要求最新门禁**完整通过**
+  （10 项默认检查齐全且全 PASS；`--only` 子集报告会被拒绝并提示 missing checks）。
 - `block` 必须给具体原因；`reopen` 清空 owner。
 - 每次变更 append 到 `harness/state/` 下的 journal（时间、动作、任务、owner、commit、gate 报告）。
 - `taskctl check` 校验任务板一致性（in_progress 有 owner、done 有 note、blocked 有原因）。
@@ -159,7 +170,7 @@ done ──reopen──► pending
   --scope src/datasets/ --scope src/modelbench/resources/config/scenarios.yaml \
   --acceptance "validate passes" --acceptance "pytest passes" \
   --context "LongBench-v2 不足以覆盖多跳长文推理" \
-  --link docs/ARCHITECTURE.md
+  --link docs/design/30-architecture.md
 ```
 
 任务 ID 自动递增；新任务默认 `acceptance` 含"门禁通过"。
@@ -173,7 +184,7 @@ done ──reopen──► pending
 ```bash
 # 0) 读契约（每次会话开始时）
 cat AGENTS.md
-cat docs/ARCHITECTURE.md      # 架构与不变量
+cat docs/design/30-architecture.md      # 架构与不变量
 cat harness/prompts/implementer.md
 
 # 1) 选任务
@@ -237,4 +248,4 @@ git add -A && git commit -m "T-00X: ..."
 | `hygiene` 报 tracked 生成物 | `git rm --cached <path>` 并在 `.gitignore` 加规则 |
 | `complete --gate` 报 report missing | 先运行 `python -m harness.gate` 生成 `latest.json` |
 | 任务 ID 冲突 | `taskctl new` 自动取最大编号 +1；不要手工改已有 ID |
-| 想重置任务板 | 任务文件是 tracked 的，用 git 恢复；journal 可直接删除（gitignored） |
+| 想重置任务板 | 任务目录被 `.gitignore` 忽略（本地板，不承诺 tracked）：可直接删除/清空 `harness/tasks/` 重建；`journal`（`harness/state/journal.jsonl`）同样可直接删除 |

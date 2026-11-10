@@ -18,6 +18,7 @@ from modelbench.domain.models import (
     Phase,
     RawResponse,
     RecordStatus,
+    SCHEMA_VERSION,
     RequestSpec,
     RunManifest,
     Sample,
@@ -379,19 +380,24 @@ def test_writer_roundtrip(tmp_path):
         run_config={"repeats": 1, "cache_mode": "cold"},
     )
     run_dir = Path(summary["run_dir"])
+    # Flat layout: ``runs/<run_id>/`` with the directory name equal to the run id.
+    assert run_dir.name == summary["run_id"]
+    assert run_dir.parent.name == "runs"
+    # Schema 3.0 bundle: no summary.json / CSV exports / analysis/ / raw/ any more.
     for name in (
-        "summary.json",
-        "summary.csv",
-        "cells.csv",
+        "run.json",
+        "MANIFEST.json",
+        "records.jsonl",
         "samples.csv",
+        "aggregates.json",
         "report.md",
-        "omlx.json",
     ):
         assert (run_dir / name).is_file(), f"missing {name}"
-    data = json.loads((run_dir / "summary.json").read_text())
-    assert data["schema_version"] == "2.1"
-    assert data["mode"] == "performance"
-    assert data["perf"]["max_tokens"] == 256
+    for gone in ("summary.json", "summary.csv", "cells.csv", "analysis", "raw", "omlx.json"):
+        assert not (run_dir / gone).exists(), f"{gone} should no longer be written"
+
+    data = json.loads((run_dir / "aggregates.json").read_text())
+    assert data["schema_version"] == SCHEMA_VERSION
     assert data["n_samples"] == 2
     overall = data["overall"][0]
     assert overall["n_valid"] == 2
@@ -400,13 +406,140 @@ def test_writer_roundtrip(tmp_path):
     assert overall["peak_rss_mb_max"] == pytest.approx(1024.0)
     assert overall["peak_memory_gb_max"] == pytest.approx(2.5)
     assert overall["perf"]["peak_memory_gb"]["mean"] == pytest.approx(2.5)
-    assert len(data["samples"]) == 2
-    assert data["samples"][0]["input_context_chars"] == 4000
-    assert "accuracy" not in data["cells"][0]
-    # Schema 2.1: summary.csv carries one row per (model, context bucket).
-    header = (run_dir / "summary.csv").read_text(encoding="utf-8").splitlines()[0]
-    assert "context_length" in header
     assert len(data["overall"]) == 1  # both records are legacy (no bucket)
+
+    run_json = json.loads((run_dir / "run.json").read_text())
+    assert run_json["schema_version"] == SCHEMA_VERSION
+    assert run_json["method"] == "performance"
+    assert run_json["config"]["perf"]["max_tokens"] == 256
+    assert run_json["outcome"]["n_samples"] == 2
+
+    # Per-sample probe columns live in samples.csv (cold-cache audit no longer
+    # requires re-reading records.jsonl).
+    header = (run_dir / "samples.csv").read_text(encoding="utf-8").splitlines()[0]
+    for column in ("context_length", "cache_cleared", "cached_tokens", "prompt_sha256"):
+        assert column in header
+
+    # Prompt bodies are content-addressed: two identical prompts -> one blob.
+    records = [json.loads(line) for line in (run_dir / "records.jsonl").read_text().splitlines()]
+    assert len(records) == 2
+    assert "messages" not in records[0]["request"]
+    assert records[0]["request"]["prompt_sha256"]
+    assert records[0]["request"]["prompt_sha256"] == records[1]["request"]["prompt_sha256"]
+    blobs = list((tmp_path / "blobs" / "prompts").glob("*/*.json"))
+    assert len(blobs) == 1
+    manifest_file = json.loads((run_dir / "MANIFEST.json").read_text())
+    assert manifest_file["blob_refs"]["prompts"] == 1
+    assert manifest_file["blob_refs"]["missing"] == 0
+
+
+def test_finalize_records_terminal_status_and_selected_count(tmp_path):
+    """A finished run must not stay in the ``running`` initial state.
+
+    ``n_selected`` is the traceability identity ``measured-ok + skipped``; the
+    strict ``verify`` check fails on every real run if this stays 0.
+    """
+    writer = RunWriter(tmp_path, run_id="status-run")
+    writer.initialize(
+        RunManifest(
+            run_id="status-run",
+            created_at="2026-01-01T00:00:00Z",
+            project_version="0.1.0",
+            outcome={"status": "running", "n_selected": 0},
+        )
+    )
+    records = [_make_record("status-run"), _make_record("status-run", ttft=200.0)]
+    writer.write_record(records[0])
+    writer.write_record(records[1])
+    summary = writer.finalize(
+        records,
+        extra={"skipped": ["coding/s1: not-testable (boom)"]},
+        perf={"max_tokens": 50},
+        run_config={"repeats": 1},
+    )
+    outcome = json.loads((Path(summary["run_dir"]) / "run.json").read_text())["outcome"]
+    assert outcome["status"] == "ok"
+    assert outcome["n_measured"] == 2
+    assert outcome["n_ok"] == 2
+    assert outcome["n_selected"] == 2 + len(outcome["skipped"]) == 3
+
+
+def test_finalize_counts_error_records_in_n_measured(tmp_path):
+    """n_measured must account for failed attempts (AC-2 denominator).
+
+    A measured-phase record with status=error stays in ``n_measured`` while
+    ``n_ok`` only counts ok records; ``n_selected`` keeps the invariant
+    identity ``n_measured + len(skipped)`` so error attempts are traceable
+    instead of silently dropping out of the accounting.
+    """
+    writer = RunWriter(tmp_path, run_id="err-accounting")
+    writer.initialize(
+        RunManifest(run_id="err-accounting", created_at="2026-01-01T00:00:00Z")
+    )
+    good = _make_record("err-accounting")
+    bad = _make_record("err-accounting", ttft=200.0).model_copy(
+        update={"status": RecordStatus.ERROR, "error": "HTTP 500"}
+    )
+    summary = writer.finalize([good, bad], extra={"skipped": ["math/s9: not-testable"]})
+    outcome = json.loads((Path(summary["run_dir"]) / "run.json").read_text())["outcome"]
+    assert outcome["status"] == "partial"
+    assert outcome["n_measured"] == 2  # error attempt is still measured
+    assert outcome["n_ok"] == 1
+    assert outcome["n_selected"] == 2 + 1 == 3
+    assert outcome["n_records"] == 2
+
+
+def test_finalize_marks_cancelled_and_error_states(tmp_path):
+    writer = RunWriter(tmp_path, run_id="cancel-run")
+    writer.initialize(
+        RunManifest(run_id="cancel-run", created_at="2026-01-01T00:00:00Z")
+    )
+    summary = writer.finalize([], extra={"cancelled": True})
+    outcome = json.loads((Path(summary["run_dir"]) / "run.json").read_text())["outcome"]
+    assert outcome["status"] == "cancelled"
+    assert outcome["n_selected"] == 0
+
+    err_writer = RunWriter(tmp_path, run_id="error-run")
+    err_writer.initialize(
+        RunManifest(run_id="error-run", created_at="2026-01-01T00:00:00Z")
+    )
+    bad = _make_record("error-run").model_copy(
+        update={"status": RecordStatus.ERROR, "error": "HTTP 500"}
+    )
+    summary = err_writer.finalize([bad])
+    outcome = json.loads((Path(summary["run_dir"]) / "run.json").read_text())["outcome"]
+    assert outcome["status"] == "error"
+
+
+def test_samples_csv_fills_all_contract_columns(tmp_path):
+    """Every column promised by the contract must carry a value, not a blank."""
+    writer = RunWriter(tmp_path, run_id="cols-run")
+    writer.initialize(RunManifest(run_id="cols-run", created_at="2026-01-01T00:00:00Z"))
+    record = _make_record("cols-run").model_copy(
+        update={
+            "request": _make_record("cols-run").request.model_copy(
+                update={"actual_prompt_tokens": 1000}
+            )
+        }
+    )
+    writer.write_record(record)
+    summary = writer.finalize([record], perf={"max_tokens": 50}, run_config={"repeats": 1})
+    run_dir = Path(summary["run_dir"])
+    import csv
+
+    with (run_dir / "samples.csv").open(encoding="utf-8", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    assert len(rows) == 1
+    row = rows[0]
+    # Identity / provenance columns must always be populated.
+    for column in ("model_id", "actual_prompt_tokens", "prompt_sha256", "cache_mode"):
+        assert row.get(column) not in (None, ""), f"{column} is blank"
+    assert row["model_id"] == "m1"
+    assert int(row["actual_prompt_tokens"]) == 1000
+    # Metric columns are nullable by construction (no tps/mem sample set here),
+    # but they must exist as columns so consumers can rely on the schema.
+    for column in ("total_tps", "mean_cpu_pct"):
+        assert column in row
 
 
 def test_overall_aggregates_are_per_context_bucket():
@@ -415,8 +548,15 @@ def test_overall_aggregates_are_per_context_bucket():
     from modelbench.domain.models import Phase
 
     def rec(context_length, ttft, sample_id):
-        return _make_record("ctx", ttft=ttft).model_copy(
-            update={"context_length": context_length, "sample_id": sample_id}
+        base = _make_record("ctx", ttft=ttft)
+        return base.model_copy(
+            update={
+                "context_length": context_length,
+                "sample_id": sample_id,
+                "metrics": base.metrics.model_copy(
+                    update={"input_context_tokens": context_length}
+                ),
+            }
         )
 
     rows = [
@@ -482,25 +622,29 @@ def test_report_and_summary_csv_show_context_rows(tmp_path):
     writer.initialize(manifest, {"chip": "M4"}, {"selected": []}, {"models": {}})
     records = []
     for context_length, ttft, finish in ((1024, 100.0, "stop"), (32768, 10000.0, "length")):
-        record = _make_record("ctx-run", ttft=ttft).model_copy(
+        base = _make_record("ctx-run", ttft=ttft)
+        record = base.model_copy(
             update={
                 "context_length": context_length,
                 "response": RawResponse(text="x", finish_reason=finish),
+                "metrics": base.metrics.model_copy(
+                    update={"input_context_tokens": context_length}
+                ),
             }
         )
         records.append(record)
         writer.write_record(record)
     summary = writer.finalize(records, perf={"max_tokens": 50}, run_config={"repeats": 1})
     run_dir = Path(summary["run_dir"])
-    data = json.loads((run_dir / "summary.json").read_text())
+    data = json.loads((run_dir / "aggregates.json").read_text())
     assert [row["context_length"] for row in data["overall"]] == [1024, 32768]
     assert data["overall"][0]["perf"]["ttft_ms"]["mean"] == pytest.approx(100.0)
     assert data["overall"][1]["perf"]["ttft_ms"]["mean"] == pytest.approx(10000.0)
     # max_tokens cap is recorded, not filtered: capped sample stays in n_valid.
     assert [row["n_length_capped"] for row in data["overall"]] == [0, 1]
     assert [row["n_valid"] for row in data["overall"]] == [1, 1]
-    header = (run_dir / "summary.csv").read_text(encoding="utf-8").splitlines()[0]
-    assert "n_length_capped" in header
+    header = (run_dir / "samples.csv").read_text(encoding="utf-8").splitlines()[0]
+    assert "length_capped" in header
     report = (run_dir / "report.md").read_text(encoding="utf-8")
     assert "按上下文档位分别平均" in report
     assert "触顶" in report
@@ -755,3 +899,75 @@ def test_warmup_failure_is_not_counted_as_measured_error():
     assert cell.n_error == 0
     assert cell.n_valid == 1
     assert cell.n_warmup == 1
+
+
+def test_compute_metrics_tool_call_burst_suppresses_gen_tps():
+    """>=16 tokens delivered in a sub-ms window must not yield 100k+ TPS."""
+    metrics = compute_metrics(
+        ttft_s=1.0,
+        first_visible_s=1.0,
+        last_token_s=1.0002,   # 0.2ms for 49 decode tokens
+        e2e_s=1.1,
+        prompt_tokens=1000,
+        completion_tokens=50,
+        finish_reason="tool_calls",
+        num_chunks=6,
+    )
+    assert metrics.gen_tps is None
+    assert metrics.tpot_ms is None
+    assert metrics.gen_tps_invalid == "tool_calls"
+    assert metrics.decode_window_ms == pytest.approx(0.2, abs=0.01)
+
+
+def test_compute_metrics_short_decode_window_suppresses_gen_tps():
+    metrics = compute_metrics(
+        ttft_s=1.0,
+        first_visible_s=1.0,
+        last_token_s=1.001,
+        e2e_s=1.1,
+        prompt_tokens=1000,
+        completion_tokens=50,
+        finish_reason="stop",
+    )
+    assert metrics.gen_tps is None
+    assert metrics.gen_tps_invalid == "decode_window_too_short"
+
+
+def test_isl_tolerance_policy():
+    from modelbench.domain.context_tolerance import (
+        tolerance_bounds,
+        tolerance_for_bucket,
+        within_tolerance,
+    )
+
+    assert tolerance_bounds(1024) == (921, 1126)     # all buckets: +/-10%
+    assert tolerance_bounds(8192) == (7372, 9011)   # 8K: +/-10%
+    assert tolerance_bounds(32768) == (29491, 36044)
+    assert tolerance_for_bucket("32k") == (29491, 36044)
+    assert tolerance_for_bucket(None, 8192) == (7372, 9011)
+    assert within_tolerance(1126, (921, 1126))
+    assert not within_tolerance(1127, (921, 1126))
+    assert not within_tolerance(920, (921, 1126))
+    assert not within_tolerance(7371, (7372, 9011))
+
+
+def test_distribution_has_within_run_ci95():
+    from modelbench.domain.metrics import distribution
+
+    dist = distribution([10.0, 12.0, 14.0])
+    assert dist.n == 3
+    assert dist.ci95_low is not None and dist.ci95_high is not None
+    assert dist.ci95_low < dist.mean < dist.ci95_high
+    single = distribution([10.0])
+    assert single.ci95_low is None and single.ci95_high is None
+
+
+def test_omlx_backend_implements_application_port_contract():
+    from modelbench.adapters.omlx.backend import OMLXBackend
+    from modelbench.application.ports import backend_contract_errors
+
+    backend = OMLXBackend(base_url="http://127.0.0.1:1", api_key="x")
+    try:
+        assert backend_contract_errors(backend) == []
+    finally:
+        backend.close()

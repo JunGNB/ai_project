@@ -1,4 +1,4 @@
-"""Generate the canonical source-tree inventory in docs/PROJECT_STRUCTURE.md.
+"""Generate the canonical source-tree inventory in docs/design/33-project-structure.md.
 
     python -m harness.gen_structure --write   # update the file
     python -m harness.gen_structure --check   # fail if stale (CI/gate)
@@ -12,13 +12,13 @@ import argparse
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-TARGET = ROOT / "docs" / "PROJECT_STRUCTURE.md"
+TARGET = ROOT / "docs" / "design" / "33-project-structure.md"
 PACKAGE = ROOT / "src" / "modelbench"
 
 HEADER = """# 项目结构清单（自动生成）
 
-> 由 `python -m harness.gen_structure --write` 生成，**请勿手改**。
-> 检查：`python -m harness.gate --only docs_contract`。
+> 由 `python -m harness.gen_structure --write`（或 `make docs-write`）生成，**请勿手改**。
+> 检查：`python -m harness.docs_contract`（或 `make docs`）。
 """
 
 

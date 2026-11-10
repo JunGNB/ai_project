@@ -122,13 +122,18 @@ def _strat_group_key(sample: Sample) -> Tuple[Optional[int], str]:
 
 
 def stratified_sample(samples: List[Sample], n: Optional[int]) -> List[Sample]:
-    """Take N samples proportional to (context_length, lang) strata.
+    """Take N samples, allocating across context buckets first, then languages.
 
     ``perf_jsonl`` sorts by ``sample_id`` where ``32k`` sorts before ``8k``, so
     a plain "first N" would always pick the largest bucket for scenarios that
-    mix buckets.  Stratifying keeps a small ``--samples`` run representative and
-    deterministic: floor allocation + largest-remainder distribution, then the
-    first ``k`` samples (by ``sample_id``) inside each stratum.
+    mix buckets.  A flat ``(context_length, lang)`` allocation also collapses
+    multilingual runs into 1K for small N (30 singleton strata, lexicographic
+    tie-break).  This implementation matches ``perf_jsonl.plan()`` exactly:
+
+    1. largest-remainder allocation across declared context buckets;
+    2. largest-remainder allocation across languages inside each bucket;
+    3. keep the first ``k`` samples by ``sample_id`` per stratum, then sort the
+       selected set by ``sample_id``.
 
     Legacy samples without a declared context bucket fall back to
     :func:`deterministic_sample`.
@@ -139,17 +144,28 @@ def stratified_sample(samples: List[Sample], n: Optional[int]) -> List[Sample]:
     if not any((s.metadata or {}).get("prebuilt") for s in ordered):
         return ordered[:n]
 
-    groups: Dict[Tuple[Optional[int], str], List[Sample]] = {}
+    by_bucket: Dict[Optional[int], List[Sample]] = {}
     for sample in ordered:
-        groups.setdefault(_strat_group_key(sample), []).append(sample)
-    allocation = largest_remainder_allocation(
-        {key: len(group) for key, group in groups.items()}, n
+        key, _lang = _strat_group_key(sample)
+        by_bucket.setdefault(key, []).append(sample)
+    bucket_allocation = largest_remainder_allocation(
+        {key: len(group) for key, group in by_bucket.items()}, n
     )
 
     chosen: List[Sample] = []
-    for key in sorted(groups, key=lambda k: (str(k[0]), k[1])):
-        take = allocation.get(key, 0)
-        if take <= 0:
+    for bucket in sorted(by_bucket, key=lambda key: (key is not None, key or 0)):
+        quota = int(bucket_allocation.get(bucket, 0))
+        if quota <= 0:
             continue
-        chosen.extend(groups[key][:take])
+        by_lang: Dict[str, List[Sample]] = {}
+        for sample in by_bucket[bucket]:
+            _bucket, lang = _strat_group_key(sample)
+            by_lang.setdefault(lang, []).append(sample)
+        lang_allocation = largest_remainder_allocation(
+            {lang: len(group) for lang, group in by_lang.items()}, quota
+        )
+        for lang in sorted(by_lang):
+            take = int(lang_allocation.get(lang, 0))
+            if take > 0:
+                chosen.extend(by_lang[lang][:take])
     return sorted(chosen, key=lambda s: s.sample_id)
