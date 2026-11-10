@@ -59,10 +59,13 @@ DATASETS: Dict[str, Dict[str, Any]] = {
 #: Non-dataset assets required by builders (reference tokenizer).
 TOOLING: Dict[str, Dict[str, str]] = {
     "tokenizer": {
-        "name": "MiniCPM5-1B tokenizer",
-        "source_url": "https://huggingface.co/openbmb/MiniCPM5-1B",
-        "license": "see model card",
-        "purpose": "reference tokenizer for the declared content-token counts (no chat template)",
+        "name": "cl100k_base (OpenAI)",
+        "source_url": "https://github.com/openai/tiktoken/blob/main/README.md",
+        "license": "MIT (tiktoken) / cl100k_base encoding data",
+        "purpose": (
+            "generic industry reference tokenizer for the declared content-token "
+            "counts (no chat template, no model-specific tokenizer)"
+        ),
     },
 }
 
@@ -85,7 +88,12 @@ def dataset_provenance(scope: str = "data") -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     for dataset, info in meta.items():
         files = files_for(dataset)
-        if not files:
+        generated = [
+            g
+            for g in load_spec()["generated"]
+            if g.get("dataset") == dataset and {"path", "bytes", "sha256"} <= set(g)
+        ]
+        if not files and not generated:
             continue
         out[dataset] = {
             "name": info["name"],
@@ -94,6 +102,15 @@ def dataset_provenance(scope: str = "data") -> Dict[str, Any]:
             "files": [
                 {"path": f["path"], "bytes": f["bytes"], "sha256": f["sha256"]}
                 for f in files
+            ]
+            + [
+                {
+                    "path": g["path"],
+                    "bytes": g["bytes"],
+                    "sha256": g["sha256"],
+                    "derived_by": str(g.get("generator") or "spec"),
+                }
+                for g in generated
             ],
         }
         if "used_by" in info:
@@ -107,12 +124,33 @@ def raw_path_display(rel: str) -> str:
 
 
 def tokenizer_entry() -> Dict[str, Any]:
-    """The ``tokenizer/MiniCPM5-1B/tokenizer.json`` raw-spec entry."""
+    """The ``tokenizer/cl100k_base/tokenizer.json`` raw-spec entry.
+
+    The derived ``tokenizer.json`` (generated rule) is what the builder loads;
+    its spec entry carries the deterministic generator script and pinned
+    SHA-256, so the manifest can cite an auditable file identity.
+    """
+    generated = load_spec()["generated"]
+    entry = next(
+        (g for g in generated if g["path"].endswith("tokenizer.json")), None
+    )
+    if entry is not None:
+        return entry
     return next(
         f for f in files_for("tokenizer") if f["path"].endswith("tokenizer.json")
     )
 
 
 def required_paths() -> List[Path]:
-    """Absolute paths of every raw file this builder reads (for the preflight)."""
-    return [RAW_DIR / f["path"] for f in load_spec()["files"]]
+    """Absolute paths of every raw file this builder reads (for the preflight).
+
+    Includes both downloaded files and deterministic ``generated`` assets (the
+    derived cl100k ``tokenizer.json``).
+    """
+    spec = load_spec()
+    paths = [RAW_DIR / f["path"] for f in spec["files"]]
+    for item in spec.get("generated", []):
+        path = RAW_DIR / item["path"]
+        if path not in paths:
+            paths.append(path)
+    return paths

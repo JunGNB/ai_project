@@ -24,7 +24,7 @@
 
 **六个关键决策**
 
-1. **5 个数据集覆盖 8 个场景**：LongBench v2 一库四用（知识/长文/编程/搜索）；Global-MMLU 承担多语言；指令、数学、通用 Agent 各 1 个。新增依赖为 0（17 个上游文件 + 1 个参考 tokenizer，全部已在 `dataset/raw/`，`raw_spec.json` 为准）。
+1. **5 个数据集覆盖 8 个场景**：LongBench v2 一库四用（知识/长文/编程/搜索）；Global-MMLU 承担多语言；指令、数学、通用 Agent 各 1 个。新增依赖为 0（17 个上游文件 + 2 个 tokenizer 资产，全部已在 `dataset/raw/`，`raw_spec.json` 为准）。
 2. **每格 10 条、共 240 条**：性能指标是连续量，10 条/格给中位数与 IQR 已足够；相比 20 条/格方案把测量请求从 480 降到 240，24 个 cell 的对比结构不变。
 3. **长度是唯一自变量**：同一 `target` 贯穿 1K/8K/32K，题面/指令/请求逐字符一致，只有上下文长度变化；文档场景用字符前缀保证 1K⊂8K⊂32K。
 4. **长短分离、按形状选数据集**：长文场景用原生长文（不拼接），短任务场景用"同集参考块"扩展并标 `constructed=true`；避免"同一段文本反复出现"的病态 prefill 形状。
@@ -41,7 +41,7 @@
 |---|---|---|
 | C1 | 必须覆盖 8 个场景 | 8 个场景各 10 个 target，无缺席 |
 | C2 | 每场景必须覆盖 1K/8K/32K | 每场景 × 3 档 = 30 行；同 target 三档 |
-| C3 | 长度可在范围附近波动 | 目标 1024/8192/32768 内容 token，接受 **±5%**（整数边界见 §4.1） |
+| C3 | 长度可在范围附近波动 | 目标 1024/8192/32768 上下文：声明值按 §4.4 校准预算模型定标（构造 ±5%），运行期实际 token ±10% 入带 |
 | C4 | 数据集不要太多、能复用则复用 | 5 个数据集；LongBench v2 复用 4 个场景 |
 | C5 | 可复现、可审计 | 固定 seed、无时间戳、manifest 记录逐文件 SHA-256 与抽样明细 |
 | C6 | 负载形状真实 | 长文用原生文档；短任务用同集单元按序拼接后取字符前缀扩展（末尾单元可能被截断，见 §9）；tools 只放完整函数对象 |
@@ -170,7 +170,7 @@
 
 - 候选：IFEval、IFBench、Multi-IF、FollowBench。
 - 为什么选：541 条（排除 31 条依赖 `language:` 的样本后 510 条）、8 类可验证指令，池足够 10 个 target 且能按类型分层；纯 prompt、无答案依赖，最适合"目标指令 + 同集参考块"扩到 32K。
-- 参考块格式：每条参考 item 渲染为 `INSTRUCTION {k}: ids=<instruction_id_list JSON> kwargs=<kwargs JSON>` 后接 prompt，目标自身不入参考块；509 条单份合计约 44.1K token（`reference_items=509`），已超过 32K 下界 31,129，所以 32K 档是**一次不重复的完整遍历**，1K/8K/32K 只是同一字符串的递增前缀（`reference_pool_cycles=1`）。加入 `ids`/`kwargs` 元数据是为了让单份素材超过 32K 而不复制同一段文本（审计 P-01 修复）。
+- 参考块格式：每条参考 item 渲染为 `INSTRUCTION {k}: ids=<instruction_id_list JSON> kwargs=<kwargs JSON>` 后接 prompt，目标自身不入参考块；509 条单份合计约 43K token（cl100k，`reference_items=509`），已超过 32K 校准下界 31,094，所以 32K 档是**一次不重复的完整遍历**，1K/8K/32K 只是同一字符串的递增前缀（`reference_pool_cycles=1`）。加入 `ids`/`kwargs` 元数据是为了让单份素材超过 32K 而不复制同一段文本（审计 P-01 修复）。
 - 不选：IFBench 仅 300 条且精度侧已用；Multi-IF 是多轮、长度随轮次漂移，单请求测量不匹配；FollowBench 需额外判据。
 - 局限：参考块按字符前缀切分，末尾可能落在某条指令的 prompt 中间（这是截断、不是复制，见 §9）；只测"读参考材料 + 执行指令"的形状，不判是否遵守约束。
 
@@ -217,12 +217,12 @@
 |---|---|---|---|
 | `document_prefix` | 知识问答、长上下文、编程 | 取同一文档的字符前缀，后面接原题面；三档是 1K⊂8K⊂32K 前缀链 | false |
 | `doc_prefix_with_tools` | 搜索 Agent | 同上 + 固定 search/lookup 两个 schema | false |
-| `reference_rotation` | 指令遵循 | 目标指令原样 + 同集其他指令（每条带 `ids`/`kwargs` 元数据）按固定起点拼接；目标自身不入参考块；单份 509 条约 44.1K token，不复制不循环 | true |
+| `reference_rotation` | 指令遵循 | 目标指令原样 + 同集其他指令（每条带 `ids`/`kwargs` 元数据）按固定起点拼接；目标自身不入参考块；单份 509 条约 43K token（cl100k），不复制不循环 | true |
 | `example_rotation` | 数学与逻辑 | 目标题 + 同集其他题的"题 + 解题过程"；起点 step=41 旋转；排除 10 个目标 | true |
 | `function_catalog` | 通用 Agent | 目标请求 + target-first 的 whole-function 目录（自身函数→同类→其余），只放完整 JSON 函数 | true |
 | `same_language_bank` | 多语言 | 目标题 + **同语种**其他题目/选项按固定起点拼接；排除目标 `sample_id` | true |
 
-短任务场景的 8K/32K 用同集其他样本的单元（指令 / 已解例题 / 题目）按固定顺序拼接，再取**字符前缀**：单元内容完整，但**切点可能落在最后一个单元内部**（半条指令/半道例题/半道题干，见 §9），且**不复制**任何整段文本——IFEval 32K 已改为单份约 44.1K token 的「元数据 + prompt」参考块，`reference_pool_cycles` 恒为 1；general_agent 只放 whole-function JSON，不存在半 JSON。
+短任务场景的 8K/32K 用同集其他样本的单元（指令 / 已解例题 / 题目）按固定顺序拼接，再取**字符前缀**：单元内容完整，但**切点可能落在最后一个单元内部**（半条指令/半道例题/半道题干，见 §9），且**不复制**任何整段文本——IFEval 32K 已改为单份约 43K token（cl100k）的「元数据 + prompt」参考块，`reference_pool_cycles` 恒为 1；general_agent 只放 whole-function JSON，不存在半 JSON。
 
 ### 4.3 三档同源一致性
 
@@ -233,16 +233,21 @@
 
 ### 4.4 token 口径与 runner 对齐
 
-- 参考 tokenizer：`MiniCPM5-1B`（`dataset/raw/tokenizer/MiniCPM5-1B/tokenizer.json`），与精度侧同一口径；
-- **`tokens` 是内容 token**，不含 chat template 控制符；但参考 tokenizer 以 `add_special_tokens=True` 计数，所以每条 `messages` 含 1 个 BOS（非 tool 场景 +1）、tools JSON 再 +1（tool 场景合计 +2）——manifest `deviations.tokenizer-bos-included`；
-- 运行期还会追加 decode-guard 指令与 chat-template 开销（guard 自身 token 数见 [20-methodology.md](20-methodology.md) §2 单一事实源），因此实际 `input_context_tokens` 比声明多约 **46–69 token**：1K 档约 +1.9%–+11.6%，8K/32K <2%（manifest `deviations.decode-guard-suffix`，详见 §9）；
-- tools 的 JSON 文本按其序列化 token 计入（`tools_tokens`），确保"函数目录/工具定义"的开销被计入 prefill；
-- manifest 的 `tokens_semantics` 字段写死该口径，报告引用时必须同时引用。
+- 参考 tokenizer：**cl100k_base**（OpenAI 的业界通用口径，`dataset/raw/tokenizer/cl100k_base/`：官方 `cl100k_base.tiktoken` blob + 由 `derive_cl100k.py` 确定性派生的 `tokenizer.json`，SHA-256 双双钉死在 `raw_spec.json`）。**不绑定任何模型**：声明值是模型无关的通用计数，不同目标模型的可信度一致；
+- **`tokens` 是内容 token**，不含 chat template 控制符、不含任何特殊 token（cl100k 无 BOS 计入问题）；
+- **校准预算模型**：不同 tokenizer 对同一文本计数不同（代码/数学更密、非拉丁文更松），所以每条样本的声明值不是裸 bucket 值，而是按场景/语种校准的预算
+  `budget = (bucket − RESERVE) / INFL`，
+  其中 RESERVE 是**固定渲染预留**（带 tools 行 270、纯文本行 90，实测于 240-cell 校准 run `20261110T112641Z-8349`），tools JSON 本身作为内容随 INFL 一起膨胀、不再单独扣除（旧公式的双重扣除曾把 1K tool 档饿到带外：实际 796 < 带下沿 921）；
+  INFL 是**内容类型膨胀系数**（代码 1.07、数学 1.15、长文 1.24、知识 1.05、指令 1.04、Agent 1.00–1.03、多语言按语种 0.50–0.94），为实测中位数校准值（通用内容类型属性，不与特定模型绑定；来源与公式写进 manifest `budget_model` 与 `deviations.tokenizer-generic-cl100k`）。效果：声明值收敛到让**目标模型实际渲染 token** 居中落进运行期 ±10% ISL 带（离线逐行模拟 95% 入带）；
+- 运行期追加的 decode-guard 指令已在固定渲染预留中一并覆盖（`deviations.decode-guard-suffix`），不再把渲染 prompt 推出带外；
+- tools 的 JSON 文本按其序列化 token 计入（`tools_tokens`），模板 wrap 由固定 215 系数预留；
+- manifest 的 `tokens_semantics`/`budget_model` 字段写死该口径，报告引用时必须同时引用。
 
 ### 4.5 实际输入大小记录、聚合带与窗口判定
 
-- **固定样本**：本集是**唯一一套**性能样本，所有设备/模型/后端复用；构造时用参考 tokenizer
-  （MiniCPM5-1B）把内容 token 控制在目标 ±5%（如 32K 32,704–32,841）。**不为单个模型重新
+- **固定样本**：本集是**唯一一套**性能样本，所有设备/模型/后端复用；构造时用 cl100k 把内容
+  token 控制在**校准预算** ±5%（如 32K 档：长文场景约 27,065±5%，知识/指令场景约 32,731±5%），
+  校准方向使目标模型实际渲染 token 落入 ±10% ISL 带。**不为单个模型重新
   构造/裁剪/补齐**；32K target 固定 **32,768**，与 1K/8K 一样是普通 bucket，**无特殊处理**。
 - **运行期 actual 记录（不驱动跳过）**：请求前用**目标模型** `POST /v1/tokenize` 对最终
   messages+tools（含 chat template/decode guard）计数，写入
@@ -254,19 +259,22 @@
   `aggregates.overall/cells` 的均值。计数：`n_isl_in_band`/`n_isl_out_of_band`
   （run.json outcome 与 aggregates 行都有）；in-band 样本过少时报告须标记
   `insufficient_samples`，不得静默当作有效结论。
-- **为什么不是"构造 ±5% 就够"**：运行时由目标模型 tokenizer 计数，chat template+decode guard
-  再加 token，且不同模型 tokenizer 对同一文本可差很多（实测同一 32K 内容跨模型
-  **12,810–54,964** token）。固定一套样本 + 运行时记录 actual + ±10% 入带聚合，既保持
-  "同一套样本"的可移植性，又不把不同 token 工作量混进同一均值；跨模型只能作"同一套样本"
-  对比，actual 分布必须一起报告（见 [13-testset-portability.md](13-testset-portability.md)）。
+- **为什么不是"构造 ±5% 就够"**：运行时由目标模型 tokenizer 计数，且不同模型 tokenizer 对
+  同一文本可差很多（实测同一 32K 内容跨模型 **12,810–54,964** token）。这正是引入 §4.4
+  预算模型的原因——INFL 系数把最常见的跨 tokenizer 差异（内容类型/语种密度）吸收进构造
+  侧，使多数模型直接入带；残余差异仍靠运行时记录 actual + ±10% 入带聚合兜底。固定一套
+  样本 + 校准构造 + 运行时 actual 记录，既保持"同一套样本"的可移植性，又不把不同 token
+  工作量混进同一均值；跨模型只能作"同一套样本"对比，actual 分布必须一起报告（见
+  [13-testset-portability.md](13-testset-portability.md)）。
 - **窗口判定（唯一跳过理由之一）**：用**实际值**校验 `tokenized_prompt_tokens + max_tokens 50 +
   context_safety_margin 128 > model_context_window` → 该样本跳过（not-testable，写入
   `run.json.outcome.skipped`），**不截断**；tokenize 失败时回退声明值+242 判定并 warning。
   请求失败（网络/服务错误）同样按 skipped/error 记录，不影响其余样本。
-- **32K 档**：target 仍是 32,768，声明 token 32,704–32,841；是否需要跳过只取决于**目标模型
-  实际窗口**（actual+50+128 是否放得下），不做 32K 专属构造/特殊阈值。按声明+242 规划，
-  32,768 窗口模型 0/80 行可测；构建期 ±5% 上界 34,406+242=34,648 只是**数据集构建验收边界**，
-  不是运行时门槛。
+- **32K 档**：target 仍是 32,768，声明值为校准预算（按场景 25,712–34,367 不等）；是否跳过只
+  取决于**目标模型实际窗口**（actual+50+128 是否放得下），不做 32K 专属构造/特殊阈值。校准
+  后膨胀场景（长文/数学等）的声明值低于裸 bucket，在 32,768 窗口上的可测性更好；知识/
+  指令等 INFL≈1 场景上界仍可能超窗（构建期 ±5% 上界只是**数据集构建验收边界**，不是运行时
+  门槛）。
 - 结论：报告需单列 not-testable 行数、`n_isl_in_band`/`n_isl_out_of_band` 与 actual 分布，
   不得把未测行当 0，也不得把出带样本算进平均。
 
@@ -354,7 +362,7 @@ reports/dataset-build/performance/selection_report.md  逐层池/选中/跳过�
 ```
 tool/dataset/performance/          # 构造器（提交）
 ├── fetch.py                       # 仅标准库：下载/校验 → dataset/raw/
-├── raw_spec.json                  # 可提交规范：17 个上游文件 + tokenizer 的 path/url/bytes/sha256
+├── raw_spec.json                  # 可提交规范：17 个上游文件 + 2 个 tokenizer 资产的 path/url/bytes/sha256（tokenizer.json 走 generated 规则）
 ├── sources.py                     # 数据集元信息（URL/许可/used_by）
 ├── sampling.py                    # 确定性哈希抽样 + 分层最大余数
 └── build.py                       # 8 场景构造 + manifest + yaml + 报告
@@ -399,12 +407,12 @@ reports/dataset-build/performance/
 ### 6.3 manifest 关键字段
 
 - `schema_version:"performance/v1"`、`rows:240`、`per_scenario:30`、`targets_per_cell:10`、`seed:42`；
-- `tokenizer` + `tokens_semantics`（内容 token，不含模板）、`buckets`、`accept_rule`/`accept_bounds`；
+- `tokenizer` + `tokens_semantics`（cl100k 内容 token，不含模板/特殊 token）、`budget_model`（公式 + INFL 表 + 37/215 常数 + 验收语义）、`buckets`、`accept_rule`/`accept_bounds`；
 - `run_defaults`（`max_tokens:50`、`decode_guard:true`、`warmup_per_model:1`、`warmup_requests:0`、`repeats:1`）；
 - `window_requirements`（32K 每请求预留 242 token 与 not-testable 事实）；
-- `provenance`：5 个数据集、17 个上游文件 + tokenizer 的 `path/bytes/sha256` + `source_url` + `license`；
+- `provenance`：5 个数据集、17 个上游文件 + cl100k blob/派生 tokenizer.json 的 `path/bytes/sha256` + `source_url` + `license`；
 - `scenarios.<name>.sampling`：池、去重、跳过原因、配额、tokens 统计；
-- `deviations`：与官方口径的偏差（内容 token、10 条/格、前缀切片、Agent 单请求、多语言题库扩展、不判分等）；v1.1 另显式记录**参考块末尾截断、文档前缀半结构、BOS 计入、decode-guard 追加、IFEval 元数据参考块（单份不重复）** 5 类偏差。
+- `deviations`：与官方口径的偏差（内容 token、10 条/格、前缀切片、Agent 单请求、多语言题库扩展、不判分等）；另显式记录**参考块末尾截断、文档前缀半结构、cl100k 通用口径与预算校准、decode-guard 预留、IFEval 元数据参考块（单份不重复）** 等偏差。
 
 ### 6.4 testset.yaml
 
@@ -430,13 +438,14 @@ reports/dataset-build/performance/
 | GSM8K | [openai/gsm8k](https://huggingface.co/datasets/openai/gsm8k) | MIT | 数学例题池 | 1 / 0.4 MB |
 | BFCL v4 | [ShishirPatil/gorilla](https://github.com/ShishirPatil/gorilla/tree/main/berkeley-function-call-leaderboard) | Apache-2.0 | 通用 Agent（3 个请求文件） | 3 / 0.8 MB |
 | Global-MMLU | [CohereLabs/Global-MMLU](https://huggingface.co/datasets/CohereLabs/Global-MMLU) | Apache-2.0 | 多语言（10 语种；en 作题目选择参考池） | 11 / 51.5 MB |
-| MiniCPM5-1B tokenizer | 本地模型资产 | 随上游模型许可 | 参考 tokenizer | 1 / 9.9 MB |
+| cl100k_base 编码数据 | [openai/tiktoken](https://github.com/openai/tiktoken)（OpenAI 官方 blob） | MIT | 通用参考 tokenizer（声明 token 计数） | 2 / 4.4 MB |
 
-合计 **5 个数据集 / 17 个上游文件 + 1 个 tokenizer / 约 518 MB**（十进制 MB，不含 tokenizer 9.9 MB）；体量**以
+合计 **5 个数据集 / 17 个上游文件 + 2 个 tokenizer 资产 / 约 518 MB**（十进制 MB，不含 tokenizer 4.4 MB = 1.7 MB 官方 blob + 2.7 MB 派生 tokenizer.json）；体量**以
 `dataset/raw/download_manifest.json` 的逐文件 `size`/`sha256` 为准**（表内为人工核对值，重建后如有
 出入以 manifest 为准）；全部整包可下、无 gated、无联网依赖。`global_mmlu` 11 文件 = build 消费的
 10 语种 `test.parquet` + en 参考池；`dataset/raw/global_mmlu/` 实存 42 语种目录（fetch 全量下载），
-超出部分为冗余资产，未被 build 引用。
+超出部分为冗余资产，未被 build 引用。tokenizer.json 由 `tool/dataset/performance/derive_cl100k.py`
+从官方 blob 确定性派生（字节级可复现，SHA-256 钉死在 `raw_spec.json` 的 `generated` 规则中）。
 
 ### 7.2 目录
 
@@ -453,7 +462,7 @@ python tool/dataset/performance/fetch.py --dry-run  # 只打印计划
 ```
 
 - 下载先写 `<目标>.part`，校验 size+SHA-256 通过后原子改名；失败不留下损坏文件；
-- 本机现状：18 个文件（17 上游 + tokenizer）已全部就绪，`--verify` 通过（exit 0），**无需新增下载**；
+- 本机现状：19 个文件（17 上游 + 2 个 tokenizer 资产）已全部就绪，`--verify` 通过（exit 0），**无需新增下载**；
 - 上游版本冻结在 `raw_spec.json` 记录的 SHA-256；换版本必须重新生成测试集并更新 manifest，不能与旧结果混比。
 
 ---
@@ -466,7 +475,7 @@ python tool/dataset/performance/fetch.py --dry-run  # 只打印计划
 |---|---|---|
 | 1. 环境 | `./modelbench setup` + `.venv/bin/pip install -e ".[dev,datasets]"` | 构造需要 `tokenizers`、`pyarrow` |
 | 2. 下数据 | `.venv/bin/python tool/dataset/performance/fetch.py` | 已有 raw 可跳过 |
-| 3. 校验数据 | `.venv/bin/python tool/dataset/performance/fetch.py --verify` | exit 0 = 18 个文件（17 上游 + tokenizer）齐全 |
+| 3. 校验数据 | `.venv/bin/python tool/dataset/performance/fetch.py --verify` | exit 0 = 19 个文件（17 上游 + 2 个 tokenizer 资产）齐全 |
 | 4. 构造集 | `.venv/bin/python tool/dataset/performance/build.py` | 生成 testset/manifest/yaml/报告 |
 | 5. 校验集 | `.venv/bin/python tool/dataset/performance/build.py --check` | 行数/id/三档/边界/SHA 复算 |
 
@@ -477,15 +486,15 @@ python tool/dataset/performance/fetch.py --dry-run  # 只打印计划
 | 项 | 结果 |
 |---|---|
 | 行数 / target / cell | 240 / 80 / 24（每格 10） |
-| `testset.jsonl` | 13,273,802 B，SHA-256 `5bba5d7266642ab7b66e6c0af34b5c8fa094c6a13fa1cc436b1c4f087f858890` |
-| `manifest.json` / `testset.yaml` | 58,624 B / 1,591 B |
-| tokens（min / median / max） | 1k 997/1,024/1,074；8k 8,106/8,192/8,252；32k 32,704/32,768/32,841 |
+| `testset.jsonl` | 12,720,373 B，SHA-256 `f56f3af0ecf84a6b8e845341da053adcf5d8360fd6298bd1a5aee4feaae34442` |
+| `manifest.json` / `testset.yaml` | 88,802 B / 1,591 B |
+| tokens（按场景/档校准预算，示例） | coding 1k 911 / 8k 7,548 / 32k 30,303；long_context 1k 809 / 8k 6,733 / 32k 27,043；instruction 1k 987 / 32k 32,731；multilingual 8k 按语种 8,677（fr）–16,347（ar） |
 | constructed 行 | 120（IFEval 30、GSM8K 30、BFCL 30、多语言 30）；另 120 行为原生文档/请求 |
-| IFEval 32K 参考块 | 单份 509 条「元数据 + prompt」≈44.1K token，32K 只切单份；`reference_pool_cycles=1`、重复块 token 0（每行 378–387 个不重复指令单元） |
-| 32K 窗口需求 | 运行期按目标模型 tokenize 实际值 + max_tokens 50 + 安全边距 128 判定；按声明规划需 32,946–33,083，32,768 窗口 **0/80 可测**；32K target 不特殊处理 |
+| IFEval 32K 参考块 | 单份 509 条「元数据 + prompt」≈43K token（cl100k），32K 只切单份；`reference_pool_cycles=1`、重复块 token 0（每行 378–387 个不重复指令单元） |
+| 32K 窗口需求 | 运行期按目标模型 tokenize 实际值 + max_tokens 50 + 安全边距 128 判定；声明值为校准预算（25,712–34,367/行不等）；32K target 不特殊处理 |
 | 聚合 band | 所有档位 target ±10%（区间见 [20-methodology.md](../spec/20-methodology.md) §5 权威表）。**只对入带样本求平均**；出带样本保留但不进均值（`n_isl_in_band`/`n_isl_out_of_band`） |
-| 构建耗时 / 确定性 | 单次约 100 s；连续两次构建 `testset.jsonl` 逐字节一致 |
-| 验证 | `build.py --check` PASS；`pytest test/test_perf_dataset.py` 16 passed；`./modelbench validate --offline` 240 samples；dry-run 24 cells × 10 |
+| 构建耗时 / 确定性 | 单次约 108 s；连续两次构建 `testset.jsonl` 逐字节一致 |
+| 验证 | `build.py --check` PASS；`pytest test/test_perf_dataset.py` 25 passed（含 cl100k/预算模型/校准边界用例）；dry-run 24 cells × 10 |
 
 ### 8.3 与 runner 的接线
 
@@ -529,13 +538,13 @@ python tool/dataset/performance/fetch.py --dry-run  # 只打印计划
 3. **Agent 单请求**：不测多步工具循环、KV cache 随轮次增长；τ²-bench 与 Multi-IF 这类多轮形状可作为后续独立 testset。
 4. **多语言是"同语种题库"**：不是原生多语长文，10 个 target 为对角线设计，不用于跨语种排名。
 5. **编程只测读代码**：代码生成/长输出形状由统一 OSL=50 覆盖，本场景不单独承担。
-6. **32K 档的可测性受模型窗口限制**：32,768 窗口模型 32K 行 0/80 可测（声明 32,704–32,841，按声明+242 需 32,946–33,083），不截断；运行期以目标模型 tokenize 实际值判定，构建期 34,648 只是 ±5% 验收上界。
+6. **32K 档的可测性受模型窗口限制**：32,768 窗口模型上膨胀场景（长文/数学等，声明预算低于裸 bucket）可测性更好；INFL≈1 场景上界仍可能超窗；不截断，运行期以目标模型 tokenize 实际值判定，构建期 ±5% 上界只是验收边界。
 7. **10 条/格的方差**：单次测量受热漂移影响，结论性对比应 `repeats≥3` 并做配对统计。
 8. **不可与公开榜横比**：内容 token 口径、10 条/格、前缀切片、Agent 单请求、OSL=50 都与官方 benchmark 不同。
 9. **参考块末尾可能被截断**：IFEval/math_logic/multilingual 的参考块是同集单元按序拼接后取**字符前缀**，最后一条单元可能只保留半条指令/半道例题/半道题干（多语言则可能切在题干/选项内部）；这是“截断”而非“重复”，不改变长度变量的结论，但 prompt 不以完整单元结尾（manifest `deviations.reference-block-prefix-slice`）。
 10. **文档前缀可能切在结构内部**：long_context/coding 的字符前缀可能落在 JSON 对象/数组/字符串内部或打开的代码围栏内（long_context 实测 19/30 行括号不平衡），不保证文档结构在切点闭合（manifest `deviations.document-prefix-mid-structure`）。
-11. **声明 token 含 BOS**：参考 tokenizer 每次编码含 1 个 BOS（`messages` +1；tool 场景 `tools` 再 +1，合计 +2），与“内容 token”的表述有轻微出入；对 ±5% 边界无影响（manifest `deviations.tokenizer-bos-included`）。
-12. **运行期 decode guard 改写生成任务**：runner 会追加“忽略上文问题、改写 ≥250 词技术总结”指令并加 chat-template 开销（guard token 数与开销区间见 [20-methodology.md](20-methodology.md) §2），实际渲染 prompt 比声明多约 46–69 token（1K 档 +1.9%–11.6%，8K/32K <2%）；生成内容不是数据集任务，只用于测 decode 阶段吞吐（manifest `deviations.decode-guard-suffix`）。
+11. **构造 tokenizer 为通用 cl100k + 预算校准**：声明值用 cl100k_base（业界通用口径）计数，不绑定模型；按场景/语种的经验膨胀系数 INFL 把声明值定标到校准预算，使多数目标模型的实际渲染 token 入带。系数是通用内容类型属性（代码/数学密、非拉丁文松），校准来源与公式记录在 manifest `budget_model` 与 `deviations.tokenizer-generic-cl100k`。
+12. **运行期 decode guard 改写生成任务**：runner 会追加“忽略上文问题、改写 ≥250 词技术总结”指令（37 cl100k token，已在构造预算中预留，guard 不再把渲染 prompt 推出带外）；生成内容不是数据集任务，只用于测 decode 阶段吞吐（manifest `deviations.decode-guard-suffix`）。
 13. **actual token 与聚合带（不是跳过理由）**：目标模型 tokenizer 对同一 32K 内容可计出 12,810–54,964 token；运行时**不因 tokenizer/actual 偏差跳过**，所有能测样本都 measured，只把 actual 记录进 `records.jsonl` 并按 ±10% 带筛选聚合（出带保留、不进均值）。因此实际 measured 数一般仍为 240，只有窗口不足/请求失败才 skip；报告须同时给出 actual 分布、`n_isl_in_band`/`n_isl_out_of_band`、not-testable 数，不能把"入带样本数"当成"measured 数"。跨系统比较准入见 [13-testset-portability.md](13-testset-portability.md)。
 
 **备选切换条件**：若后续需要"长度可编程的纯净阶梯"，新增 RULER/NIAH 独立 testset（64K/128K）；若需要多轮 KV 增长，新增 τ²-bench 单场景 testset；两者都不混入本 240 行。
@@ -584,7 +593,7 @@ hi econometrics/Social Sciences、vi us_foreign_policy/Social Sciences。
 
 | 文件 | 作用 |
 |---|---|
-| `tool/dataset/performance/fetch.py` | 下载/校验 18 个文件 = 17 上游 + tokenizer（仅标准库） |
+| `tool/dataset/performance/fetch.py` | 下载/校验 19 个文件 = 17 上游 + 2 个 tokenizer 资产（仅标准库；派生文件由 generator 规则按需重建） |
 | `tool/dataset/performance/raw_spec.json` | 可提交上游规范（path/url/bytes/sha256） |
 | `tool/dataset/performance/build.py` | 8 场景构造 + manifest + yaml + 报告 |
 | `tool/dataset/performance/sampling.py` | 确定性抽样 + 分层配额 |

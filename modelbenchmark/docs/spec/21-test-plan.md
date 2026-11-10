@@ -39,8 +39,8 @@
 7. **不静默降级**：跳过（`run.json.outcome.skipped`）、警告（`outcome.warnings`）、
    测量有效性标记（`gen_tps_invalid` / `isl_tolerance` / `n_gen_tps_invalid` /
    `n_isl_in_band` / `n_isl_out_of_band`）必须落盘可见，不静默剔除、不静默改口径。
-   **actual ISL 不触发跳过**：所有能测样本都 measured，只按 ±10% 带筛选聚合
-   （入带进均值、出带保留不进均值；见 §3/§4）。
+   **actual ISL 不触发跳过**：所有能测样本都 measured，聚合双口径（T-067）：默认
+   全样本均值（含出带）+「（±10%过滤）」入带均值（跨 run 比较口径；见 §3/§4）。
 
 ## 2. 测试对象与模型加载
 
@@ -82,7 +82,7 @@
 | 逐场景样本数 | `perf.samples_by_scenario.<scenario>`（**API 参数 `scenario_samples`**；Web 界面已移除逐场景输入入口），优先于全局样本数 |
 | 手选样本 | `perf.sample_ids.<scenario>`（**API 参数 `sample_ids`**；Web 界面已移除手选入口），优先级最高；清空回退到样本数/全部 |
 | 上下文窗口筛选 | `perf.context_windows`（Web 多选 / CLI `--context-windows`，**legacy/诊断用途**）；空 = 全部档位；**1K 接受 0～1.5K**，其他 N 接受 **N±0.5K**。新数据集的档位请用场景选择或 `perf_jsonl params.buckets`（1k/8k/32k），两套阈值不要混用。预构造样本按**声明的参考 tokenizer tokens** 筛选，legacy 样本才按目标模型 tokenizer 计数；cell 仍按 `(scenario, dataset, context_length)` 聚合 |
-| 实际输入大小（actual ISL，记录/聚合带） | 每个 selected 样本在请求前用目标模型 `POST /v1/tokenize` 对**最终 messages + tools（含 chat template 与 decode guard）**计数，写入 `request.tokenized_prompt_tokens` 与 `request.context_meta.isl_tolerance = {target, low, high, actual, ok}`（以及 `context_meta.window_check_basis = tokenized|declared`）。**所有档位同一 ±10% 带**（区间权威表见 [20-methodology.md](20-methodology.md) §5；target=1,024/8,192/32,768）。该值**不用于跳过**：所有能测样本都 measured，只用于 (a) 记录 actual/`samples.csv.isl_band` 与 (b) 窗口判定。聚合只对入带 measured 样本求平均；出带样本保留在 `records.jsonl`/`samples.csv`（`isl_band=false`）但**不进均值**，计数 `n_isl_in_band`/`n_isl_out_of_band`；in-band 样本少于 **8**（默认每 cell 10 条，阈值 `domain.metrics.MIN_IN_BAND_SAMPLES`）时报告须标记 `insufficient_samples`。tokenize 失败时回退 `声明 tokens + max_tokens + context_safety_margin(128) + decode_guard_reserve(64，默认)=242` 做窗口判定（`window_check_basis=declared`）并记 warning |
+| 实际输入大小（actual ISL，记录/聚合带） | 每个 selected 样本在请求前用目标模型 `POST /v1/tokenize` 对**最终 messages + tools（含 chat template 与 decode guard）**计数，写入 `request.tokenized_prompt_tokens` 与 `request.context_meta.isl_tolerance = {target, low, high, actual, ok}`（以及 `context_meta.window_check_basis = tokenized|declared`）。**所有档位同一 ±10% 带**（区间权威表见 [20-methodology.md](20-methodology.md) §5；target=1,024/8,192/32,768）。该值**不用于跳过**：所有能测样本都 measured，只用于 (a) 记录 actual/`samples.csv.isl_band` 与 (b) 窗口判定。聚合双口径（T-067）：`perf_all`=该行全部 valid measured 样本求平均（默认展示口径，含出带）；`perf`=只对入带 measured 样本求平均（「（±10%过滤）」列，跨 run 比较口径）；出带样本保留在 `records.jsonl`/`samples.csv`（`isl_band=false`），计数 `n_isl_in_band`/`n_isl_out_of_band`；in-band 样本少于 **8**（默认每 cell 10 条，阈值 `domain.metrics.MIN_IN_BAND_SAMPLES`）时报告须标记 `insufficient_samples`（针对（±10%过滤）口径）。tokenize 失败时回退 `声明 tokens + max_tokens + context_safety_margin(128) + decode_guard_reserve(64，默认)=242` 做窗口判定（`window_check_basis=declared`）并记 warning |
 | 预热 | **模型级**默认 **1 次/模型**（`run.warmup_per_model=1`，加载后发一条短请求 `max_tokens=8`，仿 oMLX QUICK，丢弃且不记录/不聚合）；per-cell `run.warmup_requests` 默认 **0**，`--warmup N` 仅诊断用（每个 cell 预热 N 条，不计入 measured 预算） |
 | 抽样 | 未手选时：**预构造样本先按档位（1k/8k/32k）做最大余数分配，再在每个档位内按 lang 做最大余数分配**，组内按 `sample_id` 取前 k（确定性、跨 run 可复现；与 `perf_jsonl.plan` 同一实现，小 `--samples` 不再整段塌到 1K）；legacy 数据集仍按 `sample_id` 排序取前 N |
 | 上下文 | **不设目标长度、不填充、不截断**；预构造样本原样发送（仅追加固定 decode guard 指令）。**窗口判定用目标模型实测量**：`tokenized_prompt_tokens + max_tokens + context_safety_margin(128) > model_context_window` 时该样本**跳过并计入 `run.json.outcome.skipped`**（not-testable）。32K 桶内容 token 32,704–32,841（声明值），按声明+242 估算需窗口 32,946–33,083；对 32,768 窗口模型 32K 桶 **0/80** 可测。本机当前模型窗口 40,960–262,144 均可容纳 |
@@ -96,8 +96,8 @@
 > §4.5（单一事实源）。要点：固定样本可逐字节复现并跨设备/跨模型复用，但运行时输入由
 > **目标模型 tokenizer** 计数（chat template + decode guard 额外增加 token）。因此**不因为
 > actual 偏差跳过**（否则同一套
-> 样本在不同模型上就不可比）：记录 actual、只把入带（target ±10%，所有档位对称）样本纳入均值、
-> 出带样本保留但不参与平均，并报告 actual 分布与入带/出带计数。跨系统/跨设备比较准入见
+> 样本在不同模型上就不可比）：记录 actual、双口径聚合（默认全样本均值含出带 +
+> 「（±10%过滤）」入带均值），并报告 actual 分布与入带/出带计数。跨系统/跨设备比较准入见
 > [13-testset-portability.md](13-testset-portability.md)。
 
 示例：
@@ -160,9 +160,10 @@
 - **actual ISL 记录与聚合带（不跳过）**：每条 **measured** 记录带 `request.tokenized_prompt_tokens`
   与 `context_meta.isl_tolerance{target,low,high,actual,ok}`；`samples.csv` 在
   `actual_prompt_tokens` 之后新增 **`isl_band`** 列。**所有能测样本都 measured**，actual 不触发
-  跳过；聚合只使用 actual 在 **target ±10%**（所有档位对称，区间见 [20-methodology.md](20-methodology.md) §5）的入带样本，出带样本保留但不进平均值。计数：`run.json.outcome` 与
+  跳过；聚合双口径：默认全样本均值（`perf_all`，含出带）与「（±10%过滤）」入带均值
+  （`perf`，区间见 [20-methodology.md](20-methodology.md) §5）。计数：`run.json.outcome` 与
   `aggregates.overall/cells` 的 `n_isl_in_band`/`n_isl_out_of_band`；报告/Excel/Web 显示
-  "ISL入带/ISL出带"，出带注明"仍测量但不参与平均"。in-band 样本不足的 cell 必须标记
+  "ISL入带/ISL出带"，出带注明"仍测量但不进（±10%过滤）列"。in-band 样本不足的 cell 必须标记
   `insufficient_samples`。容差定义与理由见 §3。
 - **输出触顶不丢弃**：达到 `perf.max_tokens`（`finish_reason=length`）的样本照常参与
   TTFT/内存/TG TPS 聚合（TG TPS 用实际 `completion_tokens` 计算到停止前）；
@@ -225,13 +226,13 @@ run_id）内含 `run.json/records.jsonl/aggregates.json/samples.csv/report.md/MA
 | AC-2 | 有效测量比例 | `n_ok / n_measured ≥ 95%`（`n_measured`=全部 measured 记录含 error/timeout，`n_ok`=status=ok 的子集；error/timeout 失败尝试入账不静默消失）；`contaminated`/`error`/`timeout` 数在 outcome 与报告中可见，且不进聚合 |
 | AC-3 | 非法 TG TPS 为 0 | 聚合与导出中不出现 `gen_tps > 10,000` 或 `gen_tps < 0`；`./modelbench verify` 统计 `gen_tps_invalid`/`isl_out_of_tolerance`，旧 run 的非法值计入 `legacy_gen_tps_invalid`（不导致失败），新记录同时有 `gen_tps` 与 `gen_tps_invalid` 则报 issue |
 | AC-4 | 覆盖率显式展示 | 报告/Excel/Web 同时给出 `n_valid`、`gen_tps_n`、`n_length_capped`、`n_gen_tps_invalid`，不得只给均值 |
-| AC-5 | actual ISL 记录 + ±10% 入带聚合 | 每条 measured 记录有 `tokenized_prompt_tokens`、`isl_tolerance`；`samples.csv` 有 `isl_band`；`overall/cells` 只对入带样本求均值，出带样本保留但不进均值；`n_isl_in_band`/`n_isl_out_of_band` 与逐条复算一致；`run.json.outcome` 不再有 `n_isl_skipped`；tokenize 失败回退声明值做窗口判定并 warning |
+| AC-5 | actual ISL 记录 + 双口径聚合 | 每条 measured 记录有 `tokenized_prompt_tokens`、`isl_tolerance`；`samples.csv` 有 `isl_band`；`overall/cells` 的 `perf`（±10% 入带，跨 run 比较口径）与 `perf_all`（全样本，默认展示口径，含出带）并存且都与逐条复算一致；出带样本保留；`n_isl_in_band`/`n_isl_out_of_band` 与逐条复算一致；`run.json.outcome` 不再有 `n_isl_skipped`；tokenize 失败回退声明值做窗口判定并 warning |
 | AC-6 | 聚合可复算 | `aggregates.json` 的 `overall`/`cells` 可由 `records.jsonl` 逐 cell 复算（mean/median/std/min/max/p95/`ci95_low`/`ci95_high` 一致，浮点末位允许差）；1K/8K/32K 不跨档合并 |
 | AC-7 | 噪声与口径标注 | 报告标注 `repeats`、`max_tokens`、缓存模式、预热；输出 `stability_cv`/`unstable`（`CV>0.2`）与 run 内 `ci95_low/high`；默认 `repeats=1` 时明确"ci95 只是 run 内抽样不确定性、无 run-to-run 噪声基线、不作显著性断言" |
 | AC-8 | 环境可复现 | `run.json.env` 含硬件/OS、oMLX 版本与全局设置（脱敏）、服务端模型状态、被测模型生效设置、git commit/dirty；`MANIFEST.json` 覆盖全部产物且 `blob_refs.missing == 0` |
 | AC-9 | 32K 不特判、不可测显式化 | 32K target 固定 32,768、无专属构造/阈值；仅因模型窗口不足或请求失败的行计入 `skipped` 并在报告/Excel 显示 not-testable 数量，不得把未测行当 0 或静默截断 |
 | AC-10 | 同一样本集 | 所有设备/模型使用同一 testset（`testset.jsonl` SHA-256 与 manifest 一致）；不做 per-model 构造、不做运行时裁剪/补齐；比较结果必须引用同一 SHA |
-| AC-11 | 样本量充分性标记 | 每个 cell/overall 报告 `n_isl_in_band`（进入均值的样本数）；in-band 样本 <8（`MIN_IN_BAND_SAMPLES`）时显式标记 `insufficient_samples`（warning/报告），不得静默当作有效结论。注意：`--samples<8` 的冒烟 run 必然触发该标记，只表示样本不足，不是数据异常 |
+| AC-11 | 样本量充分性标记 | 每个 cell/overall 报告 `n_isl_in_band`（进入（±10%过滤）均值的样本数）；in-band 样本 <8（`MIN_IN_BAND_SAMPLES`）时显式标记 `insufficient_samples`（warning/报告，针对（±10%过滤）口径），不得静默当作有效结论。注意：`--samples<8` 的冒烟 run 必然触发该标记，只表示样本不足，不是数据异常 |
 
 ## 8. 风险与已知限制
 
@@ -264,8 +265,9 @@ run_id）内含 `run.json/records.jsonl/aggregates.json/samples.csv/report.md/MA
    `max_tokens`/缓存模式/预热/轮数。
 9. **测量有效性边界（残余风险）**：`gen_tps` 在短窗口/工具调用/异常值下置 null
    （原因见 §4），覆盖率以 `n_gen_tps_invalid` 展示而不是补值；actual ISL **不触发跳过**，
-   所有能测样本都 measured，只有窗口不足/请求失败才 skip；均值只使用 ±10% 入带样本，
-   出带样本保留但不进均值（计数 `n_isl_in_band`/`n_isl_out_of_band`，报告显示 actual 分布）。
+   所有能测样本都 measured，只有窗口不足/请求失败才 skip；均值双口径：默认全样本
+  （`perf_all`，含出带）+「（±10%过滤）」入带均值（`perf`；计数
+  `n_isl_in_band`/`n_isl_out_of_band`，报告显示 actual 分布）。
    入带样本过少的 cell 会标记 `insufficient_samples`，不得据此下强结论。
 10. **不确定性口径（残余风险）**：默认 `repeats=1`、每 cell 10 样本，系统输出
     mean/median/std/p95 与 `CV` 标记，并附加 **run 内** `ci95_low/high`（正态近似）。

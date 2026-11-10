@@ -25,8 +25,10 @@
 - **不含判分**：性能 testset 不携带 gold/score；精度集（隐藏离线资产）自带判题契约但**不接入
   性能 run**（见 [12-accuracy-testset.md](12-accuracy-testset.md)）。
 - **字段契约**（性能 testset 单行，详见 [11-performance-testset.md](11-performance-testset.md) §6.2）：
-  `id`、`scenario`、`bucket`（1k/8k/32k）、`target_id`、`dataset`、`tokens`（参考 tokenizer 的
-  **内容 token 声明值**）、`messages`、`tools`、`constructed`、`meta`（含 `lang` 等）。
+  `id`、`scenario`、`bucket`（1k/8k/32k）、`target_id`、`dataset`、`tokens`（**通用 cl100k
+  tokenizer 的内容 token 声明值**，按场景/语种校准预算定标，见
+  [11-performance-testset.md](11-performance-testset.md) §4.4）、`messages`、`tools`、
+  `constructed`、`meta`（含 `lang` 等）。
 - **manifest/SHA**：`dataset/test/<name>/manifest.json` 记录逐文件 SHA-256、抽样参数、token 统计与
   `tokens_semantics`；`testset.jsonl` 的 SHA-256 是"同一套样本"的唯一凭据。仓库提交 `testset.yaml`
   与 `manifest.json`，`testset.jsonl` 由 `tool/dataset/.../build.py` 确定性重建（seed 固定、无时间戳）。
@@ -53,8 +55,9 @@
 在引用/比较任何结果前，必须同时满足：
 
 1. **同一 testset**：`testset.jsonl` 的 SHA-256 与 manifest 一致（"同一套样本"的唯一凭据）；
-2. **同一 target 定义**：1K=1,024、8K=8,192、32K=32,768（内容 token，参考 tokenizer），不含
-   模型特定改造；
+2. **同一 target 定义**：1K=1,024、8K=8,192、32K=32,768（运行期实际 token 的 ISL target；
+   声明值为 cl100k 校准预算，见 [11-performance-testset.md](11-performance-testset.md) §4.4），
+   不含模型特定改造；
 3. **同一聚合带**：所有档位 target ±10%（区间见 [20-methodology.md](20-methodology.md) §5 权威表），
    只对入带样本求平均；入带/出带计数必须随结果报告；
 4. **同一协议参数**：`max_tokens`、`decode_guard`、缓存模式、warmup、repeats、采样/温度、流式口径；

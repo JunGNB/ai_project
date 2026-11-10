@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -72,7 +73,8 @@ def _doc_content(scenario: str, idx: int, bucket: str) -> str:
 
 
 def _row(scenario: str, bucket: str, idx: int) -> dict:
-    target = build.BUCKETS[bucket]
+    # cl100k era: the declared target is the calibrated budget for the bucket
+    # (build.calibrated_budget), not the raw bucket value.
     tools = None
     tools_tokens = 0
     meta = _meta(scenario, idx)
@@ -170,6 +172,12 @@ def _row(scenario: str, bucket: str, idx: int) -> dict:
     else:  # pragma: no cover - SCENARIOS is exhaustive
         raise AssertionError(scenario)
 
+    # Synthetic rows carry declared tools_tokens (135 search / 24 agent), so the
+    # calibrated budget is derived from the row fields without a tokenizer.
+    lang = str(meta.get("lang", "en"))
+    target = build.calibrated_budget(
+        scenario, lang, bucket, tools_tokens=tools_tokens
+    )[0]
     messages_tokens = target - tools_tokens
     row = {
         "id": f"perf-{scenario}-{bucket}-{idx:03d}",
@@ -253,6 +261,127 @@ def test_bucket_constants_match_spec():
     assert build.PER_SCENARIO == 30
     assert build.TOTAL_ROWS == 240
     assert len(build.SCENARIOS) == 8
+
+
+# --------------------------------------------------------------------------- #
+# cl100k budget model (calibrated targets)
+# --------------------------------------------------------------------------- #
+def test_reference_tokenizer_is_cl100k():
+    """The construction tokenizer is the generic cl100k, not a model tokenizer."""
+    assert build.TOKENIZER_NAME == "cl100k_base"
+    assert build.TOKENIZER_PATH.name == "tokenizer.json"
+    assert build.TOKENIZER_PATH.parent.name == "cl100k_base"
+def test_calibrated_budget_reduces_content_for_inflating_scenarios():
+    """long_context inflates ~1.24x on model tokenizers (measured median), so
+    its cl100k budget is ~(bucket - plain reserve)/INFL."""
+    budget, low, high = build.calibrated_budget("long_context", "en", "32k", tools_tokens=0)
+    assert budget == build.calibrated_budget_target(32768, build.INFL["long_context"], 0)
+    assert budget < 32768 * 0.95  # well below the raw bucket
+    # ±5% acceptance around the calibrated target (integer floors).
+    assert low == math.floor(0.95 * budget) and high == math.floor(1.05 * budget)
+    # Non-inflating English scenarios: bucket minus the plain fixed reserve,
+    # then divided by the scenario inflation (1.05 after real-run calibration).
+    ife = build.calibrated_budget("instruction_following", "en", "1k", tools_tokens=0)[0]
+    assert ife == int((1024 - build.PLAIN_RESERVE_CL) / build.INFL["instruction_following"])  # ~897
+
+
+def test_calibrated_budget_reserves_fixed_overhead_not_tools():
+    """Tool scenarios reserve one fixed wrap (tools inflate with content).
+
+    Real-run evidence (20261110T112641Z-8349): the model-side render is
+    ``actual ~= declared + 270`` for tool scenarios regardless of bucket --
+    a fixed template wrap, NOT a per-row tools deduction.  Deducting the
+    tools JSON before dividing by INFL double-subtracts and starves the 1K
+    bucket (actual 796 vs band floor 921), so the budget now reserves the
+    fixed ``TOOL_RESERVE_CL`` once and lets tools ride the INFL division.
+    """
+    infl = build.INFL["search_agent"]
+    tools_cl = 133
+    budget, _low, _high = build.calibrated_budget(
+        "search_agent", "en", "8k", tools_tokens=tools_cl
+    )
+    expected = build.calibrated_budget_target(8192, infl, tools_cl)
+    assert budget == expected
+    # A single fixed reserve is removed; the tools JSON itself is not.
+    assert budget == int((8192 - build.TOOL_RESERVE_CL) / infl)
+    # The 1K tool bucket keeps enough content to reach the ±10% band floor
+    # (the old double-deduction left it at ~525 declared / 796 actual < 921).
+    one_k, _low, _high = build.calibrated_budget(
+        "search_agent", "en", "1k", tools_tokens=tools_cl
+    )
+    assert one_k == int((1024 - build.TOOL_RESERVE_CL) / infl)
+    # Simulated actual = declared*infl + observed wrap must clear the band floor.
+    assert one_k * infl + build.TOOL_RESERVE_CL >= 921
+
+
+def test_calibrated_budget_multilingual_uses_language_inflation():
+    """Multilingual budgets use the per-language inflation, not the scenario's."""
+    arabic = build.calibrated_budget("multilingual", "ar", "8k", tools_tokens=0)[0]
+    french = build.calibrated_budget("multilingual", "fr", "8k", tools_tokens=0)[0]
+    assert arabic == build.calibrated_budget_target(8192, build.INFL["ar"], 0)
+    assert french == build.calibrated_budget_target(8192, build.INFL["fr"], 0)
+    assert arabic > french  # ar counts ~2x on cl100k, so more content fits
+
+
+def test_inflation_table_is_complete_and_generic():
+    """Every scenario and multilingual language has an inflation coefficient."""
+    for scenario in build.SCENARIOS:
+        if scenario == "multilingual":
+            continue
+        assert scenario in build.INFL, scenario
+        assert 0.8 <= build.INFL[scenario] <= 1.5
+    for language in build.MULTILINGUAL_LANGUAGES:
+        assert language in build.INFL, language
+        assert 0.4 <= build.INFL[language] <= 1.2
+
+
+def test_decode_guard_and_tool_wrap_constants():
+    """Fixed cl100k-token reserves documented in the deviations section.
+
+    Calibrated on real-run 20261110T112641Z-8349: the model-side render adds a
+    ~270-token fixed wrap when tools are present and ~90 for plain rows.
+    """
+    assert build.TOOL_RESERVE_CL == 270
+    assert build.PLAIN_RESERVE_CL == 90
+
+
+def test_synthetic_rows_target_calibrated_budgets():
+    rows = _fresh_rows()
+    for row in rows:
+        lang = str(row["meta"]["lang"])
+        budget = build.calibrated_budget(
+            row["scenario"], lang, row["bucket"], tools_tokens=row["tools_tokens"]
+        )[0]
+        assert row["tokens"] == budget, row["id"]
+
+
+def test_validation_rejects_below_calibrated_bounds():
+    """A row that stops at the raw-bucket floor can be out of band now:
+    e.g. a long_context 1K row with ~614 cl100k tokens renders ~1.2x above
+    the 1K measurement band, so it must be rejected at construction time."""
+    rows = _fresh_rows()
+    row = next(
+        item for item in rows
+        if item["scenario"] == "long_context" and item["bucket"] == "1k"
+    )
+    raw_floor = build.bucket_bounds(1024)[0]  # 972 -- inside the OLD bounds
+    row["tokens"] = raw_floor
+    row["messages_tokens"] = raw_floor - row["tools_tokens"]
+    row["meta"]["input_tokens"] = raw_floor
+    with pytest.raises(RuntimeError, match="outside"):
+        build.validate_rows(rows)
+
+
+def test_deviations_document_cl100k_calibration():
+    """The deviation list must document the generic-tokenizer switch and the
+    calibration model, and must no longer claim a BOS is included."""
+    ids = {item["id"] for item in build.DEVIATIONS}
+    assert "tokenizer-generic-cl100k" in ids
+    assert "tokenizer-bos-included" not in ids
+    cl100k = next(item for item in build.DEVIATIONS if item["id"] == "tokenizer-generic-cl100k")
+    assert "cl100k" in cl100k["note"]
+    guard = next(item for item in build.DEVIATIONS if item["id"] == "decode-guard-suffix")
+    assert "37" in guard["note"]
 
 
 # --------------------------------------------------------------------------- #
@@ -373,3 +502,52 @@ def test_built_manifest_matches_rows_and_file():
 )
 def test_check_entrypoint_passes_on_built_outputs():
     assert build.check_outputs() == 0
+
+
+def test_budget_reserves_match_real_run_calibration():
+    """Fixed reserves and INFL coefficients calibrated on run 20261110T112641Z-8349.
+
+    Observed model-side render: ``actual ~= declared*INFL + reserve`` with
+    reserve ~= 270 for tool scenarios (template wrap) and ~90 for plain text.
+    The old model (guard 37 + tools+wrap pre-subtraction) double-deducted the
+    tools JSON and starved the 1K tool bucket (0/10 in-band).
+    """
+    assert build.TOOL_RESERVE_CL == 270
+    assert build.PLAIN_RESERVE_CL == 90
+    # Recalibrated content coefficients (real-run medians; math/long_context/
+    # multilingual unchanged from the original generic table).
+    assert build.INFL["general_agent"] == 1.00
+    assert build.INFL["search_agent"] == 1.03
+    assert build.INFL["coding"] == 1.07
+    assert build.INFL["knowledge_qa"] == 1.05
+    assert build.INFL["instruction_following"] == 1.04
+    assert build.INFL["math_logic"] == 1.15
+    assert build.INFL["long_context"] == 1.24
+
+
+def test_budget_formula_centers_all_tool_cells_in_band():
+    """Simulated actual (declared*INFL + reserve) must sit inside the ±10% run
+    band [floor(0.9*B), ceil(1.1*B)] for every tool scenario x bucket."""
+    for scenario in ("general_agent", "search_agent"):
+        infl = build.INFL[scenario]
+        for bucket, ctx in build.BUCKETS.items():
+            declared = build.calibrated_budget_target(ctx, infl, tools_cl=150)
+            actual = declared * infl + build.TOOL_RESERVE_CL
+            low = int(ctx * 0.9)
+            high = int(ctx * 1.1)
+            assert low <= actual <= high, (scenario, bucket, actual, low, high)
+            # and centered-ish: distance to bucket center is small relative
+            # to the band half-width.
+            assert abs(actual - ctx) <= 0.08 * ctx, (scenario, bucket, actual)
+
+
+def test_budget_formula_centers_plain_cells_in_band():
+    for scenario in ("coding", "knowledge_qa", "instruction_following",
+                     "math_logic", "long_context"):
+        infl = build.INFL[scenario]
+        for bucket, ctx in build.BUCKETS.items():
+            declared = build.calibrated_budget_target(ctx, infl, tools_cl=0)
+            actual = declared * infl + build.PLAIN_RESERVE_CL
+            low = int(ctx * 0.9)
+            high = int(ctx * 1.1)
+            assert low <= actual <= high, (scenario, bucket, actual, low, high)

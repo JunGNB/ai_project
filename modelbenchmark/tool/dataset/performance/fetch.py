@@ -15,8 +15,10 @@ Behaviour:
 * reads the committed ``raw_spec.json`` (path/url/bytes/sha256 + extract rules);
 * streams into ``<dest>.part`` then verifies size + SHA-256 before atomically
   replacing the destination (a failed download never leaves a corrupt file);
-* applies the spec's ``extract`` / ``generated`` rules (empty for this test set,
-  kept so a future asset can be added without changing this module);
+* applies the spec's ``extract`` / ``generated`` rules: a ``generated`` entry
+  either carries literal ``content`` or a deterministic ``generator`` script
+  plus pinned ``bytes``/``sha256`` (the cl100k ``tokenizer.json`` is derived
+  from the tiktoken blob by ``derive_cl100k.py`` and re-created on demand);
 * ``--verify`` is read-only.
 
 Exit codes: 0 = all selected assets OK; 1 = missing/corrupt/download failure;
@@ -206,20 +208,51 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     for item in generated:
         dest = raw_dir / item["path"]
-        if dest.exists() and not args.force:
-            counts[SKIP] = counts.get(SKIP, 0) + 1
+        ok = dest.is_file()
+        if ok and "sha256" in item:
+            ok, detail = _check_file(dest, int(item.get("bytes", 0)), str(item["sha256"]))
+        if ok:
+            if not args.force:
+                counts[SKIP] = counts.get(SKIP, 0) + 1
+                continue
+        elif args.verify and "generator" not in item:
+            counts[FAIL] = counts.get(FAIL, 0) + 1
+            failed.append(f"{item['path']} (missing generated file)")
             continue
-        if args.verify:
-            if not dest.exists():
-                counts[FAIL] = counts.get(FAIL, 0) + 1
-                failed.append(f"{item['path']} (missing generated file)")
+        generator = str(item.get("generator") or "")
+        if not generator and not dest.exists():
+            counts[FAIL] = counts.get(FAIL, 0) + 1
+            failed.append(f"{item['path']} (missing generated file)")
             continue
         if args.dry_run:
-            print(f"  [plan]  write {item['path']}")
+            action = f"run {generator}" if generator else "write"
+            print(f"  [plan]  {action} {item['path']}")
             continue
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(item.get("content", ""), encoding="utf-8")
-        counts[EXTRACTED] = counts.get(EXTRACTED, 0) + 1
+        if generator:
+            script = ROOT / generator
+            if not script.is_file():
+                counts[FAIL] = counts.get(FAIL, 0) + 1
+                failed.append(f"{item['path']} (generator script missing: {generator})")
+                continue
+            import subprocess  # noqa: PLC0415 - stdlib, local script only
+
+            proc = subprocess.run(
+                [sys.executable, str(script)], capture_output=True, text=True
+            )
+            if proc.returncode != 0:
+                reason = (proc.stderr or proc.stdout or "").strip().splitlines()
+                counts[FAIL] = counts.get(FAIL, 0) + 1
+                failed.append(f"{item['path']} (generator failed: {reason[-1] if reason else '?'})")
+                continue
+        else:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(item.get("content", ""), encoding="utf-8")
+        ok, detail = _check_file(dest, int(item["bytes"]), str(item["sha256"]))
+        if ok:
+            counts[EXTRACTED] = counts.get(EXTRACTED, 0) + 1
+        else:
+            counts[FAIL] = counts.get(FAIL, 0) + 1
+            failed.append(f"{item['path']} ({detail})")
 
     print("summary:", ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
     if failed:

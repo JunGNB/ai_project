@@ -43,7 +43,14 @@ from tool.common.fs import (  # noqa: E402
     write_json,
     write_jsonl,
 )
-from tool.common.tokenizer import TOKENIZER_NAME, default_tokenizer  # noqa: E402
+# Both sides count tokens with the generic cl100k_base tokenizer (user
+# decision 2026-11-10: no model-bound tokenizer anywhere); the accuracy side
+# imports the shared asset via its own alias so the convention stays explicit.
+from tool.common.tokenizer import (  # noqa: E402
+    ACCURACY_TOKENIZER_NAME as TOKENIZER_NAME,
+    ACCURACY_TOKENIZER_PATH,
+    ReferenceTokenizer,
+)
 from tool.dataset.accuracy import prompts, sources  # noqa: E402
 from tool.dataset.accuracy.sampling import allocate, deterministic_pick  # noqa: E402
 
@@ -68,7 +75,7 @@ JUDGE_FAMILIES = {
 }
 TEST_DIR_ACC = TEST_DIR / "accuracy"
 OUT_REPORT = REPORTS_DIR / "accuracy" / "selection_report.md"
-TOKENIZER = default_tokenizer()
+TOKENIZER = ReferenceTokenizer(ACCURACY_TOKENIZER_PATH)
 
 #: Global-MMLU en/zh pairing.  Upstream zh/ko ``high_school_world_history`` rows
 #: are misordered relative to their ``sample_id`` (176/237 zh answer letters
@@ -972,7 +979,7 @@ def build_outputs() -> Dict[str, Any]:
             "sampling": stats[scenario],
         }
 
-    tokenizer_spec = next(f for f in sources.files_for("tokenizer") if f["path"].endswith("tokenizer.json"))
+    tokenizer_spec = sources.tokenizer_entry()
     manifest = {
         "schema_version": "accuracy/v1",
         "name": "accuracy",
@@ -1286,7 +1293,7 @@ def main(argv: List[str] | None = None) -> int:
     if args.check:
         return check_outputs()
     for path in (
-        RAW_DIR / "tokenizer" / TOKENIZER_NAME / "tokenizer.json",
+        ACCURACY_TOKENIZER_PATH,
         RAW_DIR / "global_mmlu/en/test.parquet",
         RAW_DIR / "longbench_v1/prompts/dataset2prompt.json",
     ):

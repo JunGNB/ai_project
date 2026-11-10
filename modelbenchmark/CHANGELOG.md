@@ -5,6 +5,30 @@
 口径：仅记"变了什么、为什么"；详细证据在 `docs/records/`，规范以 `docs/` 为准。
 历史（0.3.0 之前）的任务级明细见 `harness/tasks/` 任务板与 `docs/archive/`。
 
+## 2026-11-10（双口径聚合 + exports 自动生成，T-067/T-068）
+
+### 平均值双口径（T-067）
+
+- 所有平均值输出（`aggregates.json`/`report.md`/Excel/`Web`）同时给出两个口径：
+  **默认列 = 全样本口径**（该行全部 valid measured 样本，含 ISL 出带；新增
+  `overall/cells` 的 `perf_all` 字段）；**「（±10%过滤）」列 = 入带口径**（原
+  `perf`，只统计 actual 在 target ±10% 带内的样本；跨 run/跨系统比较用这个，
+  `insufficient_samples` 标记仍针对该口径）。两口径除 ISL 带过滤外规则一致
+  （warmup/污染/错误剔除、TG TPS 可信窗口判定）。
+- Excel 平均页签改为**默认列读 `perf_all`**（单一事实源；旧 run 无该字段时从
+  records 现算兜底），入带列加「（±10%过滤）」后缀；T-064 时代的
+  「全样本」后缀列移除（默认列即全样本）。
+- `verify` 的聚合复算对账扩展到 `perf_all`（双口径都可由 `records.jsonl` 复算）。
+- Web 整体/数据集表新增两列（默认 + （±10%过滤）），表头口径注释同步。
+
+### exports 自动生成（T-068）
+
+- `output/exports/<batch_id>.xlsx` 在**每个 batch 结束时自动生成**（无需再手动
+  `export-analysis`）；`export-analysis` 保留为重建/补出命令。
+- 生成尽力而为：失败只向 `batch.json.warnings` 与 stderr 告警（AGENTS #9），run
+  本身不失败；`batch.json` 新增 `exports` 字段（相对路径），返回值带 `export_file`
+  绝对路径（不落盘）。
+
 ## 2026-11-10（端到端评审后优化轮，T-053…T-060）
 
 ### 验证与档案

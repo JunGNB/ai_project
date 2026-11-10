@@ -47,7 +47,8 @@ from modelbench.domain.models import (
     SampleResult,
 )
 
-#: Metrics rendered in the human-readable overall/markdown tables.
+#: Metrics rendered in the human-readable overall/markdown tables (all-sample
+#: calibre by default; the （±10%过滤） block repeats the comparison calibre).
 _REPORT_METRICS = (
     ("ttft_ms", "TTFT(ms)"),
     ("gen_tps", "TG TPS"),
@@ -56,6 +57,11 @@ _REPORT_METRICS = (
     ("peak_memory_gb", "峰值内存(GB)"),
     ("input_context_tokens", "输入token"),
 )
+
+#: Core metrics additionally rendered in the ±10% in-band (comparison) calibre,
+#: labeled 「（±10%过滤）」 so the two calibres cannot be confused.
+_REPORT_METRICS_FILTERED = ("ttft_ms", "gen_tps", "e2e_ms")
+_FILTERED_LABEL = "（±10%过滤）"
 
 #: Field order of ``samples.csv`` — frozen (see the implementation contract).
 SAMPLES_CSV_FIELDS = (
@@ -643,7 +649,8 @@ class RunWriter:
             lines.append(
                 f"- **ISL 带宽**：入带 {summary.get('n_isl_in_band', 0)} 个、"
                 f"出带 {summary.get('n_isl_out_of_band', 0)} 个"
-                "（出带样本仍保留在 records/samples.csv，但不参与平均值）"
+                "（出带样本仍保留在 records/samples.csv，不进「（±10%过滤）」列，"
+                "但计入默认全样本列）"
             )
         lines.append("")
 
@@ -687,7 +694,9 @@ class RunWriter:
         lines.append(
             "> 1K/8K/32K 的 TTFT/预填充相差一个数量级，因此**不跨档位合并**；"
             "每行是一个模型的一个档位。TG TPS 后括号为参与统计的样本数/有效样本数"
-            "（`completion_tokens < 16` 的样本不参与）。\n"
+            "（`completion_tokens < 16` 的样本不参与）。默认列为**全样本口径**"
+            "（含 ISL 出带样本）；带「（±10%过滤）」的列只统计 actual 在 target "
+            "±10% 带内的样本（跨 run 比较口径）。\n"
         )
         header = [
             "模型",
@@ -702,6 +711,11 @@ class RunWriter:
             "ISL出带",
         ]
         header += [label for _, label in _REPORT_METRICS]
+        header += [
+            label + _FILTERED_LABEL
+            for metric, label in _REPORT_METRICS
+            if metric in _REPORT_METRICS_FILTERED
+        ]
         header += ["峰值内存全局最大(GB)", "状态"]
         lines.append("| " + " | ".join(header) + " |")
         lines.append("|" + "---|" * len(header))
@@ -719,6 +733,16 @@ class RunWriter:
                 str(entry.n_isl_out_of_band),
             ]
             for metric, _ in _REPORT_METRICS:
+                dist = entry.perf_all.get(metric)
+                value = _num(dist.mean if dist else None)
+                if (
+                    metric == "gen_tps"
+                    and dist is not None
+                    and dist.n < entry.n_valid
+                ):
+                    value = f"{value} ({dist.n}/{entry.n_valid})"
+                row.append(value)
+            for metric in _REPORT_METRICS_FILTERED:
                 dist = entry.perf.get(metric)
                 value = _num(dist.mean if dist else None)
                 if (
@@ -749,6 +773,8 @@ class RunWriter:
             "ISL出带",
             "TTFT(ms)",
             "TG TPS",
+            "TTFT(ms)（±10%过滤）",
+            "TG TPS（±10%过滤）",
             "峰值内存(GB)",
             "输入token",
             "状态",
@@ -756,12 +782,21 @@ class RunWriter:
         lines.append("| " + " | ".join(header) + " |")
         lines.append("|" + "---|" * len(header))
         for cell in cells:
-            ttft = cell.perf.get("ttft_ms")
-            tps = cell.perf.get("gen_tps")
-            rss = cell.perf.get("peak_memory_gb")
-            ctx = cell.perf.get("input_context_tokens")
+            ttft = cell.perf_all.get("ttft_ms")
+            tps = cell.perf_all.get("gen_tps")
+            f_ttft = cell.perf.get("ttft_ms")
+            f_tps = cell.perf.get("gen_tps")
+            rss = cell.perf_all.get("peak_memory_gb")
+            ctx = cell.perf_all.get("input_context_tokens")
+
+            def _tps_value(dist, denominator: int) -> str:
+                value = _num(dist.mean if dist else None)
+                if dist is not None and dist.n < denominator:
+                    return f"{value} ({dist.n}/{denominator})"
+                return value
+
             lines.append(
-                "| {model} | {scenario} | {dataset} | {bucket} | {valid}/{total} | {capped} | {tginvalid} | {isl_in} | {isl_out} | {ttft} | {tps} | {rss} | {ctx} | {status} |".format(
+                "| {model} | {scenario} | {dataset} | {bucket} | {valid}/{total} | {capped} | {tginvalid} | {isl_in} | {isl_out} | {ttft} | {tps} | {f_ttft} | {f_tps} | {rss} | {ctx} | {status} |".format(
                     model=cell.model,
                     scenario=cell.scenario,
                     dataset=cell.dataset,
@@ -773,14 +808,9 @@ class RunWriter:
                     isl_in=cell.n_isl_in_band,
                     isl_out=cell.n_isl_out_of_band,
                     ttft=_num(ttft.mean if ttft else None),
-                    tps=(
-                        f"{_num(tps.mean if tps else None)}"
-                        + (
-                            f" ({tps.n}/{cell.n_isl_in_band})"
-                            if tps is not None and tps.n < cell.n_isl_in_band
-                            else ""
-                        )
-                    ),
+                    tps=_tps_value(tps, cell.n_valid),
+                    f_ttft=_num(f_ttft.mean if f_ttft else None),
+                    f_tps=_tps_value(f_tps, cell.n_isl_in_band),
                     rss=_num(rss.max if rss else None),
                     ctx=_num(ctx.mean if ctx else None),
                     status=(
@@ -792,6 +822,12 @@ class RunWriter:
             )
         lines.append("")
 
+        lines.append(
+            "> 双口径：默认列（TTFT/TG TPS/TPOT/E2E/内存/输入token）为**全样本口径**"
+            "（所有 measured+ok 样本，含 ISL 出带）；带「（±10%过滤）」的列只统计 "
+            "actual 在 target ±10% 带内的入带样本，是跨 run/跨系统比较口径"
+            "（`insufficient_samples` 标记也针对该口径）。\n"
+        )
         if any(getattr(cell, "insufficient_samples", False) for cell in cells):
             lines.append(
                 "> `insufficient_samples`：入带样本 <8（默认每 cell 10 条）。"

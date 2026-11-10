@@ -29,7 +29,7 @@ output/
 │       └── logs/run.log                    # O  运行日志
 ├── batches/                                # M  批次元数据（一次测试动作 = 一个文件）
 │   └── <batch_id>.json                     # M  权威批次元数据（相对路径、无绝对路径）
-├── exports/                                # D  人类交付物（按需生成，可整目录删除）
+├── exports/                                # D  人类交付物（batch 结束自动生成，可整目录删除）
 │   └── <batch_id>.xlsx
 ├── archive/                                # A  退役 run/旧格式 bundle（仍是证据，GC 引用根）
 └── .state/                                 # J  运行时状态（非证据，可清空）
@@ -192,9 +192,9 @@ output/
 ### 3.3 `output/exports/`（派生）
 
 人类交付物：每个批次一个 `exports/<batch_id>.xlsx`（三个页签：硬件配置 / 模型性能平均 /
-详细数据）。**按需生成**（`./modelbench export-analysis`），不是 run 的副作用；整目录可任意
-删除，重新导出即可恢复。Excel「API 输入内容」列由 blob 池解析填入真实 prompt，并保留
-单元格截断（约 3 万字符，超出保留头尾并标注原长度）。
+详细数据）。**batch 结束时自动生成**（T-068；失败只告警不失败 run，见 §8），`./modelbench
+export-analysis` 可随时重建；整目录可任意删除，重新导出即可恢复。Excel「API 输入内容」列由
+blob 池解析填入真实 prompt，并保留单元格截断（约 3 万字符，超出保留头尾并标注原长度）。
 
 ### 3.4 `output/archive/`（归档证据，GC 引用根）
 
@@ -459,16 +459,18 @@ prompt_sha256,truncated,error,timestamp
     "n_contaminated": 0, "n_error": 0, "n_length_capped": 12,
     "n_gen_tps_invalid": 2, "n_isl_in_band": 78, "n_isl_out_of_band": 2,
     "stability_cv": 0.03, "unstable": false,
-    "perf": {"ttft_ms": {"n": 80, "mean": 1258.8, "median": 1200.1,
+    "perf": {"ttft_ms": {"n": 78, "mean": 1258.8, "median": 1200.1,
                           "std": 80.2, "min": 900.0, "max": 2100.0, "p95": 1800.0,
                           "ci95_low": 1241.2, "ci95_high": 1276.4}},
+    "perf_all": {"ttft_ms": {"n": 80, "mean": 1261.0, "…": "同 Distribution"}},
     "peak_rss_mb_max": 6376.7, "peak_memory_gb_max": 6.7
   }],
   "cells": [{
     "model": "…", "scenario": "…", "dataset": "…", "context_length": 1024,
     "n_samples": 10, "n_repeats": 1, "n_valid": 10, "n_length_capped": 2,
     "n_gen_tps_invalid": 0, "n_isl_in_band": 10, "n_isl_out_of_band": 0,
-    "stability_cv": 0.02, "unstable": false, "perf": {"…": "同 Distribution"}
+    "stability_cv": 0.02, "unstable": false,
+    "perf": {"…": "同 Distribution"}, "perf_all": {"…": "同 Distribution"}
   }]
 }
 ```
@@ -476,18 +478,24 @@ prompt_sha256,truncated,error,timestamp
 - `overall`：每 `(model, context_length)` 一行——1K/8K/32K 的 TTFT/预填充相差一个数量级，
   **绝不跨档位合并**；`peak_memory_gb_max` 是该档位全局最大值。
 - `cells`：每 `(model, scenario, dataset, context_length)` 一行。
-- `perf` 是「指标名 → `Distribution`」映射，`Distribution` 含
+- `perf` / `perf_all` 是「指标名 → `Distribution`」映射，`Distribution` 含
   `n/mean/median/std/min/max/p95/ci95_low/ci95_high`；
   `n` 是该指标真实参与统计的样本数（`gen_tps` 只统计可信解码窗口的样本，见 §4.1）。
+- **双口径（T-067）**：`perf` 只统计 actual 在 target ±10% 入带的样本（跨 run/跨系统
+  比较口径，列名带「（±10%过滤）」）；`perf_all` 统计该行全部 valid measured 样本
+  （默认展示口径，含出带）。两者除 ISL 带过滤外完全同规则（warmup/污染/错误、
+  `gen_tps`/`tpot` 可信窗口判定一致）；schema 3.0 增量字段，旧 run 无 `perf_all`
+  时消费端从 `records.jsonl` 现算兜底。
 - **`ci95_low` / `ci95_high`**：**run 内** mean 的正态近似 95% 置信区间
   `mean ± 1.96·std/√n`（`n<2` 时为 null）。它只描述"本次 run 内样本均值的不确定性"，
   **不是 run-to-run 噪声/重复性区间**；跨 run 波动要用 `repeats≥2` 的重复测量或配对比较，
   不能把 ci95 当成可复现性证据。
 - `n_gen_tps_invalid` / `n_isl_in_band` / `n_isl_out_of_band`：本行（`overall` 行或 `cells` 行）
-  内被抑制 TG TPS 的样本数、actual 入带（进入均值）与出带（保留但不进均值）的样本数；
-  与 `run.json.outcome` 的全局计数同源、可复算。`perf` 各 Distribution 的 `n` 等于本行
-  入带样本中该指标有效的数量（如 `gen_tps_n ≤ n_isl_in_band`）。in-band 样本不足以
-  支撑均值（默认阈值 8 条入带样本）时，`report.md`/Excel/Web 标记 `insufficient_samples`。
+  内被抑制 TG TPS 的样本数、actual 入带（进入 `perf`/（±10%过滤）列）与出带（保留但不进入
+  `perf`）的样本数；与 `run.json.outcome` 的全局计数同源、可复算。`perf` 各 Distribution 的
+  `n` 等于本行入带样本中该指标有效的数量（如 `gen_tps_n ≤ n_isl_in_band`；
+  `perf_all` 的 `n ≤ n_valid`）。in-band 样本不足以支撑均值（默认阈值 8 条入带样本）时，
+  `report.md`/Excel/Web 标记 `insufficient_samples`（该标记针对（±10%过滤）口径）。
 - 这是唯一的机器可读聚合形态；需要 CSV 时用 pandas 从 `samples.csv`/本文件导出，
   不再常驻 CSV 汇总。
 
@@ -495,7 +503,9 @@ prompt_sha256,truncated,error,timestamp
 
 - `report.md`：人读摘要（运行配置、环境、整体结果、数据集结果、逐样本表 + 口径注脚），
   Web 报告页直接渲染；内容由 `records.jsonl` 复算，`rebuild` 可重生成。报告显示
-  **ISL入带/ISL出带** 计数，并把 `n_isl_out_of_band` 注明"仍测量但不参与平均"；
+  **ISL入带/ISL出带** 计数，并把 `n_isl_out_of_band` 注明"仍测量但不进（±10%过滤）列，
+  但计入默认全样本列"；整体/数据集表均为双口径：默认列（TTFT/TG TPS/TPOT/E2E 等）
+  为全样本口径（`perf_all`），带「（±10%过滤）」的列为入带口径（`perf`）；
   in-band 样本不足时标记 `insufficient_samples`。
 - `logs/run.log`：运行日志，运行中由 Web 任务面板增量读取，结束后仅排障用；随归档清理。
 
@@ -683,7 +693,9 @@ assert manifest["blob_refs"]["missing"] == 0
 3. 每个 run：所有 `request.prompt_sha256` 都能在 `blobs/prompts` 解析（`missing == 0`），
    且 `MANIFEST.json` 中每个文件的大小/sha256 与实际一致；
 4. **聚合可复算**：`aggregates.json` 的 `overall[]`/`cells[]` 必须能由 `records.jsonl`
-   重算（计数、各指标 Distribution 的 n/mean/median/std/min/max/p95/ci95）；
+   重算——**双口径都查**：`perf`（±10% 入带）与 `perf_all`（全样本）的计数、各指标
+   Distribution 的 n/mean/median/std/min/max/p95/ci95；旧 run 缺 `perf_all` 时按
+   复算结果同样缺失（该桶无 valid 记录）才通过，否则报 issue；
    派生文件过期或被手改时 `verify` 会报 issue，用 `./modelbench rebuild` 恢复；
 5. **测量有效性/ISL 带**：统计 `gen_tps_invalid`（有 `metrics.gen_tps_invalid` 的记录数）、
    `isl_in_band`/`isl_out_of_tolerance`（按 actual 与 bucket target ±10% 复算的入带/出带
@@ -762,7 +774,9 @@ blobs/prompts/<sha[:2]>/<sha>.json
 
 ## 8. Excel 交付物（`export-analysis`）
 
-Excel 不再随批次自动生成，改为按需导出到 `output/exports/<batch_id>.xlsx`：
+Excel 在**每个 batch 结束时自动生成**到 `output/exports/<batch_id>.xlsx`（T-068：无需再手动执行；
+生成是尽力而为——失败只向 `batch.json.warnings` 和 stderr 告警，绝不让基准 run 本身失败，
+`exports` 字段记为 `null`，之后可用下面的命令补出）。手动命令用于重建/补出历史批次：
 
 ```bash
 ./modelbench export-analysis <batch_id>       # 生成一个批次
@@ -776,12 +790,15 @@ Excel 不再随批次自动生成，改为按需导出到 `output/exports/<batch
 | 页签 | 内容 |
 |---|---|
 | `硬件配置` | 批次/测试配置、芯片/内存/GPU/OS/oMLX 版本、oMLX 全局设置、每个模型的生效配置（量化/上下文/MoE/feature flags） |
-| `模型性能平均` | 每个模型 × 上下文档位一行：样本/有效/错误/触顶数、TTFT 均值/中位数/P95、TG TPS、TPOT、E2E、Prefill、峰值内存均值/最大、峰值 CPU、输入/输出 token 均值、耗时、跳过/内存错误数，以及 **`TG无效数`**、**`ISL入带数`**（进入均值的样本数）、**`ISL出带数`**（仍测量但不参与平均的样本数） |
-| `详细数据` | 每个 measured 样本一行：模型/数据集/场景/样本/重复、**API 输入内容**（从 blob 解析）、输入 token/字符数、**输出结果**、输出 token/字符数、峰值内存，以及 TTFT/TG TPS/TPOT/E2E/Prefill/Total TPS/CPU/cached/状态/截断/错误/时间戳 |
+| `模型性能平均` | 每个模型 × 上下文档位一行：样本/有效/错误/触顶数、TTFT 均值/中位数/P95、TG TPS（均值与有效数）、TPOT、E2E、Prefill、峰值内存均值/最大、峰值 CPU、输入/输出 token 均值、耗时、跳过/内存错误数，以及 **`TG无效数`**、**`ISL入带数`**（进入（±10%过滤）列的样本数）、**`ISL出带数`**（仍测量但不进入（±10%过滤）列的样本数）。**默认列为全样本口径**（该桶全部 measured+ok 记录，含出带；读 `aggregates.json` 的 `perf_all`，旧 run 无该字段时从 records 现算）；随后是**（±10%过滤）列**：**`TTFT均值(ms)（±10%过滤）`**、**`TG TPS均值（±10%过滤）`**、**`TG TPS有效数（±10%过滤）`**、**`E2E均值(ms)（±10%过滤）`**（只统计入带样本，跨 run 比较口径，读 `perf`）与 **`出带TTFT波动范围`**（全样本 vs 入带 TTFT 均值的相对差，如 `+100.0%`；任一均值缺失时留空）。口径由列名携带，仅一行表尾短注释说明，不设说明页签 |
+| `详细数据` | 每个 measured 样本一行：模型/数据集/场景/样本/重复、**API 输入内容**（从 blob 解析）、输入 token/字符数、**输出结果**、输出 token/字符数、峰值内存，以及 TTFT/TG TPS/TPOT/E2E/Prefill/Total TPS/CPU/cached/状态/截断/错误/时间戳，末尾 **`ISL入带`**（`context_meta.isl_tolerance.ok`，缺失时按 actual vs target ±10% 判定，无依据按入带保留）与 **`ISL偏差%`**（`(actual-target)/target*100`，1 位小数；无 actual/target 时空） |
 
-- 生成失败不影响任何证据：`export-analysis` 报错退出，批次 bundle 不变；修复后重跑即可。
+- 生成失败不影响任何证据：批次 bundle 不变；修复后重跑 `export-analysis` 即可。
 - 超长文本超过 Excel 单元格上限（32,767 字符）时保留头尾并标注原长度（不改 blob 全文）。
 - 写入前清洗 XML 非法控制字符并对 `= + - @` 前缀加 `'`，避免 openpyxl 报错与公式注入。
+- 双口径来自同一 `aggregates.json`（`perf_all` = 全样本、`perf` = ±10% 入带，两者都由
+  `records.jsonl` 复算；`export-analysis` 是派生层可随时重建）。旧 run（无 `perf_all`）的
+  全样本列由 records 现算兜底。
 
 ---
 
@@ -791,8 +808,10 @@ Excel 不再随批次自动生成，改为按需导出到 `output/exports/<batch
   行内显示模型/样本数/耗时/体积/已测已选/跳过数。
 - **详情页**：整体（按档位）、数据集（cells）、逐样本、环境、报告五个页签。
   - 顶部汇总行显示 **`ISL入带 N`**（`outcome.n_isl_in_band`）、**`ISL出带 N`**
-    （`n_isl_out_of_band`）与 **`TG无效 N`**（`n_gen_tps_invalid`）；整体/数据集表同时展示
-    `n_isl_in_band`/`n_isl_out_of_band`，出带注明"仍测量但不参与平均"。
+    （`n_isl_out_of_band`）与 **`TG无效 N`**（`n_gen_tps_invalid`）；整体/数据集表为
+    双口径：默认列（TTFT/TG TPS 等）为全样本口径（`perf_all`），随后是带
+    「（±10%过滤）」的入带口径列（`perf`）；`n_isl_in_band`/`n_isl_out_of_band`
+    同表展示，出带注明"仍测量但不进（±10%过滤）列"。
   - 逐样本页**分页**读取 `samples.csv`：`GET /api/runs/<run_id>/samples?offset=&limit=`
     （`limit` 默认 200、上限 1000；可选过滤 `scenario=`、`dataset=`、`status=`、`model=`、
     `context_length=`、`q=`），返回 `{"total":N,"offset":…,"limit":…,"rows":[…]}`；

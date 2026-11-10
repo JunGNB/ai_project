@@ -1,7 +1,8 @@
 """Bucket / actual-input-size tolerance policy (performance benchmark).
 
-The performance test set is constructed against a **reference tokenizer**
-(MiniCPM5-1B) so the 1K/8K/32K buckets are comparable in the dataset.  At run
+The performance test set declares cl100k-calibrated budgets against a generic
+**reference tokenizer** (cl100k_base) so the 1K/8K/32K buckets are comparable
+in the dataset while the declared counts stay model-agnostic.  At run
 time the target model's own tokenizer can count the same content differently,
 and the chat template + decode guard add protocol tokens.  The product decision
 (2026-11-10) is:

@@ -82,7 +82,7 @@ output/           # 运行结果与证据（布局见 31-output-contract.md）�
   runs/<run_id>/    # 每模型一个 run bundle（一层平铺，目录名 == run_id）
   batches/<batch_id>.json  # 批次元数据（一次测试动作一个文件）
   blobs/prompts/    # 实际发送的 prompt（内容寻址，全库一份）
-  exports/          # 按需生成的 Excel 交付物
+  exports/          # Excel 交付物（batch 结束自动生成，可整目录删除后重建）
   archive/          # 退役 run（仍是证据，GC 引用根）
   .state/           # 运行时锁/临时物
   index.json        # run 目录索引（派生，可重建）
@@ -217,8 +217,10 @@ docs/             # 方案/使用/架构
 ./modelbench runs --rebuild         # 列出前先重建 output/index.json 索引
 ./modelbench runs --json            # 输出 index.json 全文（脚本消费）
 ./modelbench index                  # 重建 output/index.json（索引 schema 2.0）
-./modelbench export-analysis <batch_id>   # 按需生成 output/exports/<batch_id>.xlsx
+./modelbench export-analysis <batch_id>   # 补出/重建 output/exports/<batch_id>.xlsx
 ./modelbench export-analysis --all        # 为所有批次重建 Excel
+# 说明：每个 batch 结束时会自动生成 exports/<batch_id>.xlsx；上面的命令
+# 只用于重建（删除 exports/ 后恢复）或补出历史批次。
 ./modelbench analyze <run_id_a> <run_id_b> \
   --metrics ttft_ms gen_tps peak_memory_gb input_context_tokens   # 读 aggregates.json 对比
 ./modelbench analyze <run_id_a> <run_id_b> --paired   # 同一 (scenario,dataset,bucket,sample_id,repeat) 配对，Δ(B-A) + 95% bootstrap CI
@@ -332,11 +334,14 @@ JSONL 字段：`question`、`answer`、`answer_type`（`numeric|mc|exact|...`）
 - **实际输入大小与聚合带（不跳过）**：`samples.csv` 的 `actual_prompt_tokens` 是数据集声明值；
   目标模型实际值见 `records.jsonl` 的 `request.tokenized_prompt_tokens` 与
   `context_meta.isl_tolerance`，`samples.csv` 另有 `isl_band` 列。**actual 不触发跳过**：
-  所有能测样本都测量，只有模型窗口不足/请求失败才 skip。平均值只使用 actual 在
-  target ±10%（所有档位对称，区间见 [20-methodology.md](../spec/20-methodology.md) §5）的**入带**样本；
-  出带样本保留在 records/samples.csv 但不进平均。报告/Excel/Web 显示 **ISL入带/ISL出带**
-  （`n_isl_in_band`/`n_isl_out_of_band`），出带注明"仍测量但不参与平均"；in-band 样本过少时
-  标记 `insufficient_samples`。跨系统比较准入见 [../spec/13-testset-portability.md](../spec/13-testset-portability.md)。
+  所有能测样本都测量，只有模型窗口不足/请求失败才 skip。平均值输出**两个口径**（T-067）：
+  **默认列 = 全样本口径**（该桶全部有效样本，含出带，`aggregates.json` 的 `perf_all`）；
+  **「（±10%过滤）」列 = 入带口径**（只统计 actual 在 target ±10% 的入带样本，
+  区间见 [20-methodology.md](../spec/20-methodology.md) §5，`perf`，跨 run/跨系统比较用这个）。
+  出带样本保留在 records/samples.csv，不进「（±10%过滤）」列但计入默认列。
+  报告/Excel/Web 显示 **ISL入带/ISL出带**（`n_isl_in_band`/`n_isl_out_of_band`）；
+  in-band 样本过少时标记 `insufficient_samples`（针对（±10%过滤）口径）。
+  跨系统比较准入见 [../spec/13-testset-portability.md](../spec/13-testset-portability.md)。
 - `records.jsonl`：逐请求**权威证据**（身份、输入指纹、响应、指标、缓存状态、模型快照引用）；
   prompt 正文不在记录里，按 `request.prompt_sha256` 到 `output/blobs/prompts/` 解析
   （见 [31-output-contract.md](../design/31-output-contract.md) §6.3）。
@@ -344,7 +349,8 @@ JSONL 字段：`question`、`answer`、`answer_type`（`numeric|mc|exact|...`）
   + 配置 + `outcome`；
   `MANIFEST.json`：文件清单（大小/sha256）+ blob 引用统计；`report.md`：人读摘要。
 - `output/index.json` 是全部 run 的目录索引（索引 schema 2.0，只存相对路径）；
-  `output/exports/<batch_id>.xlsx` 是按需生成的 Excel 交付物。
+  `output/exports/<batch_id>.xlsx` 是 Excel 交付物（每个 batch 结束时自动生成；生成失败只
+  告警不影响 run，可用 `export-analysis` 补出；详见 31-output-contract.md §8）。
   完整目录规范、二次分析（pandas 读 `samples.csv`、回查 prompt blob）与 GC/重建/打包见
   [31-output-contract.md](../design/31-output-contract.md)。
 - 峰值内存是 oMLX 服务进程树 `phys_footprint` 峰值（GB/GiB，含 Metal 分配），不是系统总内存；
@@ -433,8 +439,8 @@ CLI `run` 启动前会对照 `/v1/models`：若所选模型不在服务端，会
 | `contaminated` | 冷模式仍命中缓存；系统重试后剔除，不应出现在聚合 |
 | 启动第二个 run 报 “another benchmark run is active” | 双锁保护：同一 oMLX 实例（同 `base_url`，即使 output 根不同）已有 run。按提示的锁路径/持有者 PID 等待或停止前一个；不同 `base_url` 可并发（见 §7.2 第 5 条） |
 | `gen_tps` 为空/`n_gen_tps_invalid` 非 0 | 正常口径：`completion_tokens<16`、解码窗口 <50ms、`finish_reason=tool_calls` 或值 >10,000 时 TG TPS 置 null 并记原因；看 `records.jsonl` 的 `metrics.gen_tps_invalid`，不要手算补值 |
-| `n_isl_out_of_band` 非 0 / 报告“ISL出带” | 目标模型 tokenizer 的 actual 超出 bucket target ±10%（所有档位对称，区间见 [20-methodology.md](../spec/20-methodology.md) §5）。这些样本**仍被测量**，只是不参与平均值；原因/actual 见 `records.jsonl` 的 `request.tokenized_prompt_tokens`。跨模型比较时须同时报告入带/出带计数与 actual 分布 |
-| `n_isl_in_band` 偏少 / `insufficient_samples` | 该 cell 进入平均的样本过少（出带/窗口跳过/失败多），报告会标记 `insufficient_samples`；此时不要据此下强结论，可减少 `--samples` 外的影响/换更匹配窗口的模型，或按 actual 对齐后比较 |
+| `n_isl_out_of_band` 非 0 / 报告“ISL出带” | 目标模型 tokenizer 的 actual 超出 bucket target ±10%（所有档位对称，区间见 [20-methodology.md](../spec/20-methodology.md) §5）。这些样本**仍被测量**，计入默认全样本列，只是不进「（±10%过滤）」列；原因/actual 见 `records.jsonl` 的 `request.tokenized_prompt_tokens`。跨模型比较时须同时报告入带/出带计数与 actual 分布 |
+| `n_isl_in_band` 偏少 / `insufficient_samples` | 该 cell 进入「（±10%过滤）」均值的样本过少（出带/窗口跳过/失败多），报告会标记 `insufficient_samples`（默认全样本列不受影响）；此时不要据此下强结论，可减少 `--samples` 外的影响/换更匹配窗口的模型，或按 actual 对齐后比较 |
 | Web 写操作返回 403 `cross-origin write rejected` | 请求带了与 `Host` 不一致的 `Origin`（浏览器跨站/反向代理改写 Host）。用控制台同源页面操作，或让本地脚本不带 `Origin` 直接调用；这是安全防护而非鉴权错误 |
 | 端口被占用 | `--port 8766` |
 | 历史结果太多 | 把 `runs/<run_id>/` 与对应 `batches/<batch_id>.json` 移入 `output/archive/` 后 `./modelbench index`；或用 `pack` 打包后移出。不要直接删 `runs/` 下的证据目录（`archive/` 是 GC 引用根，见 [31-output-contract.md](../design/31-output-contract.md) §7） |

@@ -191,10 +191,10 @@
     },
     {
       "dataset": "tokenizer",
-      "path": "tokenizer/MiniCPM5-1B/tokenizer.json",
-      "url": "https://huggingface.co/openbmb/MiniCPM5-1B/resolve/main/tokenizer.json",
-      "bytes": 9894271,
-      "sha256": "3e065a558a034185fe299917b398685c1facd0169a9eea1e629eb30c171fed81",
+      "path": "tokenizer/cl100k_base/cl100k_base.tiktoken",
+      "url": "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken",
+      "bytes": 1681126,
+      "sha256": "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7",
       "kind": "tooling",
       "required_for": [
         "performance"
@@ -202,5 +202,13 @@
     }
   ],
   "extract": [],
-  "generated": []
+  "generated": [
+    {
+      "dataset": "tokenizer",
+      "path": "tokenizer/cl100k_base/tokenizer.json",
+      "generator": "tool/dataset/performance/derive_cl100k.py",
+      "bytes": 2729984,
+      "sha256": "745dc2f8e2eb601a99627c0bef0c11fcb5bf8b311b74472c9b87184aa7c1a154"
+    }
+  ]
 }

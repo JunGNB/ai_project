@@ -9,9 +9,9 @@
   "per_scenario": 250,
   "seed": 42,
   "tokenizer": {
-    "name": "MiniCPM5-1B",
-    "path": "dataset/raw/tokenizer/MiniCPM5-1B/tokenizer.json",
-    "sha256": "3e065a558a034185fe299917b398685c1facd0169a9eea1e629eb30c171fed81",
+    "name": "cl100k_base",
+    "path": "dataset/raw/tokenizer/cl100k_base/tokenizer.json",
+    "sha256": "745dc2f8e2eb601a99627c0bef0c11fcb5bf8b311b74472c9b87184aa7c1a154",
     "tokens_semantics": "input_tokens = prompt content tokens; chat-template control tokens excluded"
   },
   "sampling": {
@@ -49,10 +49,10 @@
         "mc_letter": 250
       },
       "input_tokens": {
-        "min": 63,
-        "median": 99,
-        "max": 502,
-        "total": 30188
+        "min": 71,
+        "median": 127,
+        "max": 871,
+        "total": 39584
       },
       "sampling": {
         "pool": 13802,
@@ -448,9 +448,9 @@
       },
       "input_tokens": {
         "min": 13,
-        "median": 42,
-        "max": 344,
-        "total": 11747
+        "median": 41,
+        "max": 360,
+        "total": 11501
       },
       "sampling": {
         "pool": 510,
@@ -490,33 +490,33 @@
         "normalized_match": 250
       },
       "input_tokens": {
-        "min": 4317,
-        "median": 9411,
-        "max": 32176,
-        "total": 2968405
+        "min": 4108,
+        "median": 9621,
+        "max": 31435,
+        "total": 2989633
       },
       "sampling": {
         "pool": {
-          "en/2wikimqa/16-32k": 0,
+          "en/2wikimqa/16-32k": 1,
           "en/2wikimqa/4-8k": 122,
           "en/2wikimqa/8-16k": 51,
           "en/hotpotqa/16-32k": 7,
-          "en/hotpotqa/4-8k": 23,
+          "en/hotpotqa/4-8k": 24,
           "en/hotpotqa/8-16k": 164,
           "en/multifieldqa_en/16-32k": 0,
-          "en/multifieldqa_en/4-8k": 53,
-          "en/multifieldqa_en/8-16k": 55,
-          "en/narrativeqa/16-32k": 39,
+          "en/multifieldqa_en/4-8k": 54,
+          "en/multifieldqa_en/8-16k": 57,
+          "en/narrativeqa/16-32k": 48,
           "en/narrativeqa/4-8k": 8,
-          "en/narrativeqa/8-16k": 56,
+          "en/narrativeqa/8-16k": 47,
           "en/qasper/16-32k": 3,
-          "en/qasper/4-8k": 110,
-          "en/qasper/8-16k": 9,
-          "zh/dureader/16-32k": 1,
-          "zh/dureader/4-8k": 58,
-          "zh/dureader/8-16k": 141,
-          "zh/multifieldqa_zh/4-8k": 87,
-          "zh/multifieldqa_zh/8-16k": 7
+          "en/qasper/4-8k": 109,
+          "en/qasper/8-16k": 10,
+          "zh/dureader/16-32k": 116,
+          "zh/dureader/4-8k": 0,
+          "zh/dureader/8-16k": 84,
+          "zh/multifieldqa_zh/4-8k": 68,
+          "zh/multifieldqa_zh/8-16k": 79
         },
         "targets": {
           "en/16-32k": 45,
@@ -533,13 +533,13 @@
           "zh/8-16k": 50
         },
         "selected_tasks": {
-          "hotpotqa": 37,
+          "2wikimqa": 28,
+          "hotpotqa": 36,
           "narrativeqa": 46,
-          "qasper": 23,
-          "2wikimqa": 27,
-          "multifieldqa_en": 17,
-          "dureader": 68,
-          "multifieldqa_zh": 32
+          "qasper": 21,
+          "multifieldqa_en": 19,
+          "multifieldqa_zh": 74,
+          "dureader": 26
         },
         "duplicate_prompt_groups": 20,
         "duplicate_answer_unions": 18,
@@ -569,10 +569,10 @@
         "normalized_match": 250
       },
       "input_tokens": {
-        "min": 36,
-        "median": 63,
-        "max": 215,
-        "total": 17112
+        "min": 52,
+        "median": 80,
+        "max": 214,
+        "total": 21078
       },
       "sampling": {
         "pool": {
@@ -624,10 +624,10 @@
         "code_exec": 250
       },
       "input_tokens": {
-        "min": 54,
-        "median": 129,
-        "max": 426,
-        "total": 36250
+        "min": 50,
+        "median": 122,
+        "max": 416,
+        "total": 34918
       },
       "sampling": {
         "pool": {
@@ -642,8 +642,8 @@
         },
         "mbpp_quotas": {
           "q1": 31,
-          "q2": 31,
-          "q3": 32,
+          "q2": 32,
+          "q3": 31,
           "q4": 31
         },
         "mbpp_quartile_basis": "rendered prompt tokens (template + entry point + 3 official tests)",
@@ -662,10 +662,10 @@
         "tool_call": 250
       },
       "input_tokens": {
-        "min": 151,
-        "median": 323,
-        "max": 2420,
-        "total": 125045
+        "min": 146,
+        "median": 315,
+        "max": 2346,
+        "total": 122369
       },
       "sampling": {
         "pool": {
@@ -708,10 +708,10 @@
         "normalized_match": 250
       },
       "input_tokens": {
-        "min": 612,
-        "median": 1340,
-        "max": 2543,
-        "total": 342415
+        "min": 623,
+        "median": 1361,
+        "max": 2614,
+        "total": 345924
       },
       "sampling": {
         "pool": 7405,
@@ -754,10 +754,10 @@
         "mc_letter": 250
       },
       "input_tokens": {
-        "min": 72,
-        "median": 170,
-        "max": 1253,
-        "total": 56942
+        "min": 70,
+        "median": 185,
+        "max": 1564,
+        "total": 60898
       },
       "sampling": {
         "pool": {
@@ -1925,14 +1925,20 @@
   },
   "tooling": {
     "tokenizer": {
-      "name": "MiniCPM5-1B tokenizer",
-      "source_url": "https://huggingface.co/openbmb/MiniCPM5-1B",
-      "license": "see model card",
+      "name": "cl100k_base (OpenAI)",
+      "source_url": "https://github.com/openai/tiktoken",
+      "license": "MIT (tiktoken) / cl100k_base encoding data",
       "files": [
         {
-          "path": "tokenizer/MiniCPM5-1B/tokenizer.json",
-          "bytes": 9894271,
-          "sha256": "3e065a558a034185fe299917b398685c1facd0169a9eea1e629eb30c171fed81"
+          "path": "tokenizer/cl100k_base/cl100k_base.tiktoken",
+          "bytes": 1681126,
+          "sha256": "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7"
+        },
+        {
+          "path": "tokenizer/cl100k_base/tokenizer.json",
+          "bytes": 2729984,
+          "sha256": "745dc2f8e2eb601a99627c0bef0c11fcb5bf8b311b74472c9b87184aa7c1a154",
+          "derived_by": "tool/dataset/performance/derive_cl100k.py"
         }
       ]
     },
@@ -1977,8 +1983,8 @@
   "files": {
     "testset.jsonl": {
       "rows": 2000,
-      "bytes": 16762012,
-      "sha256": "e4b7df96acd4aa2e4312f88ccd334bf557ac7fac4041b04814d09038ec7a7424"
+      "bytes": 15105497,
+      "sha256": "502d827c69601a9bc4deabf610d0e0614b98db25b7e8a4412ddb0998c42fd62b"
     }
   }
 }

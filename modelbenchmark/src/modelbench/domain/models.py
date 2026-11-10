@@ -302,7 +302,13 @@ class CellAggregate(BaseModel):
     insufficient_samples: bool = False
     stability_cv: Optional[float] = None      # coefficient of variation of ttft
     unstable: bool = False
+    #: ±10% in-band calibre (comparison calibre); the columns derived from it
+    #: are labeled 「（±10%过滤）」 in report/Excel/Web.
     perf: Dict[str, Distribution] = Field(default_factory=dict)
+    #: All-sample calibre (default presentation): every valid measured record,
+    #: out-of-band included.  Additive schema-3.0 field; legacy runs without it
+    #: fall back to record-based recomputation downstream.
+    perf_all: Dict[str, Distribution] = Field(default_factory=dict)
 
 
 class OverallAggregate(BaseModel):
@@ -339,7 +345,11 @@ class OverallAggregate(BaseModel):
     insufficient_samples: bool = False
     stability_cv: Optional[float] = None
     unstable: bool = False
+    #: ±10% in-band calibre (comparison calibre, labeled 「（±10%过滤）」).
     perf: Dict[str, Distribution] = Field(default_factory=dict)
+    #: All-sample calibre (default presentation): every valid measured record,
+    #: out-of-band included.  Additive schema-3.0 field.
+    perf_all: Dict[str, Distribution] = Field(default_factory=dict)
     #: Max RSS observed across all per-sample peaks (MB, diagnostic).
     peak_rss_mb_max: Optional[float] = None
     #: Max phys_footprint observed across all per-sample peaks (GiB).

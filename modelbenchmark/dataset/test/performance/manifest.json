@@ -10,21 +10,48 @@
     "method": "sha256(seed|upstream_id) ascending order + stratified largest-remainder quotas; independent of file row order",
     "executed_by": "tool/dataset/performance/build.py"
   },
-  "tokens_semantics": "tokens = content tokens of messages[0].content + JSON-text tokens of tools (reference tokenizer, no chat template; one BOS per encode included); messages_tokens/tools_tokens are the two audited parts",
-  "bucket_basis": "content tokens (messages + tools JSON text) counted by the reference tokenizer, one BOS per encode included; chat-template control tokens excluded",
-  "tokens_mean": 13995,
+  "tokens_semantics": "tokens = cl100k content tokens of messages[0].content + JSON-text cl100k tokens of tools (generic reference tokenizer, no chat template, no special tokens); messages_tokens/tools_tokens are the two audited parts",
+  "bucket_basis": "declared cl100k content tokens target the calibrated budget for each (scenario, language, bucket) -- see budget_model; the raw bucket value is the run-side ISL target applied to the actual model-token count",
+  "tokens_mean": 13803,
   "tokenizer": {
-    "name": "MiniCPM5-1B",
-    "path": "dataset/raw/tokenizer/MiniCPM5-1B/tokenizer.json",
-    "sha256": "3e065a558a034185fe299917b398685c1facd0169a9eea1e629eb30c171fed81",
-    "tokens_semantics": "tokens = content tokens of messages[0].content + JSON-text tokens of tools (reference tokenizer, no chat template; one BOS per encode included); messages_tokens/tools_tokens are the two audited parts"
+    "name": "cl100k_base",
+    "path": "dataset/raw/tokenizer/cl100k_base/tokenizer.json",
+    "sha256": "745dc2f8e2eb601a99627c0bef0c11fcb5bf8b311b74472c9b87184aa7c1a154",
+    "tokens_semantics": "tokens = cl100k content tokens of messages[0].content + JSON-text cl100k tokens of tools (generic reference tokenizer, no chat template, no special tokens); messages_tokens/tools_tokens are the two audited parts"
+  },
+  "budget_model": {
+    "target": "cl100k content tokens (messages + tools JSON text)",
+    "formula": "budget = (bucket - RESERVE) / INFL (RESERVE=TOOL_RESERVE_CL if tools else PLAIN_RESERVE_CL; tools JSON is content and inflates with INFL)",
+    "tool_reserve_cl": 270,
+    "plain_reserve_cl": 90,
+    "infl": {
+      "coding": 1.07,
+      "math_logic": 1.15,
+      "long_context": 1.24,
+      "knowledge_qa": 1.05,
+      "instruction_following": 1.04,
+      "general_agent": 1.0,
+      "search_agent": 1.03,
+      "ar": 0.5,
+      "hi": 0.68,
+      "ja": 0.56,
+      "ko": 0.6,
+      "ru": 0.63,
+      "vi": 0.55,
+      "de": 0.88,
+      "es": 0.91,
+      "fr": 0.94,
+      "pt": 0.91
+    },
+    "infl_semantics": "content-type token-inflation coefficients: how many tokens a typical model tokenizer needs per cl100k token for this content type (empirically calibrated, generic content-type properties, not model-specific bindings)",
+    "acceptance": "declared tokens within floor(0.95*budget) .. floor(1.05*budget); the run-side +/-10% ISL band applies to actual model tokens vs the raw bucket"
   },
   "buckets": {
     "1k": 1024,
     "8k": 8192,
     "32k": 32768
   },
-  "accept_rule": "integer token counts: floor(0.95*target) <= tokens <= floor(1.05*target), where tokens = messages_tokens + tools_tokens (content tokens, no chat template)",
+  "accept_rule": "integer token counts: floor(0.95*budget) <= tokens <= floor(1.05*budget), where tokens = messages_tokens + tools_tokens (cl100k content tokens, no chat template) and budget is the calibrated per-(scenario, language, bucket) target (see budget_model)",
   "accept_bounds": {
     "1k": {
       "low": 972,
@@ -39,6 +66,7 @@
       "high": 34406
     }
   },
+  "accept_bounds_semantics": "per-bucket construction acceptance around each row's calibrated budget (same +/-5% rule); these raw-bucket bounds are kept for reference: they are the basis of the run-side ISL tolerance, applied to actual model tokens, not to declared tokens",
   "run_defaults": {
     "max_tokens": 50,
     "decode_guard": true,
@@ -48,8 +76,8 @@
   },
   "window_requirements": {
     "declared_32k_tokens": {
-      "min": 32704,
-      "max": 32841
+      "min": 26352,
+      "max": 65356
     },
     "per_request_reserve": {
       "max_tokens": 50,
@@ -58,16 +86,16 @@
       "total": 242
     },
     "required_model_window_tokens": {
-      "min": 32946,
-      "max": 33083
+      "min": 26594,
+      "max": 65598
     },
     "window_32768": {
       "of": 80,
-      "testable": 0,
-      "not_testable": 80,
+      "testable": 68,
+      "not_testable": 12,
       "max_testable_declared_tokens": 32526
     },
-    "note": "Runtime window check is declared_tokens + max_tokens + context_safety_margin + decode_guard_reserve. A 32,768-token window can only host declared tokens <= 32526; the remaining 32K rows are reported as not-testable (summary.skipped), never truncated. Declared tokens exclude the decode guard."
+    "note": "Runtime window check uses the target tokenizer's actual count (tokenized_prompt_tokens) + max_tokens + context_safety_margin + decode_guard_reserve; the declared cl100k budgets below are the calibrated approximation of that actual count. A 32,768-token window can only host actual counts <= 32526; remaining 32K rows are reported as not-testable (summary.skipped), never truncated."
   },
   "default_run": {
     "measured_requests": 240,
@@ -78,10 +106,10 @@
       "n": 10,
       "constructed": 0,
       "dataset": "longbench_v2:Single-Document QA",
-      "tokens_min": 1024,
-      "tokens_median": 1024,
-      "tokens_max": 1024,
-      "tokens_mean": 1024,
+      "tokens_min": 888,
+      "tokens_median": 889,
+      "tokens_max": 889,
+      "tokens_mean": 889,
       "langs": [
         "en"
       ]
@@ -90,10 +118,10 @@
       "n": 10,
       "constructed": 0,
       "dataset": "longbench_v2:Single-Document QA",
-      "tokens_min": 8192,
-      "tokens_median": 8192,
-      "tokens_max": 8192,
-      "tokens_mean": 8192,
+      "tokens_min": 7716,
+      "tokens_median": 7716,
+      "tokens_max": 7716,
+      "tokens_mean": 7716,
       "langs": [
         "en"
       ]
@@ -102,10 +130,10 @@
       "n": 10,
       "constructed": 0,
       "dataset": "longbench_v2:Single-Document QA",
-      "tokens_min": 32768,
-      "tokens_median": 32768,
-      "tokens_max": 32768,
-      "tokens_mean": 32768,
+      "tokens_min": 31120,
+      "tokens_median": 31121,
+      "tokens_max": 31121,
+      "tokens_mean": 31121,
       "langs": [
         "en"
       ]
@@ -114,10 +142,10 @@
       "n": 10,
       "constructed": 10,
       "dataset": "ifeval",
-      "tokens_min": 1024,
-      "tokens_median": 1024,
-      "tokens_max": 1024,
-      "tokens_mean": 1024,
+      "tokens_min": 898,
+      "tokens_median": 898,
+      "tokens_max": 898,
+      "tokens_mean": 898,
       "langs": [
         "en"
       ]
@@ -126,10 +154,10 @@
       "n": 10,
       "constructed": 10,
       "dataset": "ifeval",
-      "tokens_min": 8192,
-      "tokens_median": 8192,
-      "tokens_max": 8192,
-      "tokens_mean": 8192,
+      "tokens_min": 7789,
+      "tokens_median": 7790,
+      "tokens_max": 7790,
+      "tokens_mean": 7790,
       "langs": [
         "en"
       ]
@@ -138,10 +166,10 @@
       "n": 10,
       "constructed": 10,
       "dataset": "ifeval",
-      "tokens_min": 32768,
-      "tokens_median": 32768,
-      "tokens_max": 32768,
-      "tokens_mean": 32768,
+      "tokens_min": 31420,
+      "tokens_median": 31421,
+      "tokens_max": 31421,
+      "tokens_mean": 31421,
       "langs": [
         "en"
       ]
@@ -150,10 +178,10 @@
       "n": 10,
       "constructed": 0,
       "dataset": "longbench_v2:Long Structured Data Understanding",
-      "tokens_min": 1024,
-      "tokens_median": 1024,
-      "tokens_max": 1024,
-      "tokens_mean": 1024,
+      "tokens_min": 752,
+      "tokens_median": 753,
+      "tokens_max": 753,
+      "tokens_mean": 753,
       "langs": [
         "en"
       ]
@@ -162,10 +190,10 @@
       "n": 10,
       "constructed": 0,
       "dataset": "longbench_v2:Long Structured Data Understanding",
-      "tokens_min": 8192,
-      "tokens_median": 8192,
-      "tokens_max": 8192,
-      "tokens_mean": 8192,
+      "tokens_min": 6532,
+      "tokens_median": 6533,
+      "tokens_max": 6533,
+      "tokens_mean": 6533,
       "langs": [
         "en"
       ]
@@ -174,10 +202,10 @@
       "n": 10,
       "constructed": 0,
       "dataset": "longbench_v2:Long Structured Data Understanding",
-      "tokens_min": 32768,
-      "tokens_median": 32768,
-      "tokens_max": 32768,
-      "tokens_mean": 32768,
+      "tokens_min": 26352,
+      "tokens_median": 26353,
+      "tokens_max": 26353,
+      "tokens_mean": 26353,
       "langs": [
         "en"
       ]
@@ -186,10 +214,10 @@
       "n": 10,
       "constructed": 10,
       "dataset": "gsm8k",
-      "tokens_min": 1024,
-      "tokens_median": 1024,
-      "tokens_max": 1024,
-      "tokens_mean": 1024,
+      "tokens_min": 811,
+      "tokens_median": 812,
+      "tokens_max": 812,
+      "tokens_mean": 812,
       "langs": [
         "en"
       ]
@@ -198,10 +226,10 @@
       "n": 10,
       "constructed": 10,
       "dataset": "gsm8k",
-      "tokens_min": 8192,
-      "tokens_median": 8192,
-      "tokens_max": 8192,
-      "tokens_mean": 8192,
+      "tokens_min": 7044,
+      "tokens_median": 7045,
+      "tokens_max": 7045,
+      "tokens_mean": 7045,
       "langs": [
         "en"
       ]
@@ -210,10 +238,10 @@
       "n": 10,
       "constructed": 10,
       "dataset": "gsm8k",
-      "tokens_min": 32768,
-      "tokens_median": 32768,
-      "tokens_max": 32768,
-      "tokens_mean": 32768,
+      "tokens_min": 28414,
+      "tokens_median": 28415,
+      "tokens_max": 28415,
+      "tokens_mean": 28415,
       "langs": [
         "en"
       ]
@@ -222,10 +250,10 @@
       "n": 10,
       "constructed": 0,
       "dataset": "longbench_v2:Code Repository Understanding",
-      "tokens_min": 1023,
-      "tokens_median": 1024,
-      "tokens_max": 1024,
-      "tokens_mean": 1024,
+      "tokens_min": 871,
+      "tokens_median": 872,
+      "tokens_max": 872,
+      "tokens_mean": 872,
       "langs": [
         "en"
       ]
@@ -234,10 +262,10 @@
       "n": 10,
       "constructed": 0,
       "dataset": "longbench_v2:Code Repository Understanding",
-      "tokens_min": 8192,
-      "tokens_median": 8192,
-      "tokens_max": 8192,
-      "tokens_mean": 8192,
+      "tokens_min": 7570,
+      "tokens_median": 7571,
+      "tokens_max": 7571,
+      "tokens_mean": 7571,
       "langs": [
         "en"
       ]
@@ -246,10 +274,10 @@
       "n": 10,
       "constructed": 0,
       "dataset": "longbench_v2:Code Repository Understanding",
-      "tokens_min": 32768,
-      "tokens_median": 32768,
-      "tokens_max": 32768,
-      "tokens_mean": 32768,
+      "tokens_min": 30539,
+      "tokens_median": 30540,
+      "tokens_max": 30540,
+      "tokens_mean": 30540,
       "langs": [
         "en"
       ]
@@ -258,10 +286,10 @@
       "n": 10,
       "constructed": 10,
       "dataset": "bfcl_v4",
-      "tokens_min": 997,
-      "tokens_median": 1049,
-      "tokens_max": 1074,
-      "tokens_mean": 1040,
+      "tokens_min": 727,
+      "tokens_median": 756,
+      "tokens_max": 787,
+      "tokens_mean": 757,
       "langs": [
         "en"
       ]
@@ -270,10 +298,10 @@
       "n": 10,
       "constructed": 10,
       "dataset": "bfcl_v4",
-      "tokens_min": 8106,
-      "tokens_median": 8183,
-      "tokens_max": 8252,
-      "tokens_mean": 8181,
+      "tokens_min": 7854,
+      "tokens_median": 7897,
+      "tokens_max": 7935,
+      "tokens_mean": 7892,
       "langs": [
         "en"
       ]
@@ -282,10 +310,10 @@
       "n": 10,
       "constructed": 10,
       "dataset": "bfcl_v4",
-      "tokens_min": 32704,
-      "tokens_median": 32781,
-      "tokens_max": 32841,
-      "tokens_mean": 32774,
+      "tokens_min": 32451,
+      "tokens_median": 32507,
+      "tokens_max": 32549,
+      "tokens_mean": 32499,
       "langs": [
         "en"
       ]
@@ -294,10 +322,10 @@
       "n": 10,
       "constructed": 0,
       "dataset": "longbench_v2:Multi-Document QA",
-      "tokens_min": 1024,
-      "tokens_median": 1024,
-      "tokens_max": 1024,
-      "tokens_mean": 1024,
+      "tokens_min": 731,
+      "tokens_median": 732,
+      "tokens_max": 732,
+      "tokens_mean": 732,
       "langs": [
         "en"
       ]
@@ -306,10 +334,10 @@
       "n": 10,
       "constructed": 0,
       "dataset": "longbench_v2:Multi-Document QA",
-      "tokens_min": 8192,
-      "tokens_median": 8192,
-      "tokens_max": 8192,
-      "tokens_mean": 8192,
+      "tokens_min": 7691,
+      "tokens_median": 7691,
+      "tokens_max": 7691,
+      "tokens_mean": 7691,
       "langs": [
         "en"
       ]
@@ -318,10 +346,10 @@
       "n": 10,
       "constructed": 0,
       "dataset": "longbench_v2:Multi-Document QA",
-      "tokens_min": 32767,
-      "tokens_median": 32768,
-      "tokens_max": 32768,
-      "tokens_mean": 32768,
+      "tokens_min": 31550,
+      "tokens_median": 31551,
+      "tokens_max": 31551,
+      "tokens_mean": 31551,
       "langs": [
         "en"
       ]
@@ -330,10 +358,10 @@
       "n": 10,
       "constructed": 10,
       "dataset": "global_mmlu",
-      "tokens_min": 1023,
-      "tokens_median": 1024,
-      "tokens_max": 1024,
-      "tokens_mean": 1024,
+      "tokens_min": 993,
+      "tokens_median": 1427,
+      "tokens_max": 1868,
+      "tokens_mean": 1375,
       "langs": [
         "ar",
         "de",
@@ -351,10 +379,10 @@
       "n": 10,
       "constructed": 10,
       "dataset": "global_mmlu",
-      "tokens_min": 8192,
-      "tokens_median": 8192,
-      "tokens_max": 8192,
-      "tokens_mean": 8192,
+      "tokens_min": 8619,
+      "tokens_median": 12387,
+      "tokens_max": 16204,
+      "tokens_mean": 11931,
       "langs": [
         "ar",
         "de",
@@ -372,10 +400,10 @@
       "n": 10,
       "constructed": 10,
       "dataset": "global_mmlu",
-      "tokens_min": 32767,
-      "tokens_median": 32768,
-      "tokens_max": 32768,
-      "tokens_mean": 32768,
+      "tokens_min": 34763,
+      "tokens_median": 49962,
+      "tokens_max": 65356,
+      "tokens_mean": 48122,
       "langs": [
         "ar",
         "de",
@@ -547,11 +575,11 @@
       },
       "constructed": 0,
       "tokens": {
-        "min": 1024,
-        "median": 8192,
-        "max": 32768,
-        "mean": 13995,
-        "total": 419840
+        "min": 888,
+        "median": 7716,
+        "max": 31121,
+        "mean": 13242,
+        "total": 397257
       },
       "unique_contexts": {
         "selected_targets": 10,
@@ -569,16 +597,8 @@
         "candidates": 106,
         "selected": 10,
         "quotas": {},
-        "skipped": [
-          {
-            "upstream_id": "6703933bbb02136c067ccd78",
-            "reason": "32k_unreachable",
-            "detail": "32k: best total=30937 tokens, bounds [31129, 34406]"
-          }
-        ],
-        "skip_reasons": {
-          "32k_unreachable": 1
-        },
+        "skipped": [],
+        "skip_reasons": {},
         "targets": [
           {
             "target_id": "tgt-knowledge_qa-000",
@@ -586,9 +606,9 @@
             "context_sha1": "185b0f310c651f95",
             "context_chars": 601885,
             "context_chars_per_bucket": {
-              "1k": 3242,
-              "8k": 32605,
-              "32k": 128789
+              "1k": 2666,
+              "8k": 29831,
+              "32k": 119791
             }
           },
           {
@@ -597,9 +617,9 @@
             "context_sha1": "40c2a8bf89015032",
             "context_chars": 584415,
             "context_chars_per_bucket": {
-              "1k": 3465,
-              "8k": 35260,
-              "32k": 136986
+              "1k": 2766,
+              "8k": 32201,
+              "32k": 126935
             }
           },
           {
@@ -608,9 +628,9 @@
             "context_sha1": "755e104072d720c3",
             "context_chars": 142458,
             "context_chars_per_bucket": {
-              "1k": 3261,
-              "8k": 28951,
-              "32k": 95911
+              "1k": 2828,
+              "8k": 28774,
+              "32k": 94669
             }
           },
           {
@@ -619,9 +639,9 @@
             "context_sha1": "5d60b959fbe87c8a",
             "context_chars": 366845,
             "context_chars_per_bucket": {
-              "1k": 4280,
-              "8k": 38769,
-              "32k": 140705
+              "1k": 3393,
+              "8k": 34767,
+              "32k": 124643
             }
           },
           {
@@ -630,9 +650,9 @@
             "context_sha1": "fe16cbc03a408fe4",
             "context_chars": 307844,
             "context_chars_per_bucket": {
-              "1k": 3402,
-              "8k": 32312,
-              "32k": 129727
+              "1k": 2827,
+              "8k": 29711,
+              "32k": 121808
             }
           },
           {
@@ -641,53 +661,53 @@
             "context_sha1": "0a9c55a6b7ce9037",
             "context_chars": 3596979,
             "context_chars_per_bucket": {
-              "1k": 13771,
-              "8k": 44790,
-              "32k": 149361
+              "1k": 10825,
+              "8k": 42077,
+              "32k": 139764
             }
           },
           {
             "target_id": "tgt-knowledge_qa-006",
-            "upstream_id": "67040983bb02136c067cd996",
-            "context_sha1": "3b709d440b95b7d4",
-            "context_chars": 1644574,
+            "upstream_id": "6703933bbb02136c067ccd78",
+            "context_sha1": "8d9fbfa99357f382",
+            "context_chars": 124095,
             "context_chars_per_bucket": {
-              "1k": 4051,
-              "8k": 34324,
-              "32k": 122321
+              "1k": 3219,
+              "8k": 29851,
+              "32k": 121798
             }
           },
           {
             "target_id": "tgt-knowledge_qa-007",
-            "upstream_id": "67246413bb02136c067d7374",
-            "context_sha1": "c3076dd17ad7751e",
-            "context_chars": 708655,
+            "upstream_id": "67040983bb02136c067cd996",
+            "context_sha1": "3b709d440b95b7d4",
+            "context_chars": 1644574,
             "context_chars_per_bucket": {
-              "1k": 1590,
-              "8k": 30897,
-              "32k": 132971
+              "1k": 3335,
+              "8k": 31377,
+              "32k": 115085
             }
           },
           {
             "target_id": "tgt-knowledge_qa-008",
-            "upstream_id": "66f793f4bb02136c067c306e",
-            "context_sha1": "4a0345d90cc5ff4f",
-            "context_chars": 309484,
+            "upstream_id": "67246413bb02136c067d7374",
+            "context_sha1": "c3076dd17ad7751e",
+            "context_chars": 708655,
             "context_chars_per_bucket": {
-              "1k": 4333,
-              "8k": 26989,
-              "32k": 123074
+              "1k": 1263,
+              "8k": 27757,
+              "32k": 122472
             }
           },
           {
             "target_id": "tgt-knowledge_qa-009",
-            "upstream_id": "670fbf5abb02136c067d2d9c",
-            "context_sha1": "c9a8a6617502018f",
-            "context_chars": 425156,
+            "upstream_id": "66f793f4bb02136c067c306e",
+            "context_sha1": "4a0345d90cc5ff4f",
+            "context_chars": 309484,
             "context_chars_per_bucket": {
-              "1k": 4212,
-              "8k": 35912,
-              "32k": 143579
+              "1k": 3805,
+              "8k": 24361,
+              "32k": 116304
             }
           }
         ],
@@ -712,11 +732,11 @@
       },
       "constructed": 30,
       "tokens": {
-        "min": 1024,
-        "median": 8192,
-        "max": 32768,
-        "mean": 13995,
-        "total": 419840
+        "min": 898,
+        "median": 7790,
+        "max": 31421,
+        "mean": 13370,
+        "total": 401085
       },
       "unique_contexts": {
         "selected_targets": 10,
@@ -846,11 +866,11 @@
       },
       "constructed": 0,
       "tokens": {
-        "min": 1024,
-        "median": 8192,
-        "max": 32768,
-        "mean": 13995,
-        "total": 419840
+        "min": 752,
+        "median": 6533,
+        "max": 26353,
+        "mean": 11213,
+        "total": 336382
       },
       "unique_contexts": {
         "selected_targets": 10,
@@ -877,9 +897,9 @@
             "context_sha1": "76b063d1af7d8b6f",
             "context_chars": 419455,
             "context_chars_per_bucket": {
-              "1k": 2628,
-              "8k": 22676,
-              "32k": 99573
+              "1k": 1902,
+              "8k": 17933,
+              "32k": 79133
             }
           },
           {
@@ -888,9 +908,9 @@
             "context_sha1": "61e3de3d1fe6cda9",
             "context_chars": 1275474,
             "context_chars_per_bucket": {
-              "1k": 3410,
-              "8k": 23796,
-              "32k": 96767
+              "1k": 2557,
+              "8k": 19553,
+              "32k": 76103
             }
           },
           {
@@ -899,9 +919,9 @@
             "context_sha1": "aa986e6a41ae5593",
             "context_chars": 416747,
             "context_chars_per_bucket": {
-              "1k": 2616,
-              "8k": 22662,
-              "32k": 100504
+              "1k": 1886,
+              "8k": 17921,
+              "32k": 79946
             }
           },
           {
@@ -910,9 +930,9 @@
             "context_sha1": "535f43d6248c8937",
             "context_chars": 246048,
             "context_chars_per_bucket": {
-              "1k": 2698,
-              "8k": 24161,
-              "32k": 98956
+              "1k": 2035,
+              "8k": 23052,
+              "32k": 96575
             }
           },
           {
@@ -921,9 +941,9 @@
             "context_sha1": "1d6cbd085e306f7d",
             "context_chars": 445748,
             "context_chars_per_bucket": {
-              "1k": 2626,
-              "8k": 22673,
-              "32k": 102752
+              "1k": 1899,
+              "8k": 17928,
+              "32k": 81372
             }
           },
           {
@@ -932,9 +952,9 @@
             "context_sha1": "6859b5679a27dcbf",
             "context_chars": 341229,
             "context_chars_per_bucket": {
-              "1k": 2134,
-              "8k": 21986,
-              "32k": 89972
+              "1k": 1441,
+              "8k": 17400,
+              "32k": 71882
             }
           },
           {
@@ -943,9 +963,9 @@
             "context_sha1": "4153251cbc067578",
             "context_chars": 9781854,
             "context_chars_per_bucket": {
-              "1k": 2623,
-              "8k": 22671,
-              "32k": 102316
+              "1k": 1898,
+              "8k": 17925,
+              "32k": 82809
             }
           },
           {
@@ -954,9 +974,9 @@
             "context_sha1": "dbd1b8d5fcec4da5",
             "context_chars": 550914,
             "context_chars_per_bucket": {
-              "1k": 2597,
-              "8k": 22647,
-              "32k": 101384
+              "1k": 1868,
+              "8k": 17897,
+              "32k": 80252
             }
           },
           {
@@ -965,9 +985,9 @@
             "context_sha1": "2e512e2ac93dcb98",
             "context_chars": 456984,
             "context_chars_per_bucket": {
-              "1k": 2623,
-              "8k": 22671,
-              "32k": 102380
+              "1k": 1898,
+              "8k": 17925,
+              "32k": 80667
             }
           },
           {
@@ -976,9 +996,9 @@
             "context_sha1": "3e9b12a7c180c8f1",
             "context_chars": 2407150,
             "context_chars_per_bucket": {
-              "1k": 2334,
-              "8k": 17408,
-              "32k": 67721
+              "1k": 1558,
+              "8k": 12936,
+              "32k": 49961
             }
           }
         ],
@@ -1003,11 +1023,11 @@
       },
       "constructed": 30,
       "tokens": {
-        "min": 1024,
-        "median": 8192,
-        "max": 32768,
-        "mean": 13995,
-        "total": 419840
+        "min": 811,
+        "median": 7045,
+        "max": 28415,
+        "mean": 12090,
+        "total": 362712
       },
       "unique_contexts": {
         "selected_targets": 10,
@@ -1108,11 +1128,11 @@
       },
       "constructed": 0,
       "tokens": {
-        "min": 1023,
-        "median": 8192,
-        "max": 32768,
-        "mean": 13995,
-        "total": 419839
+        "min": 871,
+        "median": 7571,
+        "max": 30540,
+        "mean": 12994,
+        "total": 389827
       },
       "unique_contexts": {
         "selected_targets": 10,
@@ -1139,9 +1159,9 @@
             "context_sha1": "8b7ad9e5259873ab",
             "context_chars": 395334,
             "context_chars_per_bucket": {
-              "1k": 1888,
-              "8k": 25357,
-              "32k": 122262
+              "1k": 1414,
+              "8k": 24143,
+              "32k": 122072
             }
           },
           {
@@ -1150,9 +1170,9 @@
             "context_sha1": "a59739c915b2abd9",
             "context_chars": 6002782,
             "context_chars_per_bucket": {
-              "1k": 2788,
-              "8k": 32787,
-              "32k": 133065
+              "1k": 2504,
+              "8k": 32649,
+              "32k": 136175
             }
           },
           {
@@ -1161,9 +1181,9 @@
             "context_sha1": "5ed9fa2025c3264d",
             "context_chars": 915974,
             "context_chars_per_bucket": {
-              "1k": 2858,
-              "8k": 29084,
-              "32k": 110421
+              "1k": 2538,
+              "8k": 28665,
+              "32k": 109105
             }
           },
           {
@@ -1172,9 +1192,9 @@
             "context_sha1": "b5dbb70fb36e4466",
             "context_chars": 4500898,
             "context_chars_per_bucket": {
-              "1k": 2491,
-              "8k": 33150,
-              "32k": 136046
+              "1k": 2234,
+              "8k": 33857,
+              "32k": 138550
             }
           },
           {
@@ -1183,9 +1203,9 @@
             "context_sha1": "6cdaa6789804457c",
             "context_chars": 11312794,
             "context_chars_per_bucket": {
-              "1k": 3299,
-              "8k": 30235,
-              "32k": 121867
+              "1k": 3061,
+              "8k": 30702,
+              "32k": 122842
             }
           },
           {
@@ -1194,9 +1214,9 @@
             "context_sha1": "2ed47bc579e1819d",
             "context_chars": 197578,
             "context_chars_per_bucket": {
-              "1k": 2936,
-              "8k": 25186,
-              "32k": 111978
+              "1k": 2889,
+              "8k": 26194,
+              "32k": 122088
             }
           },
           {
@@ -1205,9 +1225,9 @@
             "context_sha1": "f44783c9a443ad07",
             "context_chars": 614556,
             "context_chars_per_bucket": {
-              "1k": 3848,
-              "8k": 28066,
-              "32k": 109840
+              "1k": 3647,
+              "8k": 28427,
+              "32k": 109900
             }
           },
           {
@@ -1216,9 +1236,9 @@
             "context_sha1": "cf4b22412160ee27",
             "context_chars": 1949620,
             "context_chars_per_bucket": {
-              "1k": 2648,
-              "8k": 29235,
-              "32k": 133816
+              "1k": 2457,
+              "8k": 29788,
+              "32k": 136288
             }
           },
           {
@@ -1227,9 +1247,9 @@
             "context_sha1": "a9e01c7cbe814b71",
             "context_chars": 1599163,
             "context_chars_per_bucket": {
-              "1k": 3491,
-              "8k": 29481,
-              "32k": 123348
+              "1k": 3245,
+              "8k": 27900,
+              "32k": 119003
             }
           },
           {
@@ -1238,9 +1258,9 @@
             "context_sha1": "b5afeaa4a0bd30d3",
             "context_chars": 2136912,
             "context_chars_per_bucket": {
-              "1k": 3170,
-              "8k": 26405,
-              "32k": 110954
+              "1k": 2536,
+              "8k": 25423,
+              "32k": 105940
             }
           }
         ],
@@ -1265,11 +1285,11 @@
       },
       "constructed": 30,
       "tokens": {
-        "min": 997,
-        "median": 8183,
-        "max": 32841,
-        "mean": 13999,
-        "total": 419960
+        "min": 727,
+        "median": 7897,
+        "max": 32549,
+        "mean": 13716,
+        "total": 411485
       },
       "unique_contexts": {
         "selected_targets": 10,
@@ -1290,20 +1310,33 @@
         },
         "skipped": [
           {
-            "upstream_id": "simple_python_396",
+            "upstream_id": "simple_python_306",
             "reason": "1k_infeasible",
-            "detail": "1k: catalogue prefix 7/642 functions, best total=1076, own=1, bounds [972, 1075]",
+            "detail": "1k: catalogue prefix 5/642 functions, best total=793, own=1, bounds [716, 791]",
             "category": "simple"
           },
           {
-            "upstream_id": "parallel_157",
+            "upstream_id": "simple_python_396",
             "reason": "1k_infeasible",
-            "detail": "1k: catalogue prefix 6/642 functions, best total=1083, own=1, bounds [972, 1075]",
-            "category": "parallel"
+            "detail": "1k: catalogue prefix 4/642 functions, best total=695, own=1, bounds [716, 791]",
+            "category": "simple"
+          },
+          {
+            "upstream_id": "simple_python_239",
+            "reason": "1k_infeasible",
+            "detail": "1k: catalogue prefix 5/642 functions, best total=707, own=1, bounds [716, 791]",
+            "category": "simple"
+          },
+          {
+            "upstream_id": "multiple_0",
+            "reason": "1k_no_own_room",
+            "detail": "1k: catalogue prefix 1/642 functions, best total=741, own=2, bounds [716, 791]",
+            "category": "multiple"
           }
         ],
         "skip_reasons": {
-          "1k_infeasible": 2
+          "1k_infeasible": 3,
+          "1k_no_own_room": 1
         },
         "targets": [
           {
@@ -1311,9 +1344,9 @@
             "upstream_id": "simple_python_352",
             "category": "simple",
             "catalog_functions_per_bucket": {
-              "1k": 7,
-              "8k": 56,
-              "32k": 232
+              "1k": 5,
+              "8k": 54,
+              "32k": 231
             },
             "own_functions": 1
           },
@@ -1322,97 +1355,97 @@
             "upstream_id": "simple_python_168",
             "category": "simple",
             "catalog_functions_per_bucket": {
-              "1k": 6,
-              "8k": 55,
-              "32k": 232
+              "1k": 4,
+              "8k": 53,
+              "32k": 230
             },
             "own_functions": 1
           },
           {
             "target_id": "tgt-general_agent-002",
-            "upstream_id": "simple_python_306",
+            "upstream_id": "simple_python_50",
             "category": "simple",
             "catalog_functions_per_bucket": {
-              "1k": 7,
-              "8k": 55,
-              "32k": 232
+              "1k": 4,
+              "8k": 53,
+              "32k": 230
             },
             "own_functions": 1
           },
           {
             "target_id": "tgt-general_agent-003",
-            "upstream_id": "simple_python_50",
+            "upstream_id": "simple_python_41",
             "category": "simple",
             "catalog_functions_per_bucket": {
-              "1k": 6,
-              "8k": 54,
-              "32k": 231
+              "1k": 4,
+              "8k": 53,
+              "32k": 230
             },
             "own_functions": 1
           },
           {
             "target_id": "tgt-general_agent-004",
-            "upstream_id": "multiple_0",
-            "category": "multiple",
-            "catalog_functions_per_bucket": {
-              "1k": 3,
-              "8k": 57,
-              "32k": 229
-            },
-            "own_functions": 2
-          },
-          {
-            "target_id": "tgt-general_agent-005",
             "upstream_id": "multiple_173",
             "category": "multiple",
             "catalog_functions_per_bucket": {
-              "1k": 4,
-              "8k": 57,
-              "32k": 230
+              "1k": 3,
+              "8k": 55,
+              "32k": 229
             },
             "own_functions": 3
           },
           {
-            "target_id": "tgt-general_agent-006",
+            "target_id": "tgt-general_agent-005",
             "upstream_id": "multiple_40",
             "category": "multiple",
             "catalog_functions_per_bucket": {
-              "1k": 3,
-              "8k": 56,
-              "32k": 229
+              "1k": 2,
+              "8k": 54,
+              "32k": 228
             },
             "own_functions": 2
+          },
+          {
+            "target_id": "tgt-general_agent-006",
+            "upstream_id": "multiple_77",
+            "category": "multiple",
+            "catalog_functions_per_bucket": {
+              "1k": 3,
+              "8k": 55,
+              "32k": 229
+            },
+            "own_functions": 3
           },
           {
             "target_id": "tgt-general_agent-007",
             "upstream_id": "parallel_174",
             "category": "parallel",
             "catalog_functions_per_bucket": {
-              "1k": 6,
-              "8k": 58,
-              "32k": 233
+              "1k": 4,
+              "8k": 56,
+              "32k": 231
             },
             "own_functions": 1
           },
           {
             "target_id": "tgt-general_agent-008",
-            "upstream_id": "parallel_85",
+            "upstream_id": "parallel_157",
             "category": "parallel",
             "catalog_functions_per_bucket": {
-              "1k": 6,
-              "8k": 58,
-              "32k": 233
+              "1k": 3,
+              "8k": 56,
+              "32k": 231
             },
             "own_functions": 1
           },
           {
             "target_id": "tgt-general_agent-009",
-            "upstream_id": "parallel_180",
+            "upstream_id": "parallel_85",
             "category": "parallel",
             "catalog_functions_per_bucket": {
-              "1k": 7,
-              "8k": 59,
-              "32k": 234
+              "1k": 3,
+              "8k": 56,
+              "32k": 231
             },
             "own_functions": 1
           }
@@ -1458,11 +1491,11 @@
       },
       "constructed": 0,
       "tokens": {
-        "min": 1024,
-        "median": 8192,
-        "max": 32768,
-        "mean": 13995,
-        "total": 419839
+        "min": 731,
+        "median": 7691,
+        "max": 31551,
+        "mean": 13325,
+        "total": 399737
       },
       "unique_contexts": {
         "selected_targets": 10,
@@ -1484,21 +1517,36 @@
           {
             "upstream_id": "66ec0874821e116aacb194a4",
             "reason": "question_too_long",
-            "detail": "question+options+prefix=811 tokens > 614 (1K context would not fit)"
+            "detail": "question+options+prefix=823 tokens > 439 (1K context would not fit)"
           },
           {
             "upstream_id": "66fa190bbb02136c067c5d32",
             "reason": "question_too_long",
-            "detail": "question+options+prefix=659 tokens > 614 (1K context would not fit)"
+            "detail": "question+options+prefix=662 tokens > 439 (1K context would not fit)"
+          },
+          {
+            "upstream_id": "66f94f9ebb02136c067c4fde",
+            "reason": "question_too_long",
+            "detail": "question+options+prefix=539 tokens > 439 (1K context would not fit)"
           },
           {
             "upstream_id": "66ec1aef821e116aacb1aa1a",
             "reason": "question_too_long",
-            "detail": "question+options+prefix=814 tokens > 614 (1K context would not fit)"
+            "detail": "question+options+prefix=828 tokens > 439 (1K context would not fit)"
+          },
+          {
+            "upstream_id": "66f4ce9e821e116aacb31731",
+            "reason": "question_too_long",
+            "detail": "question+options+prefix=468 tokens > 439 (1K context would not fit)"
+          },
+          {
+            "upstream_id": "66fc05b6bb02136c067c88e4",
+            "reason": "question_too_long",
+            "detail": "question+options+prefix=512 tokens > 439 (1K context would not fit)"
           }
         ],
         "skip_reasons": {
-          "question_too_long": 3
+          "question_too_long": 6
         },
         "targets": [
           {
@@ -1507,9 +1555,9 @@
             "context_sha1": "1208e1b810b81546",
             "context_chars": 1617711,
             "context_chars_per_bucket": {
-              "1k": 8428,
-              "8k": 46344,
-              "32k": 156369
+              "1k": 3984,
+              "8k": 44586,
+              "32k": 151202
             }
           },
           {
@@ -1518,9 +1566,9 @@
             "context_sha1": "a3495edb438c54e4",
             "context_chars": 282443,
             "context_chars_per_bucket": {
-              "1k": 2828,
-              "8k": 33045,
-              "32k": 132620
+              "1k": 1201,
+              "8k": 29618,
+              "32k": 123234
             }
           },
           {
@@ -1529,9 +1577,9 @@
             "context_sha1": "6824e07867a40858",
             "context_chars": 378895,
             "context_chars_per_bucket": {
-              "1k": 2441,
-              "8k": 29230,
-              "32k": 124214
+              "1k": 1391,
+              "8k": 26696,
+              "32k": 113970
             }
           },
           {
@@ -1540,9 +1588,9 @@
             "context_sha1": "dbdcfe5abaf30821",
             "context_chars": 166965,
             "context_chars_per_bucket": {
-              "1k": 3175,
-              "8k": 31385,
-              "32k": 116946
+              "1k": 1951,
+              "8k": 28925,
+              "32k": 112548
             }
           },
           {
@@ -1551,9 +1599,9 @@
             "context_sha1": "866aa89073210a00",
             "context_chars": 153926,
             "context_chars_per_bucket": {
-              "1k": 3988,
-              "8k": 28932,
-              "32k": 103784
+              "1k": 2514,
+              "8k": 26447,
+              "32k": 94296
             }
           },
           {
@@ -1562,9 +1610,9 @@
             "context_sha1": "7d431a7559adf736",
             "context_chars": 352693,
             "context_chars_per_bucket": {
-              "1k": 3209,
-              "8k": 37881,
-              "32k": 155026
+              "1k": 1891,
+              "8k": 35252,
+              "32k": 148272
             }
           },
           {
@@ -1573,42 +1621,42 @@
             "context_sha1": "dbc7647ad233167f",
             "context_chars": 171209,
             "context_chars_per_bucket": {
-              "1k": 3450,
-              "8k": 33613,
-              "32k": 131583
+              "1k": 2108,
+              "8k": 30978,
+              "32k": 124133
             }
           },
           {
             "target_id": "tgt-search_agent-007",
-            "upstream_id": "66f94f9ebb02136c067c4fde",
-            "context_sha1": "8d271732269cc1af",
-            "context_chars": 2007494,
-            "context_chars_per_bucket": {
-              "1k": 2128,
-              "8k": 38910,
-              "32k": 157813
-            }
-          },
-          {
-            "target_id": "tgt-search_agent-008",
             "upstream_id": "6707b3cabb02136c067d1021",
             "context_sha1": "a5f9e407d3947731",
             "context_chars": 512017,
             "context_chars_per_bucket": {
-              "1k": 4620,
-              "8k": 35447,
-              "32k": 120477
+              "1k": 2334,
+              "8k": 33586,
+              "32k": 117001
+            }
+          },
+          {
+            "target_id": "tgt-search_agent-008",
+            "upstream_id": "66ed3960821e116aacb1f616",
+            "context_sha1": "6f2ba887f176ce90",
+            "context_chars": 2120155,
+            "context_chars_per_bucket": {
+              "1k": 2197,
+              "8k": 32867,
+              "32k": 135569
             }
           },
           {
             "target_id": "tgt-search_agent-009",
-            "upstream_id": "66f4ce9e821e116aacb31731",
-            "context_sha1": "3ff7e531548d55ab",
-            "context_chars": 241749,
+            "upstream_id": "66f6b623bb02136c067c2646",
+            "context_sha1": "0d749881947af789",
+            "context_chars": 210397,
             "context_chars_per_bucket": {
-              "1k": 2681,
-              "8k": 37417,
-              "32k": 154323
+              "1k": 1892,
+              "8k": 28640,
+              "32k": 122163
             }
           }
         ],
@@ -1642,11 +1690,11 @@
       },
       "constructed": 30,
       "tokens": {
-        "min": 1023,
-        "median": 8192,
-        "max": 32768,
-        "mean": 13995,
-        "total": 419838
+        "min": 993,
+        "median": 12387,
+        "max": 65356,
+        "mean": 20476,
+        "total": 614278
       },
       "unique_contexts": {
         "selected_targets": 10,
@@ -1880,22 +1928,22 @@
   "files": {
     "testset.jsonl": {
       "rows": 240,
-      "bytes": 13273802,
-      "sha256": "5bba5d7266642ab7b66e6c0af34b5c8fa094c6a13fa1cc436b1c4f087f858890"
+      "bytes": 12859823,
+      "sha256": "c9da705e1c5d1c3870b806d536503b346b29ecd98aa1ba41556ad9b799c80284"
     }
   },
   "deviations": [
     {
       "id": "content-token-basis",
-      "note": "Declared tokens are content tokens of the user message plus the JSON text of tools (chat-template control tokens excluded). The model-side rendered prompt is larger: the reference tokenizer also counts one BOS per encoded text (see tokenizer-bos-included) and the runner appends a decode-guard message before chat-template overhead (see decode-guard-suffix), so actual input_context_tokens exceeds the declared bucket value."
+      "note": "Declared tokens are cl100k content tokens of the user message plus the JSON text of tools (chat-template control tokens excluded, no special tokens). The model-side rendered prompt differs: the runner appends a decode-guard message before chat-template overhead (see decode-guard-suffix) and every tokenizer counts text slightly differently, so actual input_context_tokens is calibrated via the budget model (see tokenizer-generic-cl100k), not by widening the band."
     },
     {
-      "id": "tokenizer-bos-included",
-      "note": "The reference tokenizer counts with add_special_tokens=True, so every declared messages_tokens/tools_tokens includes one BOS token: +1 for the user message in all scenarios and +1 more for tools JSON in general_agent/search_agent (+2 total). The declared tokens therefore include a special control token even though tokens_semantics says content tokens without chat template; the +/-5% bucket bounds absorb the 1-2 tokens."
+      "id": "tokenizer-generic-cl100k",
+      "note": "The construction tokenizer is cl100k_base (the OpenAI/industry-generic reference), not a model-specific tokenizer, so declared counts are model-agnostic. A target tokenizer can count the same content differently (more for code/math density, less for non-Latin scripts), so each row's declared count targets a calibrated cl100k budget: (bucket - RESERVE) / INFL, with one fixed model-side render reserve (TOOL_RESERVE_CL=270 when the row renders tools, PLAIN_RESERVE_CL=90 otherwise) and empirical content-type inflation coefficients INFL (0.50-1.21 by scenario/language), both calibrated on real-run evidence (240 cells, run 20261110T112641Z-8349). The tools JSON is content and inflates with INFL rather than being deducted separately (double deduction starved the 1K tool bucket: 796 actual vs the 921 band floor). Declared tokens therefore sit below the raw bucket by design so the actual rendered count lands centered in the run-side +/-10% ISL band. The coefficients are generic content-type properties, not bindings to any specific model."
     },
     {
       "id": "decode-guard-suffix",
-      "note": "At run time benchmark._apply_decode_guard appends a second user message (36 tokens in the reference tokenizer) instructing the model to ignore the question above and write a >=250-word technical summary. Together with chat-template overhead (~10-30 tokens) the rendered prompt exceeds the declared content by ~46-69 tokens: the 1K bucket actually renders ~1.9%-11.6% above its declared value, 8K/32K by <2%. Generation follows the guard instruction, not the dataset question; this is a measurement-protocol deviation."
+      "note": "At run time benchmark._apply_decode_guard appends a second user message (37 cl100k tokens) instructing the model to ignore the question above and write a >=250-word technical summary. The budget model already reserves these 37 tokens, so the guard does not push rendered prompts out of the ISL band. Generation follows the guard instruction, not the dataset question; this is a measurement-protocol deviation."
     },
     {
       "id": "ten-targets-per-cell",
@@ -1931,11 +1979,11 @@
     },
     {
       "id": "ifeval-32k-instruction-metadata",
-      "note": "instruction_following renders each reference item as 'INSTRUCTION <k>: ids=<instruction_id_list JSON> kwargs=<kwargs JSON>' followed by the prompt. One pass of the 509 non-target items is ~44.1K tokens (> the 32K lower bound 31,129), so the 32K reference block is a single non-repeating pass of distinct units (reference_pool_cycles is always 1); this replaces the earlier doubled block."
+      "note": "instruction_following renders each reference item as 'INSTRUCTION <k>: ids=<instruction_id_list JSON> kwargs=<kwargs JSON>' followed by the prompt. One pass of the 509 non-target items is ~43K cl100k tokens (> the calibrated 32K lower bound ~31,094), so the 32K reference block is a single non-repeating pass of distinct units (reference_pool_cycles is always 1); this replaces the earlier doubled block."
     },
     {
       "id": "window-32768-not-testable",
-      "note": "32K rows declare 31,129-34,406 tokens; with max_tokens=50 + 128 safety + 64 decode-guard = 242 reserved tokens a 32,768-token model window cannot host the upper rows (not-testable, reported as skipped, never truncated)."
+      "note": "32K rows declare calibrated cl100k budgets (bucket/INFL - 37); with max_tokens=50 + 128 safety + 64 decode-guard = 242 reserved tokens a 32,768-token model window cannot host the upper rows (not-testable, reported as skipped, never truncated). The run-side window check uses the target tokenizer's actual count, which the budget model calibrates toward the bucket."
     }
   ]
 }

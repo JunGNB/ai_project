@@ -16,3 +16,6 @@ harness/reports/
 harness/tasks/
 dataset/raw/
 dataset/.cache/
+dataset/processed/
+dataset/test/**/testset.jsonl
+harness/state/journal.jsonl

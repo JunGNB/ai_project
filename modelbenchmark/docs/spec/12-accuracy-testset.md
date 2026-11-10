@@ -173,7 +173,7 @@
 #### 3.3.3 长上下文 → LongBench v1（4K–32K 分层）
 
 - **候选**：LongBench v1、LongBench v2、RULER、∞Bench、L-Eval、NIAH。
-- **选 LongBench v1**：真实长文档 + 短答案抽取任务，官方指标判题（英文 5 任务 SQuAD token F1，中文用官方中文指标）；英文取 narrativeqa / qasper / hotpotqa / 2wikimqa / multifieldqa_en，中文取 dureader / multifieldqa_zh，天然中英双语；用目标模型 tokenizer 过滤到 4,096–32,768 tokens 后仍有 en 700 / zh 294 的池（按 prompt 去重后；未去重为 713/295）。
+- **选 LongBench v1**：真实长文档 + 短答案抽取任务，官方指标判题（英文 5 任务 SQuAD token F1，中文用官方中文指标）；英文取 narrativeqa / qasper / hotpotqa / 2wikimqa / multifieldqa_en，中文取 dureader / multifieldqa_zh，天然中英双语；用参考 tokenizer（cl100k）过滤到 4,096–32,768 tokens 后仍保留充足的双语池（按 prompt 去重；准确池大小随 tokenizer 口径微调，以构建报告为准）。
 - **弃 LongBench v2**：上下文中位约 10 万 token，250 条预填成本高、且 1B 模型在 100K 长度上近乎全错；弃 **RULER/NIAH**：合成检索任务，只测“找针”，不测真实长文理解；弃 **∞Bench**：同样超长；弃 **L-Eval**：部分任务为摘要/主观评分，F1/ROUGE 对 1B 生成不稳定。
 - **判题口径**：英文 5 任务 `metric=f1`（SQuAD token F1）；`dureader` 用官方 ROUGE-L（`metric=rouge_zh`）；`multifieldqa_zh` 用官方中文 token F1（`metric=f1_zh`，jieba 分词 + 中文归一化）。上游 20 组重复 prompt 中 18 组答案不同，构建期把同组全部可接受答案按出现顺序 union 进 `judge.answers`（本版入选行中 7 行 narrativeqa 因此恢复被丢弃的参考答案，如 `A monk.` / `a priest`）。
 - **已知取舍**：16–32K 桶只有英文（中文 LongBench v1 文档最长约 1.7 万 token，仅 1 条候选）；中文长文集中在 4–16K。长度分层是**抽样口径**，不是性能档位。
@@ -348,7 +348,7 @@ reports/dataset-build/accuracy/
   判题契约、分场景辅助信息（学科/任务/类别/年级/难度层）；不写构造时间等冗余字段。
 - `messages` 已含完整 prompt（含场景模板与指令），runner 不再二次渲染；
 - `judge` 是判题契约，判题器只读这份字段 + 模型响应；**每行必须包含 `judge.max_new_tokens`**（§6.1），不再依赖场景默认回退；
-- `input_tokens` 由参考 tokenizer（MiniCPM5-1B）对 prompt 内容计数，不含 chat template 控制 token；
+- `input_tokens` 由通用参考 tokenizer（**cl100k_base**，OpenAI 业界通用口径，与性能侧同资产）对 prompt 内容计数，不含 chat template/特殊 token；**不绑定任何模型**（用户 2026-11-10 决策：两侧均不得绑定模型分词器），long_context 长度分桶同样按 cl100k 计数；
 - `dataset` 的名称到上游 URL/许可/SHA-256 的映射在 `manifest.json` 的 `datasets` 字段；
 - `upstream_id` 可回溯到上游行且**全局唯一**（math_logic 的 GSM8K/CMATH 分别用 `gsm8k/test/<i>`、`cmath/test/<i>` 前缀）；`id` 全局唯一；manifest 记录 `upstream_id_format`。
 
@@ -462,7 +462,7 @@ dataset/raw/                     # 上游原始文件与工具资产（只读，
 ├── mbpp/sanitized-mbpp.json
 ├── bfcl/BFCL_v4_*.json + possible_answer/BFCL_v4_*.json
 ├── hotpotqa/distractor/validation-*.parquet
-├── tokenizer/MiniCPM5-1B/tokenizer.json   # 参考 tokenizer（input_tokens）
+├── tokenizer/cl100k_base/{cl100k_base.tiktoken,tokenizer.json}   # 通用参考 tokenizer（blob + derive_cl100k.py 确定性派生）
 └── nltk_data/{punkt.zip,punkt_tab.zip,tokenizers/}  # 官方 IFEval checker 依赖
 dataset/test/accuracy/           # 精度测试集（jsonl 不提交；manifest 提交；无 testset.yaml，保持隐藏）
 reports/dataset-build/accuracy/              # 抽样报告、难度试点等中间产物（不提交）

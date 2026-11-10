@@ -82,10 +82,13 @@ DATASETS: Dict[str, Dict[str, str]] = {
 #: Non-dataset assets required by builders / judges (reference tokenizer, NLTK data).
 TOOLING: Dict[str, Dict[str, str]] = {
     "tokenizer": {
-        "name": "MiniCPM5-1B tokenizer",
-        "source_url": "https://huggingface.co/openbmb/MiniCPM5-1B",
-        "license": "see model card",
-        "purpose": "reference tokenizer for input_tokens and long-context length filtering",
+        "name": "cl100k_base (OpenAI)",
+        "source_url": "https://github.com/openai/tiktoken",
+        "license": "MIT (tiktoken) / cl100k_base encoding data",
+        "purpose": (
+            "generic industry reference tokenizer for input_tokens and "
+            "long-context length filtering (model-agnostic)"
+        ),
     },
     "nltk": {
         "name": "NLTK punkt / punkt_tab",
@@ -104,26 +107,56 @@ def files_for(dataset: str) -> List[Dict[str, Any]]:
     return [f for f in load_spec()["files"] if f["dataset"] == dataset]
 
 
+def tokenizer_entry() -> Dict[str, Any]:
+    """The tokenizer asset the manifest should describe.
+
+    Prefers the derived ``tokenizer.json`` generated rule (the file the builder
+    actually reads) and falls back to the downloaded blob entry.
+    """
+    spec = load_spec()
+    for item in spec.get("generated", []):
+        if str(item.get("path", "")).endswith("tokenizer.json"):
+            return item
+    for item in spec["files"]:
+        if item.get("dataset") == "tokenizer":
+            return item
+    raise KeyError("raw_spec.json has no tokenizer asset entry")
+
+
 def dataset_provenance(scope: str = "data") -> Dict[str, Any]:
     """Manifest-ready provenance: dataset -> source URL, license, files.
 
     ``scope`` is ``"data"`` (the nine evaluation datasets) or ``"tooling"``
-    (tokenizer / NLTK assets).
+    (tokenizer / NLTK assets; generated derived files are listed with their
+    ``derived_by`` script).
     """
     meta = DATASETS if scope == "data" else TOOLING
+    spec = load_spec()
     out: Dict[str, Any] = {}
     for dataset, info in meta.items():
-        files = files_for(dataset)
-        if not files:
+        files = [f for f in spec["files"] if f["dataset"] == dataset]
+        entries = [
+            {"path": f["path"], "bytes": f["bytes"], "sha256": f["sha256"]}
+            for f in files
+        ]
+        if scope == "tooling":
+            for item in spec.get("generated", []):
+                if item.get("dataset") == dataset:
+                    entry = {
+                        "path": item["path"],
+                        "bytes": item.get("bytes"),
+                        "sha256": item.get("sha256"),
+                    }
+                    if item.get("generator"):
+                        entry["derived_by"] = item["generator"]
+                    entries.append(entry)
+        if not entries:
             continue
         out[dataset] = {
             "name": info["name"],
             "source_url": info["source_url"],
             "license": info["license"],
-            "files": [
-                {"path": f["path"], "bytes": f["bytes"], "sha256": f["sha256"]}
-                for f in files
-            ],
+            "files": entries,
         }
         if "used_by" in info:
             out[dataset]["used_by"] = info["used_by"]

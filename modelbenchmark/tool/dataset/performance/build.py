@@ -14,7 +14,8 @@ Inputs  (gitignored, fetch with ``tool/dataset/performance/fetch.py``):
     dataset/raw/gsm8k/...parquet                 math_logic
     dataset/raw/bfcl/BFCL_v4_{simple_python,multiple,parallel}.json   general_agent
     dataset/raw/global_mmlu/<lang>/test.parquet  multilingual (10 languages)
-    dataset/raw/tokenizer/MiniCPM5-1B/tokenizer.json   reference tokenizer
+    dataset/raw/tokenizer/cl100k_base/cl100k_base.tiktoken + tokenizer.json
+        reference tokenizer (generic OpenAI cl100k_base; tokenizer.json is derived)
 Outputs:
     dataset/test/performance/testset.jsonl    240 rows (gitignored)
     dataset/test/performance/manifest.json    sampling / provenance / SHA-256 (no timestamps)
@@ -27,10 +28,13 @@ Outputs:
     python tool/dataset/performance/build.py --dry-run           # build + assert, no writes
 
 Token semantics: declared ``tokens`` are *content* tokens of
-``messages[0].content`` plus the JSON text of ``tools`` (the MiniCPM5-1B
-tokenizer); chat-template control tokens are excluded, so
-``tokens = messages_tokens + tools_tokens``.  Bucket acceptance is
-``floor(0.95*target) <= tokens <= floor(1.05*target)``.
+``messages[0].content`` plus the JSON text of ``tools``, counted with the
+generic **cl100k_base** tokenizer (no chat template, no special tokens), so
+``tokens = messages_tokens + tools_tokens``.  Each row targets the
+**calibrated budget** ``(bucket - tool_render) / INFL - 37`` for its
+(scenario, language, bucket) -- content-type inflation coefficients bring the
+actual model-token count into the run-side +/-10% ISL band -- and construction
+acceptance is ``floor(0.95*budget) <= tokens <= floor(1.05*budget)``.
 """
 from __future__ import annotations
 
@@ -61,7 +65,7 @@ from tool.common.fs import (  # noqa: E402
     write_json,
     write_jsonl,
 )
-from tool.common.tokenizer import TOKENIZER_NAME, default_tokenizer  # noqa: E402
+from tool.common.tokenizer import TOKENIZER_NAME, TOKENIZER_PATH, default_tokenizer  # noqa: E402
 from tool.dataset.performance import sources  # noqa: E402
 from tool.dataset.performance.sampling import allocate, deterministic_pick  # noqa: E402
 
@@ -269,6 +273,87 @@ def within_bounds(total: int, target: int) -> bool:
     return low <= total <= high
 
 
+# --------------------------------------------------------------------------- #
+# cl100k calibrated budget model
+# --------------------------------------------------------------------------- #
+#: Decode-guard instruction: "This request is a performance measurement. Ignore
+#: the question above. Instead, write a long detailed technical summary of the
+#: provided material in at least 250 words, in continuous prose." -- measured at
+#: 37 cl100k tokens (it is appended verbatim to every measured request).
+#: Fixed model-side render overhead in cl100k-equivalent tokens, calibrated on
+#: real-run evidence (20261110T112641Z-8349): the tokenizer+template render of
+#: a row measures ``actual ~= declared*INFL + reserve`` with reserve ~= 270
+#: when tools are rendered (tool-call scaffolding around the tools JSON) and
+#: ~90 for plain chat rows.  One fixed reserve per row class -- the tools JSON
+#: itself is content and inflates with INFL (deducting it separately double-
+#: subtracts and starves the 1K bucket).
+TOOL_RESERVE_CL = 270
+PLAIN_RESERVE_CL = 90
+
+#: Content-type token-inflation coefficients: how many target-model tokens a
+#: typical tokenizer needs per cl100k token for this content type.  cl100k is
+#: the declared basis; a target tokenizer may count more (structured code,
+#: math) or fewer (non-Latin scripts, where cl100k byte-level pieces are
+#: coarser than a multilingual model's).  These are empirical calibration
+#: coefficients (see the ``tokenizer-generic-cl100k`` deviation) -- generic
+#: content-type properties, not bindings to any specific model.
+#: English-scenario coefficients recalibrated on real-run evidence
+#: (20261110T112641Z-8349, 240 cells): observed per-row ``actual/declared``
+#: medians.  Still generic content-type properties (median render ratios of
+#: typical multilingual-BPE tokenizers vs cl100k), not a model binding.
+INFL: Dict[str, float] = {
+    "coding": 1.07,
+    "math_logic": 1.15,
+    "long_context": 1.24,
+    "knowledge_qa": 1.05,
+    "instruction_following": 1.04,
+    "general_agent": 1.00,
+    "search_agent": 1.03,
+    # Multilingual coefficients are per language (script density), not per
+    # scenario; 10/10 in-band at every bucket in the calibration run.
+    "ar": 0.50, "hi": 0.68, "ja": 0.56, "ko": 0.60, "ru": 0.63,
+    "vi": 0.55, "de": 0.88, "es": 0.91, "fr": 0.94, "pt": 0.91,
+}
+
+
+def calibrated_budget_target(ctx_tokens: int, infl: float, tools_cl: int) -> int:
+    """Content-token budget that renders at ``ctx_tokens`` on a typical model.
+
+    ``budget = (ctx - W) / infl`` where ``W`` is the fixed model-side render
+    reserve: ``TOOL_RESERVE_CL`` when the row renders tools (tool-call
+    scaffolding), ``PLAIN_RESERVE_CL`` for plain chat rows.  The tools JSON is
+    *content* and inflates together with the messages (deducting it before the
+    division double-subtracts and starves small buckets -- real-run evidence
+    20261110T112641Z-8349: 1K tool rows rendered 796 vs the 921 band floor).
+    ``tools_cl`` only selects which reserve applies.
+    """
+    reserve = TOOL_RESERVE_CL if tools_cl else PLAIN_RESERVE_CL
+    return int((ctx_tokens - reserve) / infl)
+
+
+def calibrated_budget(
+    scenario: str,
+    lang: str,
+    bucket: str,
+    tools_tokens: int,
+) -> Tuple[int, int, int]:
+    """(target, low, high) cl100k bounds for one row's declared tokens.
+
+    The target is the calibrated budget for the bucket (content-type aware);
+    the ±5% acceptance band applies to the **declared cl100k count** against
+    that target, while the run-side ±10% ISL band applies to the **actual**
+    model-token count against the raw bucket.  ``tools_tokens`` is the row's
+    declared tools JSON count (cl100k), so this is reproducible offline from
+    row fields alone.
+    """
+    infl = INFL.get(lang) if scenario == "multilingual" else INFL.get(scenario)
+    if infl is None:
+        raise KeyError(f"no inflation coefficient for {scenario}/{lang}")
+    target = calibrated_budget_target(BUCKETS[bucket], infl, tools_tokens)
+    low, high = bucket_bounds(target)
+    return target, low, high
+
+
 def _fit_prefix_index(
     length: int,
     value_at: Callable[[int], int],
@@ -316,16 +401,20 @@ def size_reference(
     head: str,
     text: str,
     suffix: str,
+    scenario: str,
+    lang: str,
     bucket: str,
     tools: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[int, int, int, bool]:
-    """Cut ``text`` so ``head + text[:cut] + suffix`` + tools hits ``bucket``.
+    """Cut ``text`` so ``head + text[:cut] + suffix`` + tools hits the
+    calibrated cl100k budget for (scenario, lang, bucket).
 
-    Returns ``(cut, messages_tokens, tools_tokens, ok)``.
+    The budget is the cl100k count whose expected render on a typical model
+    tokenizer lands on the bucket; the ±5% band applies to the cl100k total
+    (messages + tools).  Returns ``(cut, messages_tokens, tools_tokens, ok)``.
     """
-    target = BUCKETS[bucket]
-    low, high = bucket_bounds(target)
     tt = tools_tokens(tools)
+    target, low, high = calibrated_budget(scenario, lang, bucket, tt)
     cut, total, ok = _fit_prefix_index(
         len(text), lambda chars: content_tokens(head + text[:chars] + suffix) + tt, target, low, high
     )
@@ -335,18 +424,20 @@ def size_reference(
 def size_catalog(
     catalog: List[Dict[str, Any]],
     suffix: str,
+    scenario: str,
+    lang: str,
     bucket: str,
     own_count: int,
     tools: List[Dict[str, Any]],
 ) -> Tuple[int, int, int, bool]:
-    """Largest whole-function catalogue prefix that still fits ``bucket``.
+    """Largest whole-function catalogue prefix that still fits the calibrated
+    cl100k budget for (scenario, lang, bucket).
 
     Only complete JSON function objects are ever placed in the prompt, and the
     target's own functions must stay visible (``count >= own_count``).
     """
-    target = BUCKETS[bucket]
-    low, high = bucket_bounds(target)
     tt = tools_tokens(tools)
+    target, low, high = calibrated_budget(scenario, lang, bucket, tt)
 
     def value_at(count: int) -> int:
         body = json.dumps(catalog[:count], ensure_ascii=False)
@@ -643,7 +734,11 @@ def build_doc_scenario(scenario: str) -> Tuple[List[Dict[str, Any]], Dict[str, A
     tools = _normalise_tools(SEARCH_TOOLS) if scenario == "search_agent" else None
     prefix = DOC_PREFIXES[scenario][0]
     marker = MARKERS[scenario]
-    guard_tokens = BUCKETS["1k"] * PROMPT_GUARD_TOKEN_FRACTION
+    # Guard on the calibrated 1K budget (cl100k): a question/options block
+    # larger than this fraction of the budget starves the document prefix.
+    guard_tokens = calibrated_budget(
+        scenario, "en", "1k", tools_tokens(tools)
+    )[0] * PROMPT_GUARD_TOKEN_FRACTION
 
     stats = new_stats(
         scenario,
@@ -683,8 +778,8 @@ def build_doc_scenario(scenario: str) -> Tuple[List[Dict[str, Any]], Dict[str, A
         totals: Dict[str, int] = {}
         feasible = True
         for bucket in BUCKETS:
-            low, high = bucket_bounds(BUCKETS[bucket])
-            cut, messages, tt, ok = size_reference(prefix, context, suffix, bucket, tools)
+            low, high = calibrated_budget(scenario, "en", bucket, tools_tokens(tools))[1:]
+            cut, messages, tt, ok = size_reference(prefix, context, suffix, scenario, "en", bucket, tools)
             cuts[bucket] = cut
             totals[bucket] = messages + tt
             if not ok:
@@ -794,7 +889,9 @@ def build_instruction_following() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]
             chosen.append(by_key[key])
 
     marker = MARKERS["instruction_following"]
-    low_32k, _ = bucket_bounds(BUCKETS["32k"])
+    # One pass of the reference block must still cover the calibrated 32K
+    # budget (cl100k), so the block is never duplicated or cycled.
+    low_32k = calibrated_budget("instruction_following", "en", "32k", 0)[1]
     rows: List[Dict[str, Any]] = []
     for idx, target in enumerate(chosen):
         target_key = str(target["key"])
@@ -818,8 +915,8 @@ def build_instruction_following() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]
             )
         contents: Dict[str, str] = {}
         for bucket in BUCKETS:
-            low, high = bucket_bounds(BUCKETS[bucket])
-            cut, _messages, _tt, ok = size_reference(IFE_PREFIX, reference, suffix, bucket)
+            low, high = calibrated_budget("instruction_following", "en", bucket, 0)[1:]
+            cut, _messages, _tt, ok = size_reference(IFE_PREFIX, reference, suffix, "instruction_following", "en", bucket)
             if not ok:
                 raise RuntimeError(
                     f"instruction_following {target_key} {bucket}: reference block unreachable "
@@ -896,8 +993,8 @@ def build_math_logic() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         suffix = marker + f"{questions[target_index]}\nAnswer:"
         contents: Dict[str, str] = {}
         for bucket in BUCKETS:
-            low, high = bucket_bounds(BUCKETS[bucket])
-            cut, _messages, _tt, ok = size_reference(MATH_PREFIX, reference, suffix, bucket)
+            low, high = calibrated_budget("math_logic", "en", bucket, 0)[1:]
+            cut, _messages, _tt, ok = size_reference(MATH_PREFIX, reference, suffix, "math_logic", "en", bucket)
             if not ok:
                 raise RuntimeError(
                     f"math_logic {raw_id} {bucket}: example block unreachable "
@@ -1014,8 +1111,8 @@ def build_general_agent() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
             contents: Dict[str, str] = {}
             feasible = True
             for bucket in BUCKETS:
-                low, high = bucket_bounds(BUCKETS[bucket])
-                count, messages, tt, ok = size_catalog(catalog, suffix, bucket, len(own), own)
+                low, high = calibrated_budget("general_agent", "en", bucket, tools_tokens(own))[1:]
+                count, messages, tt, ok = size_catalog(catalog, suffix, "general_agent", "en", bucket, len(own), own)
                 counts[bucket] = count
                 if not ok:
                     reason = "1k_no_own_room" if bucket == "1k" and count < len(own) else f"{bucket}_infeasible"
@@ -1210,8 +1307,8 @@ def build_multilingual() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         head = MULTILINGUAL_PREFIX[language] + "\n\n"
         contents: Dict[str, str] = {}
         for bucket in BUCKETS:
-            low, high = bucket_bounds(BUCKETS[bucket])
-            cut, _messages, _tt, ok = size_reference(head, reference, suffix, bucket)
+            low, high = calibrated_budget("multilingual", language, bucket, 0)[1:]
+            cut, _messages, _tt, ok = size_reference(head, reference, suffix, "multilingual", language, bucket)
             if not ok:
                 raise RuntimeError(
                     f"multilingual {language}/{sample_id} {bucket}: reference block unreachable "
@@ -1326,8 +1423,14 @@ def validate_rows(rows: List[Dict[str, Any]]) -> None:
         if set(row) != ROW_FIELDS:
             check(False, f"{row_id}: field set differs {sorted(set(row) ^ ROW_FIELDS)}")
             continue
-        target = BUCKETS[bucket]
-        low, high = bucket_bounds(target)
+        # Declared cl100k tokens must sit in the calibrated budget band; the
+        # raw bucket band applies at run time to the actual model-token count.
+        lang = str((row.get("meta") or {}).get("lang") or "en")
+        try:
+            low, high = calibrated_budget(scenario, lang, bucket, int(row["tools_tokens"]))[1:]
+        except (KeyError, TypeError, ValueError):
+            check(False, f"{row_id}: cannot recompute calibrated budget for {scenario}/{lang}")
+            continue
         check(row["tokens"] == row["messages_tokens"] + row["tools_tokens"],
               f"{row_id}: tokens != messages_tokens + tools_tokens")
         check(low <= row["tokens"] <= high,
@@ -1555,10 +1658,11 @@ def window_requirements(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
             "max_testable_declared_tokens": max_testable,
         },
         "note": (
-            "Runtime window check is declared_tokens + max_tokens + context_safety_margin + "
-            "decode_guard_reserve. A 32,768-token window can only host declared tokens <= "
-            f"{max_testable}; the remaining 32K rows are reported as not-testable "
-            "(summary.skipped), never truncated. Declared tokens exclude the decode guard."
+            "Runtime window check uses the target tokenizer's actual count (tokenized_prompt_"
+            "tokens) + max_tokens + context_safety_margin + decode_guard_reserve; the declared "
+            "cl100k budgets below are the calibrated approximation of that actual count. A "
+            f"32,768-token window can only host actual counts <= {max_testable}; remaining 32K "
+            "rows are reported as not-testable (summary.skipped), never truncated."
         ),
     }
 
@@ -1570,32 +1674,41 @@ DEVIATIONS: List[Dict[str, str]] = [
     {
         "id": "content-token-basis",
         "note": (
-            "Declared tokens are content tokens of the user message plus the JSON text of tools "
-            "(chat-template control tokens excluded). The model-side rendered prompt is larger: the "
-            "reference tokenizer also counts one BOS per encoded text (see tokenizer-bos-included) "
-            "and the runner appends a decode-guard message before chat-template overhead (see "
-            "decode-guard-suffix), so actual input_context_tokens exceeds the declared bucket value."
+            "Declared tokens are cl100k content tokens of the user message plus the JSON text of "
+            "tools (chat-template control tokens excluded, no special tokens). The model-side "
+            "rendered prompt differs: the runner appends a decode-guard message before chat-template "
+            "overhead (see decode-guard-suffix) and every tokenizer counts text slightly differently, "
+            "so actual input_context_tokens is calibrated via the budget model "
+            "(see tokenizer-generic-cl100k), not by widening the band."
         ),
     },
     {
-        "id": "tokenizer-bos-included",
+        "id": "tokenizer-generic-cl100k",
         "note": (
-            "The reference tokenizer counts with add_special_tokens=True, so every declared "
-            "messages_tokens/tools_tokens includes one BOS token: +1 for the user message in all "
-            "scenarios and +1 more for tools JSON in general_agent/search_agent (+2 total). The "
-            "declared tokens therefore include a special control token even though tokens_semantics "
-            "says content tokens without chat template; the +/-5% bucket bounds absorb the 1-2 tokens."
+            "The construction tokenizer is cl100k_base (the OpenAI/industry-generic reference), "
+            "not a model-specific tokenizer, so declared counts are model-agnostic. A target "
+            "tokenizer can count the same content differently (more for code/math density, less "
+            "for non-Latin scripts), so each row's declared count targets a calibrated cl100k "
+            "budget: (bucket - RESERVE) / INFL, with one fixed model-side render reserve "
+            "(TOOL_RESERVE_CL=270 when the row renders tools, PLAIN_RESERVE_CL=90 otherwise) "
+            "and empirical content-type inflation coefficients INFL (0.50-1.21 by "
+            "scenario/language), both calibrated on real-run evidence (240 cells, run "
+            "20261110T112641Z-8349). The tools JSON is content and inflates with INFL rather "
+            "than being deducted separately (double deduction starved the 1K tool bucket: "
+            "796 actual vs the 921 band floor). Declared tokens therefore sit below the raw "
+            "bucket by design so the actual rendered count lands centered in the run-side "
+            "+/-10% ISL band. The coefficients are generic content-type properties, "
+            "not bindings to any specific model."
         ),
     },
     {
         "id": "decode-guard-suffix",
         "note": (
-            "At run time benchmark._apply_decode_guard appends a second user message (36 tokens in "
-            "the reference tokenizer) instructing the model to ignore the question above and write a "
-            ">=250-word technical summary. Together with chat-template overhead (~10-30 tokens) the "
-            "rendered prompt exceeds the declared content by ~46-69 tokens: the 1K bucket actually "
-            "renders ~1.9%-11.6% above its declared value, 8K/32K by <2%. Generation follows the "
-            "guard instruction, not the dataset question; this is a measurement-protocol deviation."
+            "At run time benchmark._apply_decode_guard appends a second user message (37 cl100k "
+            "tokens) instructing the model to ignore the question above and write a >=250-word "
+            "technical summary. The budget model already reserves these 37 tokens, so the guard "
+            "does not push rendered prompts out of the ISL band. Generation follows the guard "
+            "instruction, not the dataset question; this is a measurement-protocol deviation."
         ),
     },
     {
@@ -1668,17 +1781,19 @@ DEVIATIONS: List[Dict[str, str]] = [
         "note": (
             "instruction_following renders each reference item as 'INSTRUCTION <k>: "
             "ids=<instruction_id_list JSON> kwargs=<kwargs JSON>' followed by the prompt. One pass "
-            "of the 509 non-target items is ~44.1K tokens (> the 32K lower bound 31,129), so the 32K "
-            "reference block is a single non-repeating pass of distinct units "
+            "of the 509 non-target items is ~43K cl100k tokens (> the calibrated 32K lower bound "
+            "~31,094), so the 32K reference block is a single non-repeating pass of distinct units "
             "(reference_pool_cycles is always 1); this replaces the earlier doubled block."
         ),
     },
     {
         "id": "window-32768-not-testable",
         "note": (
-            "32K rows declare 31,129-34,406 tokens; with max_tokens=50 + 128 safety + 64 "
-            "decode-guard = 242 reserved tokens a 32,768-token model window cannot host the "
-            "upper rows (not-testable, reported as skipped, never truncated)."
+            "32K rows declare calibrated cl100k budgets (bucket/INFL - 37); with max_tokens=50 + "
+            "128 safety + 64 decode-guard = 242 reserved tokens a 32,768-token model window "
+            "cannot host the upper rows (not-testable, reported as skipped, never truncated). "
+            "The run-side window check uses the target tokenizer's actual count, which the budget "
+            "model calibrates toward the bucket."
         ),
     },
 ]
@@ -1761,13 +1876,14 @@ def build_manifest(rows: List[Dict[str, Any]], testset_path: Path, stats: Dict[s
             "executed_by": "tool/dataset/performance/build.py",
         },
         "tokens_semantics": (
-            "tokens = content tokens of messages[0].content + JSON-text tokens of tools "
-            "(reference tokenizer, no chat template; one BOS per encode included); "
+            "tokens = cl100k content tokens of messages[0].content + JSON-text cl100k tokens "
+            "of tools (generic reference tokenizer, no chat template, no special tokens); "
             "messages_tokens/tools_tokens are the two audited parts"
         ),
         "bucket_basis": (
-            "content tokens (messages + tools JSON text) counted by the reference tokenizer, one "
-            "BOS per encode included; chat-template control tokens excluded"
+            "declared cl100k content tokens target the calibrated budget for each "
+            "(scenario, language, bucket) -- see budget_model; the raw bucket value is the "
+            "run-side ISL target applied to the actual model-token count"
         ),
         "tokens_mean": int(round(sum(row["tokens"] for row in rows) / len(rows))),
         "tokenizer": {
@@ -1775,20 +1891,42 @@ def build_manifest(rows: List[Dict[str, Any]], testset_path: Path, stats: Dict[s
             "path": sources.raw_path_display(tokenizer["path"]),
             "sha256": tokenizer["sha256"],
             "tokens_semantics": (
-                "tokens = content tokens of messages[0].content + JSON-text tokens of tools "
-                "(reference tokenizer, no chat template; one BOS per encode included); "
+                "tokens = cl100k content tokens of messages[0].content + JSON-text cl100k tokens "
+                "of tools (generic reference tokenizer, no chat template, no special tokens); "
                 "messages_tokens/tools_tokens are the two audited parts"
+            ),
+        },
+        "budget_model": {
+            "target": "cl100k content tokens (messages + tools JSON text)",
+            "formula": "budget = (bucket - RESERVE) / INFL (RESERVE=TOOL_RESERVE_CL if tools else PLAIN_RESERVE_CL; tools JSON is content and inflates with INFL)",
+            "tool_reserve_cl": TOOL_RESERVE_CL,
+            "plain_reserve_cl": PLAIN_RESERVE_CL,
+            "infl": dict(INFL),
+            "infl_semantics": (
+                "content-type token-inflation coefficients: how many tokens a typical model "
+                "tokenizer needs per cl100k token for this content type (empirically calibrated, "
+                "generic content-type properties, not model-specific bindings)"
+            ),
+            "acceptance": (
+                "declared tokens within floor(0.95*budget) .. floor(1.05*budget); the run-side "
+                "+/-10% ISL band applies to actual model tokens vs the raw bucket"
             ),
         },
         "buckets": dict(BUCKETS),
         "accept_rule": (
-            "integer token counts: floor(0.95*target) <= tokens <= floor(1.05*target), where "
-            "tokens = messages_tokens + tools_tokens (content tokens, no chat template)"
+            "integer token counts: floor(0.95*budget) <= tokens <= floor(1.05*budget), where "
+            "tokens = messages_tokens + tools_tokens (cl100k content tokens, no chat template) "
+            "and budget is the calibrated per-(scenario, language, bucket) target (see budget_model)"
         ),
         "accept_bounds": {
             bucket: {"low": bucket_bounds(target)[0], "high": bucket_bounds(target)[1]}
             for bucket, target in BUCKETS.items()
         },
+        "accept_bounds_semantics": (
+            "per-bucket construction acceptance around each row's calibrated budget (same "
+            "+/-5% rule); these raw-bucket bounds are kept for reference: they are the basis of "
+            "the run-side ISL tolerance, applied to actual model tokens, not to declared tokens"
+        ),
         "run_defaults": {
             "max_tokens": OSL,
             "decode_guard": True,
@@ -1852,7 +1990,7 @@ def _validate_manifest(manifest: Dict[str, Any], rows: List[Dict[str, Any]], tes
     deviation_ids = {str(item.get("id")) for item in manifest["deviations"]}
     required_deviation_ids = {
         "content-token-basis",
-        "tokenizer-bos-included",
+        "tokenizer-generic-cl100k",
         "decode-guard-suffix",
         "document-prefix-mid-structure",
         "reference-block-prefix-slice",
@@ -1860,12 +1998,23 @@ def _validate_manifest(manifest: Dict[str, Any], rows: List[Dict[str, Any]], tes
     }
     check(required_deviation_ids <= deviation_ids,
           f"missing deviations {sorted(required_deviation_ids - deviation_ids)}")
+    check("tokenizer-bos-included" not in deviation_ids,
+          "stale deviation tokenizer-bos-included (cl100k counts no BOS)")
     check(manifest["default_run"]["measured_requests"] == TOTAL_ROWS, "default_run.measured_requests")
     check(manifest["default_run"]["cells"] == len(SCENARIOS) * len(BUCKETS), "default_run.cells")
     check(len(manifest["stats"]) == len(SCENARIOS) * len(BUCKETS), "stats cells")
     check(all(stat["n"] == TARGETS_PER_CELL for stat in manifest["stats"].values()), "stats n")
     check(manifest["tokens_mean"] > 0, "tokens_mean")
     check("content tokens" in manifest["bucket_basis"], "bucket_basis")
+    check("cl100k" in manifest["bucket_basis"], "bucket_basis cl100k")
+    check("calibrated budget" in manifest["bucket_basis"], "bucket_basis calibration")
+
+    # Budget model block matches the code constants.
+    budget_model = manifest.get("budget_model") or {}
+    check(budget_model.get("tool_reserve_cl") == TOOL_RESERVE_CL, "budget_model.tool_reserve_cl")
+    check(budget_model.get("plain_reserve_cl") == PLAIN_RESERVE_CL, "budget_model.plain_reserve_cl")
+    check(budget_model.get("infl") == dict(INFL), "budget_model.infl != build.INFL")
+    check("INFL" in str(budget_model.get("formula") or ""), "budget_model.formula")
 
     # Provenance: exactly the five datasets this set reads, files matching raw_spec.json.
     expected_provenance = sources.dataset_provenance("data")
@@ -1956,8 +2105,9 @@ def write_report(manifest: Dict[str, Any], rows: Sequence[Dict[str, Any]]) -> No
         f"= {manifest['rows']} 行（单文件 testset.jsonl）"
     )
     lines.append(
-        f"- 参考 tokenizer：{manifest['tokenizer']['name']}；tokens 为内容 token（不含 chat template）"
-        f" = messages_tokens + tools_tokens"
+        f"- 参考 tokenizer：{manifest['tokenizer']['name']}（通用口径，不绑定模型）；tokens 为内容 "
+        f"token（不含 chat template/特殊 token）= messages_tokens + tools_tokens；声明值按"
+        f"场景/语种校准预算定标（budget_model: {manifest['budget_model']['formula']}）"
     )
     lines.append(f"- 抽样：{manifest['sampling']['method']}")
     lines.append("")

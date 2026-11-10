@@ -468,6 +468,15 @@ def _compare_aggregates(
                 )
         for metric, expected_dist in (expected_json.get("perf") or {}).items():
             compare_dist(where + f".perf[{metric}]", (actual.get("perf") or {}).get(metric), expected_dist)
+        # T-067: the all-sample calibre must round-trip too; a legacy
+        # aggregates.json without perf_all is only tolerated when the
+        # recomputation also produced none (empty means "no valid records").
+        for metric, expected_dist in (expected_json.get("perf_all") or {}).items():
+            compare_dist(
+                where + f".perf_all[{metric}]",
+                (actual.get("perf_all") or {}).get(metric),
+                expected_dist,
+            )
     for key in declared_cells.keys() - exp_cells.keys():
         issues.append(f"{run_rel}: cells[{key}]: not recomputable from records")
 
@@ -492,6 +501,13 @@ def _compare_aggregates(
                 )
         for metric, expected_dist in (expected_json.get("perf") or {}).items():
             compare_dist(where + f".perf[{metric}]", (actual.get("perf") or {}).get(metric), expected_dist)
+        # T-067: same dual-calibre check as cells (see above).
+        for metric, expected_dist in (expected_json.get("perf_all") or {}).items():
+            compare_dist(
+                where + f".perf_all[{metric}]",
+                (actual.get("perf_all") or {}).get(metric),
+                expected_dist,
+            )
     for key in declared_overall.keys() - exp_overall.keys():
         issues.append(f"{run_rel}: overall[{key}]: not recomputable from records")
     return issues

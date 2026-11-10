@@ -26,8 +26,12 @@ lists its runs as ``{"run_id": ..., "run_path": "runs/<run_id>"}``.
 Three sheets, names and headers unchanged:
 
 1. ``硬件配置``    machine / OS / oMLX / model configuration and run parameters
-2. ``模型性能平均`` one row per (model, context bucket)
-3. ``详细数据``    one row per measured sample
+2. ``模型性能平均`` one row per (model, context bucket); the default metric
+   columns are the ISL in-band calibre (the aggregates' means), trailed by
+   全样本 (all valid samples, out-of-band included) means and the out-of-band
+   TTFT shift, plus a one-line calibre note
+3. ``详细数据``    one row per measured sample, annotated with its ISL band
+   membership and relative ISL deviation
 
 Excel cells are limited to 32,767 characters.  The prompt bodies now live in the
 blob store in full, so the head/tail clipping in :func:`_clip` is *more* important
@@ -357,6 +361,152 @@ def _response_output_text(response: Dict[str, Any]) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# ISL band annotation + all-sample (dual-calibre) statistics
+# --------------------------------------------------------------------------- #
+
+#: Same ±10% single-band tolerance as ``domain.context_tolerance``; kept local
+#: so the export layer stays a pure reader of the schema-3.0 evidence.
+_ISL_TOLERANCE_RATIO = 0.10
+
+#: One-line calibre note (the user rejected a dedicated explanation sheet):
+#: column names carry the calibre, this single trailing line disambiguates it.
+#: Default columns are the all-sample calibre (非过滤); the「（±10%过滤）」block
+#: repeats the aggregates' in-band comparison calibre.
+_CALIBRE_NOTE = (
+    "注：默认列为全样本口径（含 ISL 出带样本）；（±10%过滤）列为入带口径，"
+    "跨 run 比较以该列与样本量标记为准"
+)
+
+
+def _isl_tolerance(record: Dict[str, Any]) -> Dict[str, Any]:
+    """``request.context_meta.isl_tolerance`` (empty dict when absent)."""
+    request = record.get("request") or {}
+    context_meta = request.get("context_meta") or {}
+    tolerance = context_meta.get("isl_tolerance") or {}
+    return tolerance if isinstance(tolerance, dict) else {}
+
+
+def _isl_actual_tokens(record: Dict[str, Any]) -> Optional[int]:
+    """Actual ISL: pre-request tokenizer count, falling back to server usage."""
+    actual = (record.get("request") or {}).get("tokenized_prompt_tokens")
+    if actual is None:
+        actual = (record.get("metrics") or {}).get("input_context_tokens")
+    try:
+        return None if actual is None else int(actual)
+    except (TypeError, ValueError):
+        return None
+
+
+def _isl_target_tokens(record: Dict[str, Any]) -> Optional[int]:
+    """Target ISL: the declared bucket, falling back to the tolerance block."""
+    target = record.get("context_length") or _isl_tolerance(record).get("target")
+    try:
+        return None if target is None else int(target)
+    except (TypeError, ValueError):
+        return None
+
+
+def _record_isl_in_band(record: Dict[str, Any]) -> bool:
+    """ISL band membership for one record, mirroring ``metrics.isl_band``.
+
+    ``request.context_meta.isl_tolerance.ok`` is authoritative; without it the
+    ±10% band on the actual token count decides.  Records carrying no actual
+    or target evidence stay in band — legacy data has no basis to exclude and
+    the aggregate layer counts them the same way (``n_isl_in_band``).
+    """
+    ok = _isl_tolerance(record).get("ok")
+    if isinstance(ok, bool):
+        return ok
+    actual = _isl_actual_tokens(record)
+    target = _isl_target_tokens(record)
+    if actual is None or not target:
+        return True
+    return abs(actual - target) <= _ISL_TOLERANCE_RATIO * target
+
+
+def _isl_deviation_pct(record: Dict[str, Any]) -> Optional[float]:
+    """Relative ISL deviation ``(actual - target) / target * 100`` (1 decimal).
+
+    Blank when the record carries no actual/target evidence: an empty cell,
+    never a fabricated 0.
+    """
+    actual = _isl_actual_tokens(record)
+    target = _isl_target_tokens(record)
+    if actual is None or not target:
+        return None
+    return round((actual - target) / target * 100, 1)
+
+
+def _bucket_key(value: Any) -> Any:
+    """Normalise a context bucket to int so str/int keys still match."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def _bucket_measured_records(
+    run_dir: Optional[Path],
+) -> Dict[Any, List[Dict[str, Any]]]:
+    """Group measured+ok records by their declared context bucket.
+
+    These are the *all-sample* calibre rows: every valid sample of the bucket,
+    out-of-band ones included (the aggregates' means already exclude them).
+    """
+    grouped: Dict[Any, List[Dict[str, Any]]] = {}
+    for record in _iter_records(run_dir):
+        if record.get("phase") != "measured" or record.get("status") != "ok":
+            continue
+        grouped.setdefault(_bucket_key(record.get("context_length")), []).append(record)
+    return grouped
+
+
+def _mean(values: Sequence[Any]) -> Optional[float]:
+    """Mean over the non-None numeric values (3 decimals, like aggregates)."""
+    numbers = [
+        float(value)
+        for value in values
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    ]
+    if not numbers:
+        return None
+    return round(sum(numbers) / len(numbers), 3)
+
+
+def _all_sample_mean(records: List[Dict[str, Any]], field: str) -> Optional[float]:
+    return _mean([(record.get("metrics") or {}).get(field) for record in records])
+
+
+def _all_sample_count(records: List[Dict[str, Any]], field: str) -> Optional[int]:
+    """Numeric-value count for the legacy record fallback of ``TG TPS有效数``."""
+    return sum(
+        1
+        for value in ((record.get("metrics") or {}).get(field) for record in records)
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    )
+
+
+def _dist_stat(perf: Dict[str, Any], key: str, field: str) -> Any:
+    """One statistic of a named distribution inside a ``perf`` block."""
+    return (perf.get(key) or {}).get(field)
+
+
+def _band_shift_pct(
+    all_sample: Optional[float], in_band: Optional[float]
+) -> Optional[str]:
+    """Relative TTFT shift of the all-sample mean vs the in-band mean.
+
+    ``(全样本 - 入带) / 入带 * 100`` with a sign, e.g. ``+100.0%``; an exact
+    zero renders as ``0.0%``.  Blank when either mean is missing (or the
+    in-band mean is 0, which has no meaningful ratio).
+    """
+    if all_sample is None or in_band is None or in_band == 0:
+        return None
+    shift = round((all_sample - in_band) / in_band * 100, 1)
+    return "0.0%" if shift == 0 else f"{shift:+.1f}%"
+
+
+# --------------------------------------------------------------------------- #
 # workbook building
 # --------------------------------------------------------------------------- #
 
@@ -535,11 +685,19 @@ def _sheet_averages(wb: Any, runs: List[Dict[str, Any]]) -> None:
     ws = wb.create_sheet(SHEET_AVERAGES)
     headers = [
         "测试模型", "模型ID", "模型大小(GB)", "上下文档位", "状态", "数据集数", "样本数", "有效数", "错误数",
-        "触顶数(max_tokens)", "TTFT均值(ms)", "TTFT中位数(ms)", "TTFT P95(ms)",
+        "触顶数(max_tokens)",
+        # Default calibre: all-sample (非过滤) means over every measured+ok
+        # record of the bucket.  Legacy aggregates without ``perf_all`` fall
+        # back to recomputing from records.jsonl.
+        "TTFT均值(ms)", "TTFT中位数(ms)", "TTFT P95(ms)",
         "TG TPS均值", "TG TPS有效数", "TPOT均值(ms)", "E2E均值(ms)", "Prefill TPS均值",
         "峰值内存均值(GB)", "峰值内存最大(GB)", "峰值CPU均值(%)",
         "输入token均值", "输入字符均值", "输出token均值", "耗时(s)",
         "跳过数", "内存错误数", "TG无效数", "ISL入带数", "ISL出带数", "样本量标记",
+        # ±10% in-band (comparison) calibre, explicitly labeled.
+        "TTFT均值(ms)（±10%过滤）", "TG TPS均值（±10%过滤）",
+        "TG TPS有效数（±10%过滤）", "E2E均值(ms)（±10%过滤）",
+        "出带TTFT波动范围",
     ]
     _header(ws, headers)
     for run in runs:
@@ -549,6 +707,7 @@ def _sheet_averages(wb: Any, runs: List[Dict[str, Any]]) -> None:
         aggregates = run.get("aggregates") or {}
         overall_rows = aggregates.get("overall") or []
         skipped = outcome.get("skipped") or []
+        bucket_records = _bucket_measured_records(run.get("path"))
         status = str(run_json.get("status") or outcome.get("status") or "ok")
         if outcome.get("cancelled") or run_json.get("cancelled"):
             status = "cancelled"
@@ -558,18 +717,32 @@ def _sheet_averages(wb: Any, runs: List[Dict[str, Any]]) -> None:
         # A run with no valid records still gets one status row (per model).
         for overall in (overall_rows or [{}]):
             perf = overall.get("perf") or {}
+            perf_all = overall.get("perf_all") or {}
+            records = bucket_records.get(_bucket_key(overall.get("context_length"))) or []
+            has_perf_all = bool(perf_all)
+
             def mean(key: str) -> Any:
                 dist = perf.get(key) or {}
                 return dist.get("mean")
-            def median(key: str) -> Any:
-                dist = perf.get(key) or {}
-                return dist.get("median")
-            def p95(key: str) -> Any:
-                dist = perf.get(key) or {}
-                return dist.get("p95")
-            def count(key: str) -> Any:
-                dist = perf.get(key) or {}
-                return dist.get("n")
+
+            def all_dist(key: str) -> Dict[str, Any]:
+                return perf_all.get(key) or {}
+
+            def all_stat(key: str, field: str) -> Any:
+                if has_perf_all:
+                    return all_dist(key).get(field)
+                return None
+
+            def all_mean(key: str) -> Any:
+                if has_perf_all:
+                    return all_dist(key).get("mean")
+                return _all_sample_mean(records, key)
+
+            def all_count(key: str) -> Any:
+                if has_perf_all:
+                    return all_dist(key).get("n")
+                return _all_sample_count(records, key)
+
             row = [
                 _model_label(run),
                 _model_id(run),
@@ -581,26 +754,31 @@ def _sheet_averages(wb: Any, runs: List[Dict[str, Any]]) -> None:
                 overall.get("n_valid"),
                 overall.get("n_error"),
                 overall.get("n_length_capped"),
-                mean("ttft_ms"), median("ttft_ms"), p95("ttft_ms"),
-                mean("gen_tps"), count("gen_tps"), mean("tpot_ms"), mean("e2e_ms"), mean("prefill_tps"),
-                mean("peak_memory_gb"), overall.get("peak_memory_gb_max"),
-                mean("peak_cpu_pct"),
-                mean("input_context_tokens"), mean("input_context_chars"), mean("completion_tokens"),
+                all_mean("ttft_ms"), all_stat("ttft_ms", "median"), all_stat("ttft_ms", "p95"),
+                all_mean("gen_tps"), all_count("gen_tps"), all_mean("tpot_ms"), all_mean("e2e_ms"), all_mean("prefill_tps"),
+                all_mean("peak_memory_gb"), overall.get("peak_memory_gb_max"),
+                all_mean("peak_cpu_pct"),
+                all_mean("input_context_tokens"), all_mean("input_context_chars"), all_mean("completion_tokens"),
                 run_json.get("duration_s", entry.get("duration_s")),
                 len(skipped), outcome.get("memory_errors") or 0,
                 overall.get("n_gen_tps_invalid") or 0,
                 overall.get("n_isl_in_band") or 0,
                 overall.get("n_isl_out_of_band") or 0,
                 "insufficient_samples" if overall.get("insufficient_samples") else "ok",
+                mean("ttft_ms"), mean("gen_tps"), _dist_stat(perf, "gen_tps", "n"), mean("e2e_ms"),
+                _band_shift_pct(all_mean("ttft_ms"), mean("ttft_ms")),
             ]
             ws.append([_number(value) for value in row])
     if ws.max_row == 1:
         ws.append(["无模型结果"])
+    # Single trailing note line; the calibre itself is carried by the column
+    # names (no dedicated explanation sheet).
+    ws.append([_CALIBRE_NOTE])
     _set_widths(ws, {
         1: 28, 2: 28, 3: 12, 4: 12, 5: 12, 6: 10, 7: 9, 8: 9, 9: 9,
         10: 16, 11: 14, 12: 14, 13: 12, 14: 12, 15: 12, 16: 12, 17: 14,
         18: 15, 19: 15, 20: 14, 21: 13, 22: 13, 23: 12, 24: 10, 25: 9, 26: 11, 27: 11,
-        28: 12, 29: 12, 30: 12, 31: 22,
+        28: 12, 29: 12, 30: 12, 31: 22, 32: 20, 33: 20, 34: 21, 35: 21, 36: 16,
     })
 
 
@@ -622,6 +800,9 @@ def _sheet_details(wb: Any, runs: List[Dict[str, Any]], store: PromptBlobStore) 
         "TTFT(ms)", "TG TPS", "TPOT(ms)", "E2E(ms)", "Prefill TPS", "Total TPS",
         "峰值CPU(%)", "均值CPU(%)", "cached tokens", "finish_reason（length=触顶）", "状态",
         "上下文截断", "错误/备注", "时间戳",
+        # ISL annotation: in-band flag + relative deviation vs the bucket
+        # target, so the out-of-band rows are visible sample by sample.
+        "ISL入带", "ISL偏差%",
     ]
     _header(ws, headers)
     row_count = 0
@@ -669,6 +850,8 @@ def _sheet_details(wb: Any, runs: List[Dict[str, Any]], store: PromptBlobStore) 
                 bool(request.get("truncated")),
                 _clip(record.get("error"), 1000),
                 record.get("timestamp"),
+                _record_isl_in_band(record),
+                _number(_isl_deviation_pct(record)),
             ])
             row_count += 1
     if row_count == 0:
@@ -678,6 +861,7 @@ def _sheet_details(wb: Any, runs: List[Dict[str, Any]], store: PromptBlobStore) 
         7: 70, 8: 14, 9: 12, 10: 55, 11: 12, 12: 11, 13: 14,
         14: 11, 15: 11, 16: 11, 17: 11, 18: 12, 19: 12,
         20: 11, 21: 11, 22: 12, 23: 14, 24: 12, 25: 10, 26: 40, 27: 24,
+        28: 10, 29: 11,
     })
     # Keep long text readable but avoid enormous row heights.
     from openpyxl.styles import Alignment

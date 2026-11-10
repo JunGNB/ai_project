@@ -921,8 +921,11 @@ function renderOverall(summary, data) {
   const legacy = data.legacy === true || summary.legacy === true;
   const rows = (summary.overall || []).map((entry) => {
     const p = entry.perf || {};
-    const tpsN = p.gen_tps?.n;
-    const tps = fmt(p.gen_tps?.mean) + (tpsN != null && tpsN < entry.n_valid ? ` (${tpsN}/${entry.n_valid})` : "");
+    const pa = entry.perf_all || {};
+    const tpsN = pa.gen_tps?.n;
+    const tps = fmt(pa.gen_tps?.mean) + (tpsN != null && tpsN < entry.n_valid ? ` (${tpsN}/${entry.n_valid})` : "");
+    const fTpsN = p.gen_tps?.n;
+    const fTps = fmt(p.gen_tps?.mean) + (fTpsN != null && fTpsN < entry.n_isl_in_band ? ` (${fTpsN}/${entry.n_isl_in_band})` : "");
     return `<tr>
       <td>${esc(entry.model)}</td>
       <td>${entry.context_length != null ? bucketLabel(entry.context_length) : `<span class="pill soft" title="没有声明的上下文档位：该行是跨全部上下文的合并值，不要与按档位结果混比">全部*</span>`}</td>
@@ -931,17 +934,19 @@ function renderOverall(summary, data) {
       <td>${int(entry.n_valid)}</td>
       <td title="finish_reason=length（达到 max_tokens）；这些样本正常参与全部平均">${int(entry.n_length_capped)}</td>
       <td title="TG TPS 被抑制的样本数">${int(entry.n_gen_tps_invalid)}</td>
-      <td title="target tokenizer 实际 prompt 在 ±10% 带内的样本数；只有这些进入平均">${int(entry.n_isl_in_band)}</td>
-      <td title="actual 在 ±10% 带外、仍测量但不参与平均的样本数">${int(entry.n_isl_out_of_band)}</td>
-      <td>${fmt(p.ttft_ms?.mean)}</td>
+      <td title="target tokenizer 实际 prompt 在 ±10% 带内的样本数；只有这些进入（±10%过滤）列">${int(entry.n_isl_in_band)}</td>
+      <td title="actual 在 ±10% 带外、仍测量但不进入（±10%过滤）列的样本数">${int(entry.n_isl_out_of_band)}</td>
+      <td title="全样本口径（含 ISL 出带样本）">${fmt(pa.ttft_ms?.mean)}</td>
       <td>${tps}</td>
-      <td>${fmt(memGb(p))}</td>
-      <td>${fmt(p.input_context_tokens?.mean, 0)}</td>
+      <td title="±10%入带口径（跨 run 比较口径）">${fmt(p.ttft_ms?.mean)}</td>
+      <td>${fTps}</td>
+      <td>${fmt(memGb(pa))}</td>
+      <td>${fmt(pa.input_context_tokens?.mean, 0)}</td>
       <td title="insufficient_samples = 入带样本 <8（默认每 cell 10）；--samples<8 的冒烟 run 必然触发，不代表数据异常">${entry.insufficient_samples ? `<span class="pill warn">insufficient_samples</span>` : entry.unstable ? `<span class="pill warn">unstable</span>` : `<span class="pill ok">ok</span>`}</td>
     </tr>`;
   });
   if (!rows.length) {
-    rows.push(`<tr><td colspan="14" class="empty">${legacy ? "旧 schema run：没有 overall 数据" : "没有整体结果"}</td></tr>`);
+    rows.push(`<tr><td colspan="16" class="empty">${legacy ? "旧 schema run：没有 overall 数据" : "没有整体结果"}</td></tr>`);
   }
   $("#overall-body").innerHTML = rows.join("");
 }
@@ -949,6 +954,7 @@ function renderOverall(summary, data) {
 function renderCells(summary) {
   const rows = (summary.cells || []).map((cell) => {
     const p = cell.perf || {};
+    const pa = cell.perf_all || {};
     return `<tr>
       <td>${esc(cell.model)}</td>
       <td>${esc(cell.dataset)}</td>
@@ -956,16 +962,18 @@ function renderCells(summary) {
       <td>${int(cell.n_valid)}/${int((cell.n_samples || 0) * Math.max(cell.n_repeats || 1, 1))}</td>
       <td>${int(cell.n_length_capped)}</td>
       <td title="TG TPS 被抑制的样本数">${int(cell.n_gen_tps_invalid)}</td>
-      <td title="in-band 样本数（进入平均）">${int(cell.n_isl_in_band)}</td>
-      <td title="out-of-band 样本数（不进入平均）">${int(cell.n_isl_out_of_band)}</td>
-      <td>${fmt(p.ttft_ms?.mean)}</td>
-      <td>${fmt(p.gen_tps?.mean)}</td>
-      <td>${fmt(memGb(p, "max"))}</td>
-      <td>${fmt(p.input_context_tokens?.mean, 0)}</td>
+      <td title="in-band 样本数（进入（±10%过滤）列）">${int(cell.n_isl_in_band)}</td>
+      <td title="out-of-band 样本数（不进入（±10%过滤）列）">${int(cell.n_isl_out_of_band)}</td>
+      <td title="全样本口径（含 ISL 出带样本）">${fmt(pa.ttft_ms?.mean)}</td>
+      <td title="全样本口径 TG TPS">${fmt(pa.gen_tps?.mean)}</td>
+      <td title="±10%入带口径（跨 run 比较口径）">${fmt(p.ttft_ms?.mean)}</td>
+      <td title="±10%入带口径 TG TPS">${fmt(p.gen_tps?.mean)}</td>
+      <td>${fmt(memGb(pa, "max"))}</td>
+      <td>${fmt(pa.input_context_tokens?.mean, 0)}</td>
       <td title="insufficient_samples = 入带样本 <8；小样本冒烟 run 会触发">${cell.insufficient_samples ? `<span class="pill warn">insufficient_samples</span>` : `<span class="pill ok">ok</span>`}</td>
     </tr>`;
   });
-  $("#cells-body").innerHTML = rows.join("") || `<tr><td colspan="13" class="empty">没有数据集结果</td></tr>`;
+  $("#cells-body").innerHTML = rows.join("") || `<tr><td colspan="15" class="empty">没有数据集结果</td></tr>`;
 }
 
 function renderSampleFilters(data) {

@@ -107,7 +107,15 @@ def test_batch_runner_splits_each_model_into_own_run(tmp_path):
     assert batch_path == layout.batch_path(tmp_path, "20260101T000000Z")
     assert batch_path.is_file()
     assert Path(result["batch_dir"]) == layout.batches_dir(tmp_path)
-    assert str(tmp_path) not in batch_path.read_text(encoding="utf-8")
+    # The persisted batch.json keeps relative paths only (stays movable);
+    # absolute run/export paths live only in the in-memory return value.
+    persisted_text = batch_path.read_text(encoding="utf-8")
+    for key in ("batch_file", "batch_dir", "export_file", "run_dir"):
+        assert f'"{key}"' not in persisted_text, key
+    assert str(tmp_path) not in persisted_text
+    assert json.loads(persisted_text)["exports"] == {
+        "xlsx": "exports/20260101T000000Z.xlsx"
+    }
     batch = json.loads(batch_path.read_text(encoding="utf-8"))
     assert batch["schema_version"] == "3.0"
     assert batch["batch_id"] == "20260101T000000Z"
@@ -157,9 +165,18 @@ def test_batch_runner_splits_each_model_into_own_run(tmp_path):
     assert not (tmp_path / layout.RUNS / "2026-11").exists()  # no YYYY-MM bucket
     assert not (tmp_path / layout.RUNS / "performance").exists()  # no method level
     assert not (tmp_path / "20260101T000000Z_performance_minicpm5-1b").exists()
-    # Excel is generated on demand, never as a batch side effect.
+    # T-068: the Excel summary is a default deliverable of every finished
+    # batch, generated automatically into exports/ (no result_analysis/ ever).
     assert not (tmp_path / "result_analysis").exists()
-    assert not list((tmp_path / layout.EXPORTS).glob("*.xlsx"))
+    auto_exports = sorted((tmp_path / layout.EXPORTS).glob("*.xlsx"))
+    assert [p.name for p in auto_exports] == ["20260101T000000Z.xlsx"]
+    # The run result carries the export path and the movable batch.json
+    # records the fact with a relative name only.
+    assert Path(result["export_file"]) == auto_exports[0]
+    batch_json = json.loads(batch_path.read_text(encoding="utf-8"))
+    assert batch_json["exports"] == {"xlsx": "exports/20260101T000000Z.xlsx"}
+    assert "batch_file" not in batch_json
+    assert "export_file" not in batch_json
 
     # The batch runner's own return value is enough to render the workbook.
     from openpyxl import load_workbook
@@ -186,8 +203,8 @@ def test_batch_runner_splits_each_model_into_own_run(tmp_path):
     assert workbook.sheetnames == ["硬件配置", "模型性能平均", "详细数据"]
     averages_headers = [cell.value for cell in workbook["模型性能平均"][1]]
     assert averages_headers[:4] == ["测试模型", "模型ID", "模型大小(GB)", "上下文档位"]
-    # two empty runs -> one status row each
-    assert workbook["模型性能平均"].max_row == 3
+    # two empty runs -> one status row each (+ the one-line calibre note)
+    assert workbook["模型性能平均"].max_row == 4
     assert workbook["模型性能平均"].cell(row=2, column=3).value == 1.0
     assert events.count("batch_model_start") == 2
     assert events.count("batch_model_done") == 2
@@ -203,8 +220,21 @@ def _write_json(path: Path, payload) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _make_batch_tree(tmp_path: Path, *, long_prompt_chars: int = 40_000):
-    """A complete schema-3.0 batch tree with one model, one long prompt."""
+def _make_batch_tree(
+    tmp_path: Path,
+    *,
+    long_prompt_chars: int = 40_000,
+    dual_caliber: bool = False,
+):
+    """A complete schema-3.0 batch tree with one model, one long prompt.
+
+    Measured records carry ``request.context_meta.isl_tolerance`` (actual 1100
+    vs the 1K target 1024 -> in band).  ``dual_caliber=True`` adds a second
+    measured record whose actual ISL is out of band (1144 tokens, no
+    ``context_meta`` so the export's ±10% fallback decides) plus an 8K overall
+    row without matching records, so the dual-caliber export columns have both
+    a real in-band vs all-sample difference and an empty bucket to leave blank.
+    """
     batch_id = "ctl-20260101"
     run_id = layout.make_run_id(batch_id, "performance", "minicpm5-1b")
     batch_path = layout.batch_path(tmp_path, batch_id)
@@ -219,6 +249,7 @@ def _make_batch_tree(tmp_path: Path, *, long_prompt_chars: int = 40_000):
             {"role": "user", "content": long_text},
         ]
     )
+    short_sha = store.put_messages([{"role": "user", "content": "出带样本的问题"}])
     _write_json(
         batch_path,
         {
@@ -314,33 +345,66 @@ def _make_batch_tree(tmp_path: Path, *, long_prompt_chars: int = 40_000):
             },
         },
     )
-    _write_json(
-        run_dir / layout.AGGREGATES_JSON,
+    overall_rows = [
         {
-            "schema_version": "3.0",
-            "run_id": run_id,
-            "generated_at": "2026-01-01T00:01:00+00:00",
-            "n_records": 2,
+            "model": "MiniCPM5-1B",
+            "context_length": 1024,
+            "n_datasets": 1,
             "n_samples": 1,
-            "n_cells": 1,
-            "overall": [
-                {
-                    "model": "MiniCPM5-1B",
-                    "context_length": 1024,
-                    "n_datasets": 1,
-                    "n_samples": 1,
-                    "n_valid": 1,
-                    "n_error": 0,
-                    "n_length_capped": 0,
-                    "perf": {"ttft_ms": {"n": 1, "mean": 12.5, "median": 12.5, "p95": 12.5}},
-                    "peak_memory_gb_max": 4.2,
-                }
-            ],
-            "cells": [],
-        },
-    )
+            "n_valid": 1,
+            "n_error": 0,
+            "n_length_capped": 0,
+            "n_isl_in_band": 1,
+            "n_isl_out_of_band": 0,
+            # In-band calibre: the mean uses only in-band samples (AGENTS #13).
+            "perf": {"ttft_ms": {"n": 1, "mean": 12.5, "median": 12.5, "p95": 12.5}},
+            "peak_memory_gb_max": 4.2,
+        }
+    ]
+    in_band_metrics = {
+        "input_context_tokens": 1100,
+        "input_context_chars": len(long_text),
+        "completion_tokens": 4,
+        "ttft_ms": 12.5,
+        "gen_tps": 20.0,
+        "peak_memory_gb": 4.2,
+    }
+    if dual_caliber:
+        # in-band leg of the pair: ttft 10.0 while the out-of-band record has
+        # 30.0 -> all-sample mean 20.0, relative shift +100%.
+        overall_rows[0].update(
+            {
+                "n_samples": 2,
+                "n_valid": 2,
+                "n_isl_in_band": 1,
+                "n_isl_out_of_band": 1,
+                "perf": {
+                    "ttft_ms": {"n": 1, "mean": 10.0, "median": 10.0, "p95": 10.0},
+                    "gen_tps": {"n": 1, "mean": 20.0, "median": 20.0, "p95": 20.0},
+                    "e2e_ms": {"n": 1, "mean": 100.0, "median": 100.0, "p95": 100.0},
+                },
+            }
+        )
+        # A bucket with aggregates but no records: all-sample columns stay blank.
+        overall_rows.append(
+            {
+                "model": "MiniCPM5-1B",
+                "context_length": 8192,
+                "n_datasets": 1,
+                "n_samples": 1,
+                "n_valid": 1,
+                "n_error": 0,
+                "n_length_capped": 0,
+                "n_isl_in_band": 1,
+                "n_isl_out_of_band": 0,
+                "perf": {"ttft_ms": {"n": 1, "mean": 50.0, "median": 50.0, "p95": 50.0}},
+                "peak_memory_gb_max": 5.0,
+            }
+        )
+        in_band_metrics.update({"ttft_ms": 10.0, "e2e_ms": 100.0})
     records = [
-        # measured sample: prompt body only via prompt_sha256
+        # measured sample: prompt body only via prompt_sha256; ISL in band
+        # (actual 1100 inside 1024 +/- 10% = 921..1126)
         {
             "phase": "measured",
             "model": "MiniCPM5-1B",
@@ -348,20 +412,23 @@ def _make_batch_tree(tmp_path: Path, *, long_prompt_chars: int = 40_000):
             "scenario": "search_agent",
             "sample_id": "sample-1",
             "repeat": 0,
+            "context_length": 1024,
             "request": {
                 "prompt_sha256": long_sha,
                 "prompt_chars": len(long_text),
                 "truncated": False,
+                "context_meta": {
+                    "isl_tolerance": {
+                        "target": 1024,
+                        "low": 921,
+                        "high": 1126,
+                        "actual": 1100,
+                        "ok": True,
+                    }
+                },
             },
             "response": {"text": "answer\x01with\x0ccontrol\x1fchars", "finish_reason": "stop"},
-            "metrics": {
-                "input_context_tokens": 1100,
-                "input_context_chars": len(long_text),
-                "completion_tokens": 4,
-                "ttft_ms": 12.5,
-                "gen_tps": 20.0,
-                "peak_memory_gb": 4.2,
-            },
+            "metrics": in_band_metrics,
             "status": "ok",
             "timestamp": "2026-01-01T00:00:30+00:00",
         },
@@ -392,6 +459,51 @@ def _make_batch_tree(tmp_path: Path, *, long_prompt_chars: int = 40_000):
             "timestamp": "2026-01-01T00:00:40+00:00",
         },
     ]
+    if dual_caliber:
+        records.append(
+            # measured but ISL out of band (1144 > 1126): no context_meta, so
+            # the export falls back to the ±10% band check on the record
+            {
+                "phase": "measured",
+                "model": "MiniCPM5-1B",
+                "dataset": "dureader",
+                "scenario": "search_agent",
+                "sample_id": "sample-3",
+                "repeat": 0,
+                "context_length": 1024,
+                "request": {
+                    "prompt_sha256": short_sha,
+                    "prompt_chars": 7,
+                    "truncated": False,
+                    "tokenized_prompt_tokens": 1144,
+                },
+                "response": {"text": "出带样本的长回答", "finish_reason": "stop"},
+                "metrics": {
+                    "input_context_tokens": 1144,
+                    "input_context_chars": 7,
+                    "completion_tokens": 6,
+                    "ttft_ms": 30.0,
+                    "gen_tps": 40.0,
+                    "e2e_ms": 300.0,
+                    "peak_memory_gb": 4.4,
+                },
+                "status": "ok",
+                "timestamp": "2026-01-01T00:00:50+00:00",
+            }
+        )
+    _write_json(
+        run_dir / layout.AGGREGATES_JSON,
+        {
+            "schema_version": "3.0",
+            "run_id": run_id,
+            "generated_at": "2026-01-01T00:01:00+00:00",
+            "n_records": len(records),
+            "n_samples": len({r.get("sample_id") for r in records if r.get("phase") == "measured"}),
+            "n_cells": 1,
+            "overall": overall_rows,
+            "cells": [],
+        },
+    )
     (run_dir / layout.RECORDS).write_text(
         "\n".join(json.dumps(record, ensure_ascii=False) for record in records) + "\n",
         encoding="utf-8",
@@ -424,7 +536,8 @@ def test_excel_export_reads_schema3_sources_and_clips_long_prompts(tmp_path):
     assert [cell.value for cell in averages[1]][:4] == [
         "测试模型", "模型ID", "模型大小(GB)", "上下文档位",
     ]
-    assert averages.max_row == 2
+    # header + one data row + the one-line calibre note
+    assert averages.max_row == 3
     assert averages.cell(row=2, column=1).value == "minicpm5-1b"
     assert averages.cell(row=2, column=2).value == "MiniCPM5-1B"
     assert averages.cell(row=2, column=3).value == 4.92
@@ -482,6 +595,130 @@ def test_excel_export_reads_schema3_sources_and_clips_long_prompts(tmp_path):
     regenerated = generate_for_batch(tmp_path, batch_id)
     assert regenerated.is_file()
     assert regenerated == workbook_path
+
+
+def test_excel_details_sheet_annotates_isl_band_and_deviation(tmp_path):
+    """T-064: the details sheet annotates each sample's ISL band membership.
+
+    ``ISL入带`` mirrors ``metrics.isl_band`` (authoritative
+    ``request.context_meta.isl_tolerance.ok``, ±10% fallback on the actual
+    token count, legacy records without any basis kept as in band);
+    ``ISL偏差%`` is ``(actual - target) / target * 100`` and stays blank when
+    the record carries no target/actual evidence.
+    """
+    from openpyxl import load_workbook
+
+    from modelbench.adapters.storage.excel_report import write_batch_excel
+
+    batch_id, batch_path, run_dir, _ = _make_batch_tree(tmp_path)
+    workbook = load_workbook(write_batch_excel(tmp_path, batch_path))
+    details = workbook["详细数据"]
+    headers = [cell.value for cell in details[1]]
+    assert "ISL入带" in headers
+    assert "ISL偏差%" in headers
+
+    def sample_row(sample_id: str) -> dict:
+        id_col = headers.index("样本ID")
+        for row in details.iter_rows(min_row=2):
+            if row[id_col].value == sample_id:
+                return {headers[i]: cell.value for i, cell in enumerate(row)}
+        raise AssertionError(f"sample row not found: {sample_id}")
+
+    # In band: actual 1100 vs the 1K target 1024 -> +7.4%.
+    in_band = sample_row("sample-1")
+    assert in_band["ISL入带"] is True
+    assert in_band["ISL偏差%"] == 7.4
+    # No isl_tolerance, no context_length: kept like a legacy record; the
+    # deviation cannot be computed and stays an empty cell, not a fake 0.
+    legacy = sample_row("sample-2")
+    assert legacy["ISL入带"] is True
+    assert legacy["ISL偏差%"] is None
+
+    # Single in-band sample: the all-sample calibre equals the in-band mean,
+    # so the out-of-band TTFT shift renders as an exact 0.0%.
+    averages = workbook["模型性能平均"]
+    avg_headers = [cell.value for cell in averages[1]]
+    col = {name: index + 1 for index, name in enumerate(avg_headers)}
+    assert averages.cell(row=2, column=col["TTFT均值(ms)"]).value == 12.5
+    assert averages.cell(row=2, column=col["TG TPS均值"]).value == 20.0
+    assert averages.cell(row=2, column=col["E2E均值(ms)"]).value is None
+    assert averages.cell(row=2, column=col["TTFT均值(ms)（±10%过滤）"]).value == 12.5
+    assert averages.cell(row=2, column=col["出带TTFT波动范围"]).value == "0.0%"
+
+
+def test_excel_averages_sheet_dual_caliber_and_out_of_band_shift(tmp_path):
+    """T-064: all-sample means + out-of-band TTFT shift next to the in-band ones.
+
+    One in-band record (ttft 10.0) and one out-of-band record (ttft 30.0, ISL
+    1144) share the 1K bucket: the in-band mean stays 10.0 (AGENTS #13), the
+    all-sample mean is 20.0 and the relative shift is +100.0%.  An 8K overall
+    row without records leaves the all-sample columns blank.
+    """
+    from openpyxl import load_workbook
+
+    from modelbench.adapters.storage.excel_report import write_batch_excel
+
+    batch_id, batch_path, run_dir, _ = _make_batch_tree(tmp_path, dual_caliber=True)
+    workbook = load_workbook(write_batch_excel(tmp_path, batch_path))
+    averages = workbook["模型性能平均"]
+    headers = [cell.value for cell in averages[1]]
+    for name in (
+        "TTFT均值(ms)",
+        "TG TPS均值",
+        "E2E均值(ms)",
+        "TTFT均值(ms)（±10%过滤）",
+        "TG TPS均值（±10%过滤）",
+        "E2E均值(ms)（±10%过滤）",
+        "出带TTFT波动范围",
+    ):
+        assert name in headers
+    # header + 1K row + 8K row + the one-line calibre note (no extra sheet).
+    assert averages.max_row == 4
+    col = {name: index + 1 for index, name in enumerate(headers)}
+
+    # 1K row: in-band mean untouched, all-sample means include the out-of-band
+    # record, and the TTFT shift shows how much the out-of-band leg moves it.
+    assert averages.cell(row=2, column=col["TTFT均值(ms)"]).value == 20.0
+    assert averages.cell(row=2, column=col["TTFT均值(ms)（±10%过滤）"]).value == 10.0
+    assert averages.cell(row=2, column=col["TG TPS均值"]).value == 30.0
+    assert averages.cell(row=2, column=col["TG TPS均值（±10%过滤）"]).value == 20.0
+    assert averages.cell(row=2, column=col["E2E均值(ms)"]).value == 200.0
+    assert averages.cell(row=2, column=col["E2E均值(ms)（±10%过滤）"]).value == 100.0
+    assert averages.cell(row=2, column=col["出带TTFT波动范围"]).value == "+100.0%"
+    assert averages.cell(row=2, column=col["ISL入带数"]).value == 1
+    assert averages.cell(row=2, column=col["ISL出带数"]).value == 1
+
+    # 8K overall row without matching records: blank, never a fabricated 0.
+    for name in (
+        "TTFT均值(ms)",
+        "TG TPS均值",
+        "E2E均值(ms)",
+        "出带TTFT波动范围",
+    ):
+        assert averages.cell(row=3, column=col[name]).value is None
+    # The in-band calibre of that row comes from the aggregates (never blank).
+    assert averages.cell(row=3, column=col["TTFT均值(ms)（±10%过滤）"]).value == 50.0
+
+    # The calibre note is one short trailing line, not an explanation sheet.
+    note_text = averages.cell(row=4, column=1).value
+    assert isinstance(note_text, str)
+    assert note_text.startswith("注：")
+    assert "全样本" in note_text and "入带" in note_text
+    assert workbook.sheetnames == ["硬件配置", "模型性能平均", "详细数据"]
+
+    # The out-of-band record itself is annotated on the details sheet: the
+    # ±10% fallback (no context_meta) marks it out of band at +11.7%.
+    details = workbook["详细数据"]
+    detail_headers = [cell.value for cell in details[1]]
+    id_col = detail_headers.index("样本ID")
+    for row in details.iter_rows(min_row=2):
+        if row[id_col].value == "sample-3":
+            values = {detail_headers[i]: cell.value for i, cell in enumerate(row)}
+            assert values["ISL入带"] is False
+            assert values["ISL偏差%"] == 11.7
+            break
+    else:
+        raise AssertionError("out-of-band sample row not found")
 
 
 def test_excel_export_handles_batch_without_runs(tmp_path):
@@ -562,7 +799,8 @@ def test_excel_export_falls_back_to_runs_by_batch_id(tmp_path):
     )
     workbook = load_workbook(write_batch_excel(tmp_path, batch_path))
     averages = workbook["模型性能平均"]
-    assert averages.max_row == 2
+    # header + one overall row + the one-line calibre note
+    assert averages.max_row == 3
     assert averages.cell(row=2, column=2).value == "M1"
 
 
@@ -711,3 +949,44 @@ def test_batch_runner_refuses_when_another_run_holds_the_lock(tmp_path):
     with RunLock(tmp_path):
         with pytest.raises(RunLockError):
             runner.run()
+
+
+def test_batch_excel_export_failure_warns_but_never_fails_the_run(
+    tmp_path, monkeypatch, capsys
+):
+    """T-068: a broken Excel export must not fail the benchmark run itself.
+
+    The failure is loud (warning in batch.json + stderr, AGENTS #9) and the
+    batch summary still returns; ``exports`` records the miss so the Web/CLI
+    can point at ``modelbench export-analysis`` for regeneration.
+    """
+    from modelbench.adapters.storage import excel_report
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("openpyxl exploded")
+
+    monkeypatch.setattr(excel_report, "write_batch_excel", broken)
+    events = []
+    runner = _batch_runner(
+        tmp_path,
+        "boom",
+        models=["minicpm5-1b"],
+        progress_cb=lambda event, payload: events.append(event),
+    )
+    result = runner.run()  # must not raise
+    assert result["batch_id"] == "boom"
+    assert "export_file" not in result
+    assert result["exports"] is None
+    assert any(
+        warning.startswith("excel export failed") for warning in result["warnings"]
+    )
+    assert "excel export failed" in capsys.readouterr().err
+    batch_json = json.loads(
+        layout.batch_path(tmp_path, "boom").read_text(encoding="utf-8")
+    )
+    assert any(
+        warning.startswith("excel export failed") for warning in batch_json["warnings"]
+    )
+    assert "exports" not in batch_json or batch_json["exports"] is None
+    assert not list((tmp_path / layout.EXPORTS).glob("*.xlsx"))
+    assert events.count("batch_done") == 1

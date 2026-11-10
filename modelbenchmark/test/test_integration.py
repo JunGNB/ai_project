@@ -1428,17 +1428,19 @@ def test_batch_excel_analysis_has_three_sheets(fake_server, tmp_path):
         batch = BatchRunner(cfg, client, tmp_path, batch_id="excel-batch").run()
     finally:
         client.close()
-    # Excel is a derived deliverable: generated on demand into output/exports/.
-    from modelbench.adapters.storage import excel_report
-
+    # T-068: the Excel deliverable is generated automatically when the batch
+    # ends; the returned summary points at the already-written workbook.
     assert "result_analysis" not in batch
-    workbook_path = excel_report.write_batch_excel(
-        tmp_path, layout.batch_path(tmp_path, "excel-batch"), batch
-    )
+    workbook_path = Path(batch["export_file"])
     assert workbook_path.is_file()
     assert workbook_path.parent == layout.exports_dir(tmp_path)
     assert workbook_path.name == "excel-batch.xlsx"
     assert not (tmp_path / "result_analysis").exists()
+    # The movable batch.json records the export with a relative name only.
+    batch_json = json.loads(
+        layout.batch_path(tmp_path, "excel-batch").read_text(encoding="utf-8")
+    )
+    assert batch_json["exports"] == {"xlsx": "exports/excel-batch.xlsx"}
     wb = load_workbook(workbook_path)
     assert wb.sheetnames == ["硬件配置", "模型性能平均", "详细数据"]
     detail = wb["详细数据"]
@@ -1456,7 +1458,8 @@ def test_batch_excel_analysis_has_three_sheets(fake_server, tmp_path):
     assert row[7] > 0                # prompt tokens
     assert row[9] is not None        # output token size
     averages = wb["模型性能平均"]
-    assert averages.max_row == 2
+    # header + one data row + the one-line ISL calibre note (T-064)
+    assert averages.max_row == 3
     assert [cell.value for cell in averages[1]][:4] == [
         "测试模型", "模型ID", "模型大小(GB)", "上下文档位",
     ]

@@ -246,7 +246,23 @@ class PerfJSONLAdapter(DatasetAdapter):
             rows = rows[: int(limit)]
         windows = extra["context_windows"] or []
         if windows:
-            rows = [row for row in rows if in_context_windows(int(row[4]), windows)]
+            # Calibrated declared tokens intentionally sit below the raw bucket
+            # for inflating scenarios (see the dataset budget model), so the
+            # window selector matches the bucket's ISL target (1024/8192/32768)
+            # -- the window the row is actually aimed at. Rows without a known
+            # bucket fall back to their raw declared token count.
+            wanted_buckets = {
+                _TOKENS_TO_BUCKET.get(int(w)) for w in windows
+            }
+            rows = [
+                row
+                for row in rows
+                if (
+                    row[3] in wanted_buckets
+                    if row[3] and row[3] in BUCKET_TOKENS
+                    else in_context_windows(int(row[4]), windows)
+                )
+            ]
         sample_ids = extra["sample_ids"] or []
         if sample_ids:
             wanted = {str(item) for item in sample_ids}

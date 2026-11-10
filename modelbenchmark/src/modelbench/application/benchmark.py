@@ -47,6 +47,10 @@ from modelbench.domain.models import (
 )
 from modelbench.domain.context_tolerance import tolerance_for_bucket
 from modelbench.domain.context_windows import describe_windows, in_context_windows
+from modelbench.adapters.datasets.perf_jsonl import BUCKET_TOKENS as _PERF_BUCKET_TOKENS
+
+#: ISL target (1024/8192/32768) per declared pre-built bucket key (1k/8k/32k).
+BUCKET_TARGETS: Dict[str, int] = dict(_PERF_BUCKET_TOKENS)
 from modelbench.domain.scenarios.base import (
     ScenarioAdapter,
     deterministic_sample,
@@ -1170,15 +1174,19 @@ class Orchestrator:
     ) -> List[Sample]:
         """Keep only samples whose prompt tokens fall inside the selected windows.
 
-        Pre-built performance samples use their declared ``metadata.tokens``
-        (reference tokenizer, the same value that defines their 1K/8K/32K bucket);
-        legacy samples use the model tokenizer (``/v1/tokenize`` via
+        Pre-built performance samples carry calibrated cl100k declared budgets
+        that sit below the raw bucket for inflating scenarios (see the dataset
+        budget model), so the window selector matches the bucket's ISL target
+        (1024/8192/32768) -- the window the row is aimed at; pre-built rows
+        without a known bucket fall back to their declared token count. Legacy
+        samples use the model tokenizer (``/v1/tokenize`` via
         ``_build_request``).  The filter only narrows the sample set -- it never
         changes the cell key: cells always include ``context_length``.
         """
         windows = list(self.cfg.perf.context_windows or [])
         if not windows:
             return samples
+        wanted_windows = set(windows)
         explicit = self.cfg.perf.sample_ids_for(scenario_name)
         wanted = set(explicit) if explicit else None
         ordered = sorted(samples, key=lambda sample: sample.sample_id)
@@ -1192,9 +1200,15 @@ class Orchestrator:
             tokens: Optional[int] = None
             metadata = sample.metadata or {}
             if metadata.get("prebuilt") and metadata.get("tokens") is not None:
-                # Pre-built samples are filtered by the declared (reference
-                # tokenizer) token count that defines their bucket -- not by the
-                # target model tokenizer.  See docs/spec/20-methodology.md §5.
+                bucket = str(metadata.get("bucket") or "").strip().lower()
+                bucket_target = BUCKET_TARGETS.get(bucket)
+                if bucket_target is not None:
+                    # Bucketed rows select by their bucket's window target.
+                    if bucket_target in wanted_windows:
+                        kept.append(sample)
+                    else:
+                        dropped += 1
+                    continue
                 tokens = int(metadata["tokens"])
             else:
                 try:

@@ -611,6 +611,12 @@ def _aggregates_payload() -> dict:
                     },
                     "gen_tps": {"n": 2, "mean": 64.75},
                 },
+                # T-067 dual calibre: all-sample means ride along to the Web
+                # console so both columns render from the same source.
+                "perf_all": {
+                    "ttft_ms": {"n": 2, "mean": 1260.0},
+                    "gen_tps": {"n": 2, "mean": 63.9},
+                },
             }
         )
     cells = [
@@ -830,11 +836,15 @@ def test_run_detail_synthesizes_old_summary_view(output_tree):
         "hardware": "run.json",
         "omlx": "run.json",
     }
-    # Aggregates are passed through unchanged.
+    # Aggregates are passed through unchanged — including the T-067 dual
+    # calibre: both perf (±10% filtered) and perf_all (all-sample) reach the
+    # renderer so the two column groups come from one source of truth.
     assert len(summary["overall"]) == 2
     assert len(summary["cells"]) == 3
     assert summary["overall"][0]["model"] == MODEL_ID
     assert summary["cells"][0]["dataset"] == CODING_DATASET
+    assert summary["overall"][0]["perf_all"]["ttft_ms"]["mean"] == 1260.0
+    assert summary["overall"][0]["perf"]["ttft_ms"]["mean"] == 1250.0
     # Batch context drives the list grouping / subtitle.
     batch = summary["batch"]
     assert batch["batch_id"] == BATCH_ID

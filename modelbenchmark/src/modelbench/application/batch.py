@@ -6,11 +6,14 @@ Layout (schema 3.0, flat)::
       run.json MANIFEST.json records.jsonl samples.csv aggregates.json report.md
       logs/run.log
     output/batches/<batch_id>.json     # the single authoritative batch metadata
-    output/exports/<batch_id>.xlsx     # derived, on demand (accuracy runs may
-                                       # reuse the same batch dir per model)
+    output/exports/<batch_id>.xlsx     # derived, regenerated when a batch ends
 
-Excel is *not* produced here any more: it is a derived deliverable, generated on
-demand into ``output/exports/<batch_id>.xlsx`` (see ``modelbench export-analysis``).
+``output/exports/<batch_id>.xlsx`` is (re)generated automatically when a batch
+finishes — the user never has to run a separate command after a run.  The
+generation is best-effort: a failure appends a warning to ``batch.json`` and
+never fails the benchmark run itself.  ``modelbench export-analysis`` stays as
+the manual regeneration command (e.g. after deleting exports or for legacy
+batches that predate this behavior).
 """
 
 from __future__ import annotations
@@ -381,6 +384,41 @@ class BatchRunner:
         except Exception as exc:  # noqa: BLE001 - index is rebuildable
             warnings.append(f"index refresh failed: {type(exc).__name__}: {exc}")
             batch_summary["warnings"] = warnings
+
+        # Auto-export: the Excel summary is a default deliverable of every
+        # finished batch (T-068) — not something the user must regenerate by
+        # hand.  Best-effort: a failure warns (no silent degradation, AGENTS
+        # #9) but never fails the run; ``export-analysis`` regenerates it.
+        try:
+            from modelbench.adapters.storage import excel_report
+
+            export_path = excel_report.write_batch_excel(
+                self.output_root, batch_path, batch_summary
+            )
+            batch_summary["export_file"] = str(export_path)
+        except Exception as exc:  # noqa: BLE001 - derived, regenerable
+            message = f"excel export failed: {type(exc).__name__}: {exc}"
+            warnings.append(message)
+            batch_summary["warnings"] = warnings
+            print(f"WARNING: {message}", file=os.sys.stderr)
+
+        # Persist the export outcome inside the movable batch.json (absolute
+        # paths stay out of it; only the fact and the relative name).
+        persisted = batch_summary.get("export_file")
+        if persisted:
+            batch_summary["exports"] = {"xlsx": f"exports/{batch_path.stem}.xlsx"}
+        else:
+            batch_summary["exports"] = None
+        movable = {
+            key: value
+            for key, value in batch_summary.items()
+            if key not in ("batch_file", "batch_dir", "export_file")
+        }
+        _atomic_write(batch_path, movable)
+        if persisted:
+            batch_summary["export_file"] = str(persisted)
+        else:
+            batch_summary.pop("export_file", None)
 
         self._progress("batch_done", batch_summary)
         return batch_summary

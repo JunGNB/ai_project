@@ -578,6 +578,92 @@ def test_overall_aggregates_are_per_context_bucket():
     assert overall[1].n_warmup == 1
 
 
+def test_dual_calibre_all_sample_and_filtered_band(tmp_path):
+    """T-067: averages carry BOTH calibres — perf_all (default, no filtering)
+    and perf (±10% in-band, comparison calibre).
+
+    One in-band record (ttft 100, actual 1000) and one out-of-band record
+    (ttft 300, actual 1144 -> beyond 1024*1.10 = 1126) share the 1K bucket:
+    the filtered mean stays 100, the all-sample mean is 200.  Warmup and
+    contaminated rows are excluded from BOTH calibres.
+    """
+    from modelbench.domain.metrics import aggregate_cell, aggregate_overall
+    from modelbench.domain.models import Phase, RecordStatus
+    from modelbench.domain.models import PerfMetrics
+
+    def rec(ttft, sample_id, actual, phase=Phase.MEASURED, status=RecordStatus.OK):
+        base = _make_record("dual", ttft=ttft)
+        return base.model_copy(
+            update={
+                "context_length": 1024,
+                "sample_id": sample_id,
+                "phase": phase,
+                "status": status,
+                "request": base.request.model_copy(
+                    update={"tokenized_prompt_tokens": actual}
+                ),
+                "metrics": base.metrics.model_copy(
+                    update={
+                        "ttft_ms": ttft,
+                        "input_context_tokens": actual,
+                        "gen_tps": 20.0,
+                        "e2e_ms": ttft + 100.0,
+                    }
+                ),
+            }
+        )
+
+    rows = [
+        rec(100.0, "in", 1000),
+        rec(300.0, "out", 1144),
+        rec(999.0, "warm", 1000, phase=Phase.WARMUP),
+        rec(999.0, "poll", 1000, status=RecordStatus.CONTAMINATED),
+    ]
+    overall = aggregate_overall(rows)[0]
+    assert overall.n_valid == 2
+    assert overall.n_isl_in_band == 1
+    assert overall.n_isl_out_of_band == 1
+    # Filtered calibre (±10% band): the out-of-band leg is excluded.
+    assert overall.perf["ttft_ms"].mean == pytest.approx(100.0)
+    assert overall.perf["ttft_ms"].n == 1
+    # All-sample calibre (default): every valid measured record.
+    assert overall.perf_all["ttft_ms"].mean == pytest.approx(200.0)
+    assert overall.perf_all["ttft_ms"].n == 2
+    assert overall.perf_all["gen_tps"].mean == pytest.approx(20.0)
+    # Counts describe the whole valid set, not the band.
+    assert overall.n_gen_tps_invalid == 0
+
+    # Cells follow the same dual-calibre contract.
+    cell = aggregate_cell(rows)
+    assert cell.perf["ttft_ms"].mean == pytest.approx(100.0)
+    assert cell.perf_all["ttft_ms"].mean == pytest.approx(200.0)
+    assert cell.perf_all["ttft_ms"].n == 2
+    assert cell.insufficient_samples is True  # in-band n=1 < MIN_IN_BAND_SAMPLES
+
+    # The writer persists both calibres and the report labels them.
+    writer = RunWriter(tmp_path, run_id="dual-run")
+    writer.initialize(RunManifest(run_id="dual-run", created_at="2026-01-01T00:00:00Z"))
+    for row in rows:
+        writer.write_record(row)
+    summary = writer.finalize(rows, perf={"max_tokens": 50}, run_config={"repeats": 1})
+    run_dir = Path(summary["run_dir"])
+    data = json.loads((run_dir / "aggregates.json").read_text())
+    entry = data["overall"][0]
+    assert entry["perf"]["ttft_ms"]["mean"] == pytest.approx(100.0)
+    assert entry["perf_all"]["ttft_ms"]["mean"] == pytest.approx(200.0)
+    assert entry["perf_all"]["ttft_ms"]["n"] == 2
+    cell_json = data["cells"][0]
+    assert cell_json["perf_all"]["ttft_ms"]["mean"] == pytest.approx(200.0)
+
+    report = (run_dir / "report.md").read_text(encoding="utf-8")
+    # The report shows both calibres with the （±10%过滤） label.
+    assert "TTFT(ms)（±10%过滤）" in report
+    assert "| 200.00 | 20.00 |" in report  # all-sample 1K ttft/tps (default)
+    assert "| 200.00 | 20.00 | 100.00 | 20.00 |" in report  # + filtered block
+    assert "全样本口径" in report
+    assert "出带样本仍保留在 records" in report
+
+
 def test_length_capped_samples_are_aggregated_not_filtered():
     """finish_reason=length records stay in every aggregate (max_tokens is a cap)."""
     from modelbench.domain.metrics import aggregate_overall, sample_results

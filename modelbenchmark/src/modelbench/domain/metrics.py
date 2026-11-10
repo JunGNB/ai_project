@@ -133,6 +133,25 @@ def _valid(records: Iterable[SampleRecord]) -> List[SampleRecord]:
     ]
 
 
+#: Dual calibre (T-067): every average-bearing output carries two views of the
+#: same valid records.  ``perf`` keeps the ±10% in-band calibre — the only one
+#: admissible for cross-run/cross-system comparison — and ``perf_all`` is the
+#: unfiltered all-sample view that became the default presentation.  The band
+#: filter is the ONLY difference: warmup/contaminated/error records and the
+#: gen_tps/tpot validity guards apply to both.
+def _perf_distributions(rows: Sequence[SampleRecord]) -> Dict[str, Distribution]:
+    perf: Dict[str, Distribution] = {}
+    for field in PERF_FIELDS:
+        if field == "gen_tps":
+            values = [_effective_gen_tps(r) for r in rows]
+        elif field == "tpot_ms":
+            values = [_effective_tpot(r) for r in rows]
+        else:
+            values = [getattr(r.metrics, field) for r in rows]
+        perf[field] = distribution(values)
+    return perf
+
+
 def is_length_capped(record: SampleRecord) -> bool:
     """True when generation stopped at ``perf.max_tokens``.
 
@@ -242,20 +261,15 @@ def aggregate_cell(records: List[SampleRecord]) -> CellAggregate:
     cell.n_isl_in_band = len(in_band)
     cell.n_isl_out_of_band = len(valid) - len(in_band)
     cell.insufficient_samples = len(in_band) < MIN_IN_BAND_SAMPLES
-    cell.n_length_capped = sum(1 for r in in_band if is_length_capped(r))
-    cell.n_gen_tps_invalid = sum(1 for r in in_band if _gen_tps_invalid(r))
+    # Capped/TG-invalid counts describe the whole valid measured set (the
+    # documented "valid measured samples" wording), not the ISL band: a cell
+    # whose samples are all out of band still reports its capped count.
+    cell.n_length_capped = sum(1 for r in valid if is_length_capped(r))
+    cell.n_gen_tps_invalid = sum(1 for r in valid if _gen_tps_invalid(r))
 
-    perf: Dict[str, Distribution] = {}
-    for field in PERF_FIELDS:
-        if field == "gen_tps":
-            values = [_effective_gen_tps(r) for r in in_band]
-        elif field == "tpot_ms":
-            values = [_effective_tpot(r) for r in in_band]
-        else:
-            values = [getattr(r.metrics, field) for r in in_band]
-        perf[field] = distribution(values)
-    cell.perf = perf
-    cell.stability_cv = _stability(perf)
+    cell.perf = _perf_distributions(in_band)
+    cell.perf_all = _perf_distributions(valid)
+    cell.stability_cv = _stability(cell.perf)
     cell.unstable = cell.stability_cv is not None and cell.stability_cv > 0.2
     return cell
 
@@ -310,33 +324,27 @@ def aggregate_overall(records: Iterable[SampleRecord]) -> List[OverallAggregate]
         )
         in_band = [r for r in valid if isl_band(r)]
         entry.n_isl_in_band = len(in_band)
-        perf: Dict[str, Distribution] = {}
-        for field in PERF_FIELDS:
-            if field == "gen_tps":
-                values = [_effective_gen_tps(r) for r in in_band]
-            elif field == "tpot_ms":
-                values = [_effective_tpot(r) for r in in_band]
-            else:
-                values = [getattr(r.metrics, field) for r in in_band]
-            perf[field] = distribution(values)
-        entry.perf = perf
         entry.n_isl_out_of_band = len(valid) - len(in_band)
         entry.insufficient_samples = len(in_band) < MIN_IN_BAND_SAMPLES
-        entry.n_length_capped = sum(1 for r in in_band if is_length_capped(r))
-        entry.n_gen_tps_invalid = sum(1 for r in in_band if _gen_tps_invalid(r))
+        # Same calibre rule as cells: capped/TG-invalid counts and peak maxima
+        # describe the whole valid measured set, not the band.
+        entry.n_length_capped = sum(1 for r in valid if is_length_capped(r))
+        entry.n_gen_tps_invalid = sum(1 for r in valid if _gen_tps_invalid(r))
+        entry.perf = _perf_distributions(in_band)
+        entry.perf_all = _perf_distributions(valid)
+        entry.stability_cv = _stability(entry.perf)
+        entry.unstable = entry.stability_cv is not None and entry.stability_cv > 0.2
+        overall.append(entry)
         rss_values = [
-            r.metrics.peak_rss_mb for r in in_band if r.metrics.peak_rss_mb is not None
+            r.metrics.peak_rss_mb for r in valid if r.metrics.peak_rss_mb is not None
         ]
         entry.peak_rss_mb_max = round(max(rss_values), 1) if rss_values else None
         mem_values = [
             r.metrics.peak_memory_gb
-            for r in in_band
+            for r in valid
             if r.metrics.peak_memory_gb is not None
         ]
         entry.peak_memory_gb_max = round(max(mem_values), 2) if mem_values else None
-        entry.stability_cv = _stability(perf)
-        entry.unstable = entry.stability_cv is not None and entry.stability_cv > 0.2
-        overall.append(entry)
     return overall
 
 

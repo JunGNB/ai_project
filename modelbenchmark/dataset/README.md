@@ -91,7 +91,7 @@ dataset/test/accuracy/{testset.jsonl, manifest.json}
 | BFCL v4 | https://github.com/ShishirPatil/gorilla | Apache-2.0 | 性能/精度 Agent |
 | HotpotQA | https://huggingface.co/datasets/hotpotqa/hotpot_qa | CC-BY-SA-4.0 | 精度搜索 |
 | Global-MMLU | https://huggingface.co/datasets/CohereLabs/Global-MMLU | Apache-2.0 | 性能多语言 + 精度知识/多语言 |
-| MiniCPM5-1B tokenizer | 本地模型资产 | 随上游模型许可 | 参考 tokenizer |
+| cl100k_base (OpenAI) | https://github.com/openai/tiktoken | MIT | 通用参考 tokenizer（性能/精度共用；blob + 派生 tokenizer.json） |
 
 逐文件 `path/bytes/sha256` 见两份 manifest。**内容风险**：上游含用户贡献内容
 （HotpotQA/LongBench 网页摘录等），仅限本地研究与基准测试用途，不得再分发 raw 数据。

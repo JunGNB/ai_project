@@ -165,7 +165,7 @@
       <div id="tab-overall" class="tab-panel">
         <div class="table-wrap">
           <table>
-            <thead><tr><th>模型</th><th>档位</th><th>数据集</th><th>样本</th><th>有效</th><th title="finish_reason=length（达到 max_tokens）的样本数；这些样本正常参与 TTFT/TG TPS/内存平均，TG TPS 按实际生成 token 计算">触顶</th><th title="TG TPS 被抑制的样本数（tool_calls/短解码窗口等）；原因见 records.jsonl">TG无效</th><th title="target tokenizer 实际 prompt 在 ±10% 带内的样本数（进入平均）">ISL入带</th><th title="actual 在 ±10% 带外、仍测量但不进入平均的样本数">ISL出带</th><th>TTFT ms</th><th title="每个档位单独平均；括号为 TG TPS 参与统计样本数/有效样本数">TG TPS</th><th title="oMLX 服务进程树 phys_footprint 峰值（含 Metal 分配）；oMLX 自带 benchmark 的 PeakMem 是 mlx.get_peak_memory() 的 Metal 峰值，通常低 0.4–0.9GB">峰值内存 GB</th><th>输入 token</th><th>状态</th></tr></thead>
+            <thead><tr><th>模型</th><th>档位</th><th>数据集</th><th>样本</th><th>有效</th><th title="finish_reason=length（达到 max_tokens）的样本数；这些样本正常参与 TTFT/TG TPS/内存平均，TG TPS 按实际生成 token 计算">触顶</th><th title="TG TPS 被抑制的样本数（tool_calls/短解码窗口等）；原因见 records.jsonl">TG无效</th><th title="target tokenizer 实际 prompt 在 ±10% 带内的样本数（进入（±10%过滤）列）">ISL入带</th><th title="actual 在 ±10% 带外、仍测量但不进入（±10%过滤）列的样本数">ISL出带</th><th title="全样本口径：所有 measured+ok 样本（含 ISL 出带）的 TTFT 平均">TTFT ms</th><th title="全样本口径 TG TPS；括号为参与统计样本数/有效样本数">TG TPS</th><th title="±10%入带口径（跨 run 比较口径）：只统计 actual 在 target ±10% 带内的样本">TTFT ms（±10%过滤）</th><th title="±10%入带口径 TG TPS；括号为参与统计样本数/入带样本数">TG TPS（±10%过滤）</th><th title="oMLX 服务进程树 phys_footprint 峰值（含 Metal 分配）；oMLX 自带 benchmark 的 PeakMem 是 mlx.get_peak_memory() 的 Metal 峰值，通常低 0.4–0.9GB">峰值内存 GB</th><th>输入 token</th><th>状态</th></tr></thead>
             <tbody id="overall-body"></tbody>
           </table>
         </div>
@@ -173,7 +173,7 @@
       <div id="tab-cells" class="tab-panel hidden">
         <div class="table-wrap">
           <table>
-            <thead><tr><th>模型</th><th>数据集</th><th>档位</th><th>有效/样本</th><th title="finish_reason=length（达到 max_tokens）的样本数；正常参与平均">触顶</th><th title="TG TPS 被抑制的样本数">TG无效</th><th title="in-band 样本数（进入平均）">ISL入带</th><th title="out-of-band 样本数（不进入平均）">ISL出带</th><th>TTFT ms</th><th>TG TPS</th><th title="oMLX 服务进程树 phys_footprint 峰值（含 Metal 分配）；oMLX 自带 benchmark 的 PeakMem 是 mlx.get_peak_memory() 的 Metal 峰值，通常低 0.4–0.9GB">峰值内存 GB</th><th>输入 token</th><th>状态</th></tr></thead>
+            <thead><tr><th>模型</th><th>数据集</th><th>档位</th><th>有效/样本</th><th title="finish_reason=length（达到 max_tokens）的样本数；正常参与平均">触顶</th><th title="TG TPS 被抑制的样本数">TG无效</th><th title="in-band 样本数（进入（±10%过滤）列）">ISL入带</th><th title="out-of-band 样本数（不进入（±10%过滤）列）">ISL出带</th><th title="全样本口径：所有 measured+ok 样本（含 ISL 出带）">TTFT ms</th><th title="全样本口径 TG TPS">TG TPS</th><th title="±10%入带口径（跨 run 比较口径）">TTFT ms（±10%过滤）</th><th title="±10%入带口径 TG TPS">TG TPS（±10%过滤）</th><th title="oMLX 服务进程树 phys_footprint 峰值（含 Metal 分配）；oMLX 自带 benchmark 的 PeakMem 是 mlx.get_peak_memory() 的 Metal 峰值，通常低 0.4–0.9GB">峰值内存 GB</th><th>输入 token</th><th>状态</th></tr></thead>
             <tbody id="cells-body"></tbody>
           </table>
         </div>

@@ -313,8 +313,9 @@ clone 只包含源码、配置、测试与文档；数据与结果需在目标�
 - 测试集由构造器生成：`tool/dataset/performance/build.py`（240 条）与
   `tool/dataset/accuracy/build.py`（2,000 行隐藏精度资产）；只读校验用各自的 `--check`。
 - **Windows / 无 oMLX.app 的机器也能重建测试集**：安装 `.[dev,datasets]` 后，
-  两个 `fetch.py` 会下载参考 tokenizer（`dataset/raw/tokenizer/MiniCPM5-1B/tokenizer.json`，
-  约 10 MB），无需 oMLX API。
+  两个 `fetch.py` 会下载通用参考 tokenizer（**cl100k_base**，性能/精度两侧共用
+  同一资产：官方 blob + `derive_cl100k.py` 确定性派生的 `tokenizer.json`，
+  共约 4.4 MB），无需 oMLX API、不依赖任何本地模型。
 - **不要**用 `./modelbench download` 初始化 `dataset/raw`：它是旧数据层的兼容下载入口，
   与当前 `dataset/` 布局不一致。
 - 数据未就绪时用 `./modelbench validate --offline --allow-missing` 先确认环境本身没问题。
