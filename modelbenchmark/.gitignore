@@ -9,16 +9,10 @@ __pycache__/
 *.log
 .DS_Store
 *.egg-info/
-.git/
-.github/
-
 output/
 build/
-reports/
-dist/
+reports/*
 harness/reports/
 harness/tasks/
-harness/state/journal.jsonl
 dataset/raw/
 dataset/.cache/
-dataset/test/**/testset.jsonl
