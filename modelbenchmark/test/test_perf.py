@@ -44,6 +44,48 @@ DEFAULT_CELLS = 24
 FIVE_SAMPLE_CELLS = 24  # 8 scenarios x 3 buckets; 5 samples still touch all cells
 
 
+def test_performance_testset_declares_osl_and_strict_input_tokens():
+    """The performance set owns its OSL (50) and strict input-token contract.
+
+    TG TPS is defined on a fixed 50-token decode window (product default, CLI/Web
+    override), and the dataset guarantees that every prompt tokenizes to exactly
+    its bucket target with the target model's tokenizer, so ``apply_testset``
+    must surface both declarations to the run config.
+    """
+    from modelbench.adapters.config.testsets import TestSet
+    from modelbench.domain.method import RunMethod
+
+    testsets = load_testsets()
+    perf = testsets["performance"]
+    assert perf.max_tokens == 50
+    assert perf.strict_input_tokens is True
+
+    cfg = load_config()
+    apply_testset(cfg, perf)
+    assert cfg.perf.max_tokens == 50
+    assert cfg.perf.strict_input_tokens is True
+
+    # A set with no declarations keeps the historical product defaults.
+    historical = load_config()
+    apply_testset(
+        historical,
+        TestSet(name="historical_performance", method=RunMethod.PERFORMANCE),
+    )
+    assert historical.perf.max_tokens == 50
+    assert historical.perf.strict_input_tokens is False
+
+
+def test_apply_testset_rejects_osl_on_accuracy_set():
+    """Accuracy generation length is fixed by judge.max_new_tokens, not by the set."""
+    from modelbench.adapters.config.testsets import TestSet
+    from modelbench.domain.method import RunMethod
+
+    cfg = load_config()
+    accuracy_set = TestSet(name="bad_accuracy", method=RunMethod.ACCURACY, max_tokens=64)
+    with pytest.raises(ValueError, match="only valid for performance"):
+        apply_testset(cfg, accuracy_set)
+
+
 def _base():
     cfg = load_config()
     apply_testset(cfg, load_testsets()["performance"])
@@ -569,7 +611,7 @@ def test_perf_jsonl_file_has_240_unique_samples():
 
 
 @requires_perf_data
-def test_performance_manifest_declares_token_semantics():
+def test_performance_manifest_declares_strict_token_semantics():
     from modelbench.paths import PROJECT_ROOT
 
     manifest = json.loads(
@@ -577,14 +619,21 @@ def test_performance_manifest_declares_token_semantics():
             encoding="utf-8"
         )
     )
-    assert "content tokens" in manifest["tokens_semantics"]
-    assert "messages[0].content" in manifest["tokens_semantics"]
-    assert "content tokens" in manifest["bucket_basis"]
-    assert manifest["tokens_mean"] > 0
-    assert manifest["default_run"]["measured_requests"] == 240
-    assert manifest["default_run"]["cells"] == 24
-    for stat in manifest["stats"].values():
-        assert "tokens_mean" in stat
+    # Strict mode relies on the dataset's zero-tolerance alignment contract.
+    alignment = manifest["alignment"]
+    assert "prompt tokens" in alignment["unit"]
+    assert alignment["tolerance_tokens"] == 0
+    assert "align.py" in alignment["verified_by"]
+    construction = manifest["construction"]
+    assert construction["tolerance_tokens"] == 0
+    assert construction["template_reserve_tokens"] == 0
+    assert construction["prompt_tokens"] == {"1k": 1024, "8k": 8192, "32k": 32768}
+    assert manifest["buckets"] == construction["prompt_tokens"]
+    assert manifest["max_tokens"] == 50
+    assert manifest["min_completion_tokens_required"] >= 50
+    assert manifest["rows"] == 240
+    assert sum(sum(cell.values()) for cell in manifest["cells"].values()) == 240
+    assert "reference" in manifest["tokenizer"]["role"]
 
 
 @requires_perf_data
@@ -857,6 +906,184 @@ def test_perf_config_decode_guard_default_and_override():
     assert PerfConfig(decode_guard=False).decode_guard is False
 
 
+def test_perf_config_strict_input_tokens_defaults_off():
+    from modelbench.adapters.config.settings import PerfConfig
+
+    assert PerfConfig().strict_input_tokens is False
+    assert PerfConfig(strict_input_tokens=True).strict_input_tokens is True
+
+
+# --------------------------------------------------------------------------- #
+# strict input-token alignment (strict_input_tokens)
+# --------------------------------------------------------------------------- #
+
+
+def test_exact_bounds_and_strict_tolerance_for_bucket():
+    """Strict bounds are a single point; the historical ±10% band is untouched."""
+    from modelbench.domain.context_tolerance import (
+        exact_bounds,
+        tolerance_for_bucket,
+    )
+
+    assert exact_bounds(1024) == (1024, 1024)
+    assert exact_bounds(8192) == (8192, 8192)
+    # 32K stays 32,768: no special case for the largest bucket.
+    assert exact_bounds(32768) == (32768, 32768)
+
+    assert tolerance_for_bucket("1k", strict=True) == (1024, 1024)
+    assert tolerance_for_bucket("8k", strict=True) == (8192, 8192)
+    assert tolerance_for_bucket("32k", strict=True) == (32768, 32768)
+    # Declared-count fallback resolves to that count, exactly.
+    assert tolerance_for_bucket(None, 5000, strict=True) == (5000, 5000)
+    # No target -> None in both modes (strict cannot invent a target).
+    assert tolerance_for_bucket(None, None, strict=True) is None
+
+    # Historical ±10% behaviour is unchanged by the strict flag's default.
+    assert tolerance_for_bucket("1k") == (921, 1126)
+    assert tolerance_for_bucket("8k") == (7372, 9011)
+    assert tolerance_for_bucket("32k") == (29491, 36044)
+    assert tolerance_for_bucket(None, None) is None
+
+
+def test_apply_testset_applies_and_clears_strict_input_tokens():
+    """A performance set's strict flag reaches perf config and never leaks."""
+    from modelbench.adapters.config.testsets import TestSet
+    from modelbench.domain.method import RunMethod
+
+    cfg = load_config()
+    strict_set = TestSet(
+        name="strict_perf",
+        method=RunMethod.PERFORMANCE,
+        strict_input_tokens=True,
+    )
+    apply_testset(cfg, strict_set)
+    assert cfg.perf.strict_input_tokens is True
+
+    # Switching to a set that does not declare it must clear the flag, so a
+    # re-used cfg cannot silently keep enforcing strict alignment.
+    plain_set = TestSet(name="plain_perf", method=RunMethod.PERFORMANCE)
+    apply_testset(cfg, plain_set)
+    assert cfg.perf.strict_input_tokens is False
+
+
+def test_apply_testset_rejects_strict_input_tokens_on_accuracy_set():
+    from modelbench.adapters.config.testsets import TestSet
+    from modelbench.domain.method import RunMethod
+
+    cfg = load_config()
+    accuracy_set = TestSet(
+        name="bad_accuracy",
+        method=RunMethod.ACCURACY,
+        strict_input_tokens=True,
+    )
+    with pytest.raises(ValueError, match="only valid for performance"):
+        apply_testset(cfg, accuracy_set)
+    assert cfg.perf.strict_input_tokens is False
+
+
+class _StubTokenizerClient:
+    """Minimal client for prebuilt request builds (tokenizer only, no transport)."""
+
+    def __init__(self, count=None, error=None):
+        self.count = count
+        self.error = error
+
+    def tokenize_messages(self, messages, model=None, tools=None):  # noqa: ANN001
+        if self.error is not None:
+            raise self.error
+        return self.count
+
+
+def _strict_orchestrator(tmp_path, client, run_id):
+    from modelbench.adapters.storage.writer import RunWriter
+    from modelbench.application.benchmark import Orchestrator
+
+    cfg = _base()
+    cfg.perf.strict_input_tokens = True
+    return Orchestrator(cfg, client, RunWriter(tmp_path, run_id=run_id))
+
+
+def test_strict_prebuilt_request_exact_match_uses_exact_bounds(tmp_path):
+    from modelbench.domain.scenarios.registry import build_scenario
+
+    cfg = _base()
+    spec = cfg.scenarios["knowledge_qa"]
+    scenario = build_scenario("knowledge_qa", spec.params)
+    sample = _prebuilt_sample(metadata={"tokens": 1024, "bucket": "1k"})
+    orchestrator = _strict_orchestrator(
+        tmp_path, _StubTokenizerClient(1024), run_id="strict-ok"
+    )
+    request = orchestrator._build_request(scenario, spec, "model-a", sample, 32768)
+    tolerance = request.context_meta["isl_tolerance"]
+    assert tolerance["ok"] is True
+    assert tolerance["low"] == tolerance["high"] == 1024
+    assert tolerance["target"] == 1024
+    assert tolerance["actual"] == 1024
+    assert request.context_meta["strict_input_tokens"] is True
+    # The decode guard (+35-token user message) must not be appended: the
+    # whole request is exactly the dataset prompt.
+    assert request.context_meta["decode_guard_applied"] is False
+    assert "decode_guard" not in request.context_meta
+    assert [message.role for message in request.messages] == ["system", "user"]
+    assert any(
+        "strict input alignment: decode guard disabled" in warning
+        for warning in orchestrator.stats.warnings
+    )
+
+
+def test_strict_prebuilt_request_mismatch_raises_sample_skipped(tmp_path):
+    from modelbench.application.benchmark import SampleSkipped
+    from modelbench.domain.scenarios.registry import build_scenario
+
+    cfg = _base()
+    spec = cfg.scenarios["knowledge_qa"]
+    scenario = build_scenario("knowledge_qa", spec.params)
+    sample = _prebuilt_sample(metadata={"tokens": 1024, "bucket": "1k"})
+    orchestrator = _strict_orchestrator(
+        tmp_path, _StubTokenizerClient(1023), run_id="strict-mismatch"
+    )
+    with pytest.raises(SampleSkipped) as info:
+        orchestrator._build_request(scenario, spec, "model-a", sample, 32768)
+    message = str(info.value)
+    assert message.startswith("strict_input_tokens: ")
+    assert "knowledge_qa/mmlu@1k/prebuilt-1" in message
+    assert "expected 1024 got 1023" in message
+
+
+def test_strict_prebuilt_request_unavailable_tokenizer_is_skip(tmp_path):
+    from modelbench.application.benchmark import SampleSkipped
+    from modelbench.domain.scenarios.registry import build_scenario
+
+    cfg = _base()
+    spec = cfg.scenarios["knowledge_qa"]
+    scenario = build_scenario("knowledge_qa", spec.params)
+    sample = _prebuilt_sample(metadata={"tokens": 1024, "bucket": "1k"})
+    orchestrator = _strict_orchestrator(
+        tmp_path,
+        _StubTokenizerClient(error=RuntimeError("tokenizer offline")),
+        run_id="strict-no-tokenizer",
+    )
+    with pytest.raises(SampleSkipped, match="tokenizer unavailable for model-a"):
+        orchestrator._build_request(scenario, spec, "model-a", sample, 32768)
+
+
+def test_strict_prebuilt_request_without_target_is_skip(tmp_path):
+    from modelbench.application.benchmark import SampleSkipped
+    from modelbench.domain.scenarios.registry import build_scenario
+
+    cfg = _base()
+    spec = cfg.scenarios["knowledge_qa"]
+    scenario = build_scenario("knowledge_qa", spec.params)
+    sample = _prebuilt_sample(
+        metadata={"tokens": None, "bucket": "unknown"}
+    )
+    orchestrator = _strict_orchestrator(
+        tmp_path, _StubTokenizerClient(100), run_id="strict-no-target"
+    )
+    with pytest.raises(SampleSkipped, match="has no token target"):
+        orchestrator._build_request(scenario, spec, "model-a", sample, 32768)
+
+
 def test_context_window_filter_uses_declared_tokens_for_prebuilt(tmp_path):
     """Prebuilt samples are filtered by their declared tokens (not model tokenizer)."""
     from modelbench.adapters.storage.writer import RunWriter
@@ -1017,23 +1244,18 @@ def test_declared_32k_bucket_over_model_window_is_not_testable():
 
 
 @requires_perf_data
-def test_prebuilt_tools_are_preserved_verbatim():
-    """Agentic scenarios keep their dataset tool schemas; the run never calls them."""
+def test_prebuilt_agentic_tool_schemas_live_in_prompt_verbatim():
+    """Strict-token rows serialize tool schemas into the prompt; the run forwards it.
+
+    The rebuilt performance set keeps the whole request one tokenizable prompt
+    (``tools: []``, ``tools_tokens: 0``), so agentic tool schemas live inside
+    ``messages[0].content``.  The runner must forward the stored messages
+    verbatim and must never inject API-level tools of its own.
+    """
     from modelbench.adapters.datasets.registry import get_adapter
     from modelbench.domain.scenarios.registry import build_scenario
 
     cfg = load_config()
-    standard = {"object", "number", "array", "integer", "string", "boolean", "null", "function"}
-
-    def walk_types(value, seen):
-        if isinstance(value, dict):
-            for key, item in value.items():
-                if key == "type" and isinstance(item, str):
-                    seen.add(item)
-                walk_types(item, seen)
-        elif isinstance(value, list):
-            for item in value:
-                walk_types(item, seen)
 
     for scenario_name in ("general_agent", "search_agent"):
         spec = cfg.scenarios[scenario_name]
@@ -1051,17 +1273,39 @@ def test_prebuilt_tools_are_preserved_verbatim():
         )
         assert request.context_meta["prebuilt"] is True
         assert sample.dataset
-        assert request.tools, scenario_name
-        seen = set()
-        walk_types(request.tools, seen)
-        assert seen <= standard, (scenario_name, seen - standard)
-        assert sample.metadata["tokens"] > sample.metadata["messages_tokens"]
-        assert sample.metadata["tools_tokens"] > 0
-        # Declared total equals messages+tools tokens (agent rows carry both).
-        assert (
-            sample.metadata["tokens"]
-            == sample.metadata["messages_tokens"] + sample.metadata["tools_tokens"]
-        )
+        assert sample.metadata["tools_tokens"] == 0
+        assert sample.metadata["tools"] == []
+        # No API-level tools are injected for prompt-only rows (the scenario
+        # adapter normalizes the empty stored list to None; either way the
+        # request carries no tool definitions).  Synthetic-row passthrough is
+        # covered by test_prebuilt_request_passthrough_skips_rendering_and_tokenizer.
+        assert not request.tools
+        # Prompt-only rows: declared total equals the messages token count.
+        assert sample.metadata["tokens"] == sample.metadata["messages_tokens"]
+        # The stored messages are forwarded untouched (no prompt rewriting).
+        stored = sample.metadata["messages"]
+        assert [message.content for message in request.messages] == [
+            str(message["content"]) for message in stored
+        ]
+
+    # The general_agent row carries its tool schema as prompt text.
+    spec = cfg.scenarios["general_agent"]
+    adapter = get_adapter(
+        "perf_jsonl",
+        raw_dir=Path(cfg.datasets.raw_dir),
+        processed_dir=Path(cfg.datasets.processed_dir),
+        params=dict(spec.params["dataset_params"]),
+        testset_dir=Path(cfg.datasets.testset_dir),
+    )
+    sample = adapter.load()[0]
+    scenario = build_scenario("general_agent", spec.params)
+    request = scenario.build_request(
+        "model-a", sample, None, lambda *args, **kwargs: 0, max_tokens=64
+    )
+    prompt = "\n".join(str(message.content) for message in request.messages)
+    assert "Tool: " in prompt
+    assert "```json" in prompt
+    assert '"parameters"' in prompt
 
 
 

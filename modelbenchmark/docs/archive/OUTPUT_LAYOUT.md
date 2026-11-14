@@ -175,7 +175,7 @@ output/
 |---|---|---|---|
 | `raw/<model>/**` | `writer.py:130-140` | 零读取（连测试都不读） | 14.8 MB/run |
 | `raw/samples/**` | `benchmark.py:1784-1793`（调用 `1296`） | 仅 `test_integration.py:621-622` 断言存在；指向它的 `sample_meta.raw_sample_path`（`benchmark.py:1754`）**零读取** | 27.5 MB/run |
-| `analysis/run.json`、`analysis/environment.json`、`analysis/samples_long.csv`、`analysis/README.md` | `writer.py:255/283/284/285` | 无 JSON/CSV 解析 | ① 被 `index.json.runs[].analysis` 列出；② Web 文件条下载按钮（`app.js:889`）；③ `test/test_results.py:93-111` 确实 `json.loads` 它们做断言（测试契约，非产品消费者） | 0.52 MB/run |
+| `analysis/run.json`、`analysis/environment.json`、`analysis/samples_long.csv`、`analysis/README.md` | `writer.py:255/283/284/285` | 无 JSON/CSV 解析；① 被 `index.json.runs[].analysis` 列出；② Web 文件条下载按钮（`app.js:889`）；③ `test/test_results.py:93-111` 确实 `json.loads` 它们做断言（测试契约，非产品消费者） | 0.52 MB/run |
 | `summary.csv`、`cells.csv`、`samples.csv` | `writer.py:375-430/432-482/484-487` | 仅测试断言表头 | 0.06 MB/run |
 | `result_analysis/**/batch.json`、`README.md` | `excel_report.py:454-459` | 零读取（权威副本在 `output/batches/`） | 4 KB/批 |
 
@@ -758,8 +758,8 @@ prompt_sha256, truncated, error, timestamp
 
 同批一并处理的字段级自重复：
 
-| 字段 | 现象 | 处置 |
-|---|---|---|
+| 字段 | 现象 | 处置 | 证据 |
+|---|---|---|---|
 | `hardware.json.upload_fields` | 与 `hardware.json` 顶层 6 个字段完全相同（同文件内自重复；生产者 `hardware.py:153-171`——158-163 写顶层、164-171 写 `upload_fields`） | **保留 `upload_fields`**（读者用它），删掉与之重复的顶层扁平字段；结构化数据留在 `cpu`/`memory`/`os` 块。已核：这 6 个顶层字段无生产消费者，删除安全 | `excel_report.py:185,189-198`；`app.js:1000` |
 | `omlx.json.upload_projection` | 全仓**零读取方**（只有写入点 `environment.py:269`） | **删字段** + 同步改断言 | `test/test_integration.py:606-607`、`test/test_perf.py:274-275` |
 

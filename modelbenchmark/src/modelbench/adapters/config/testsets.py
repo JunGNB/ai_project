@@ -30,6 +30,8 @@ from pydantic import BaseModel, Field
 
 from modelbench.paths import PROJECT_ROOT
 
+from modelbench.domain.method import RunMethod
+
 TESTSET_DIR = PROJECT_ROOT / "dataset" / "test"
 
 
@@ -42,7 +44,23 @@ class TestSet(BaseModel):
     name: str
     title: Optional[str] = None
     description: Optional[str] = None
+    #: Test method this set belongs to (``performance`` / ``accuracy``).  The
+    #: runner applies it via ``application.plan.apply_testset`` (WP-2); this
+    #: field is the declarative contract the CLI/Web use to group test sets.
+    method: RunMethod = RunMethod.PERFORMANCE
     scenarios: Dict[str, TestSetScenario] = Field(default_factory=dict)
+    #: Declared generation length (OSL) for a performance set.  ``apply_testset``
+    #: applies it to ``perf.max_tokens`` so a set built for long answers cannot be
+    #: accidentally run at the 50-token default (which makes TG TPS barely
+    #: measurable).  Explicit ``--max-tokens`` still wins over this value.
+    max_tokens: Optional[int] = Field(default=None, gt=0)
+    #: Strict input-token contract for a performance set.  When true, every
+    #: pre-built sample must tokenize to *exactly* its bucket target
+    #: (1024/8192/32768) with the target model's tokenizer; mismatching samples
+    #: are skipped (never measured) and the aggregates use the exact bounds.
+    #: ``apply_testset`` applies it to ``perf.strict_input_tokens``; accuracy
+    #: sets reject it (their prompt length is not a bucket contract).
+    strict_input_tokens: bool = False
 
 
 def load_testsets(directory: Optional[Path] = None) -> Dict[str, TestSet]:

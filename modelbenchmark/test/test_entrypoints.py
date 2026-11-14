@@ -135,6 +135,73 @@ def test_run_dry_run_shows_performance_plan_and_estimate():
         assert "estimated cells: ~24" in out
 
 
+def test_run_and_analyze_help_expose_method_flags():
+    import argparse
+
+    from modelbench.interfaces.cli import build_parser
+
+    parser = build_parser()
+    sub = next(
+        action
+        for action in parser._actions
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    run_help = sub.choices["run"].format_help()
+    assert "--method" in run_help
+    assert "{performance,accuracy}" in run_help
+    analyze_help = sub.choices["analyze"].format_help()
+    assert "--method" in analyze_help
+    assert "{auto,performance,accuracy}" in analyze_help
+    assert "--noise-baseline-pp" in analyze_help
+
+
+@pytest.mark.skipif(not VENV_READY, reason="requires project .venv")
+def test_run_dry_run_explicit_accuracy_method():
+    proc = _run_launcher(
+        ["run", "--method", "accuracy", "--models", "minicpm5-1b", "--dry-run"]
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    out = proc.stdout
+    assert "mode: accuracy" in out
+    assert "scenarios (8):" in out
+    assert "judge families:" in out
+    assert "temperature=0" in out
+    # Accuracy never exposes performance-only plan knobs.
+    assert "max_tokens:" not in out
+    assert "context filter:" not in out
+
+
+@pytest.mark.skipif(not VENV_READY, reason="requires project .venv")
+def test_run_dry_run_explicit_performance_method_still_supported():
+    proc = _run_launcher(
+        ["run", "--method", "performance", "--models", "minicpm5-1b", "--dry-run"]
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    out = proc.stdout
+    assert "mode: performance" in out
+    assert "samples_per_dataset:" in out
+
+
+@pytest.mark.skipif(not VENV_READY, reason="requires project .venv")
+def test_run_method_testset_conflict_is_a_clear_error():
+    proc = _run_launcher(
+        ["run", "--method", "accuracy", "--testset", "performance", "--dry-run"]
+    )
+    assert proc.returncode == 1
+    err = proc.stderr
+    assert "conflicts" in err
+    assert "method" in err
+
+
+@pytest.mark.skipif(not VENV_READY, reason="requires project .venv")
+def test_run_accuracy_rejects_performance_only_flags():
+    proc = _run_launcher(
+        ["run", "--method", "accuracy", "--max-tokens", "128", "--dry-run"]
+    )
+    assert proc.returncode == 1
+    assert "max-tokens" in proc.stderr or "max_tokens" in proc.stderr
+
+
 def test_setup_dry_run_plans_without_installing(tmp_path):
     """`setup` must delegate to tool/bootstrap.py on every platform.
 

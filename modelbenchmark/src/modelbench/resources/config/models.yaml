@@ -9,7 +9,7 @@
 # SpecPrefill / ANE acceleration must NOT be configured here.
 #
 # Keep this list in sync with `GET /v1/models`; `modelbench validate` warns on
-# any configured/server-only difference.  Last synced 2026-11-07 (12 models).
+# any configured/server-only difference.  Last synced 2026-11-14 (11 models).
 models:
   - id: MiniCPM5-1B
     alias: minicpm5-1b
@@ -19,6 +19,12 @@ models:
   - id: MiniCPM-V-4.6
     alias: minicpm-v-4.6
     notes: "vision-language model, text-only benchmark"
+    # Bundled mlx_vlm 0.7.10 processor bug: explicit enable_thinking=false
+    # renders "<|im_start|>assistant\n" without the closed empty <think></think>
+    # block, so this non-thinking model starts reasoning and can consume the
+    # whole max_new_tokens budget. Its template default (no kwargs) is the
+    # correct no-think prompt, so thinking_mode=disabled omits the kwargs.
+    thinking_disable: omit
   - id: MiniCPM-V-4.7-1B
     alias: minicpm-v-4.7-1b
   - id: MiniCPM-o-4_5-4bit
@@ -39,9 +45,6 @@ models:
   - id: gemma-4-E4B-it
     alias: gemma-4-e4b-full
     notes: "16.8GB full-weight gemma 4 E4B"
-  - id: gemma-4-E4B-it-MLX-4bit
-    alias: gemma-4-e4b
-    notes: "MLX 4-bit quantization"
   - id: gemma-4-E4B-it-oQ4
     alias: gemma-4-e4b-oq4
     notes: "oQ4 quantization"

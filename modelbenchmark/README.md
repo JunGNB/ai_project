@@ -1,12 +1,16 @@
-# 本地大模型性能基准测试系统
+# 本地大模型基准测试系统（性能 + 精度双方法）
 
-对本地 oMLX 服务中的模型做端到端黑盒**性能测试**：按测试集场景（1K / 8K / 32K 分桶）
-逐样本采集 **TTFT、TG TPS、峰值内存、输入上下文大小**，按
-`(模型, 场景, 数据集, 档位)` 形成 cell，并保留逐样本结果；
-每次 run 自动采集硬件与 oMLX 配置快照。提供本地 Web 控制台与 CLI。
+对本地 oMLX 服务中的模型做端到端黑盒基准，支持**两种测试方法**（共用同一套测量内核与结果布局）：
 
-> 0.3 起旧的多策略测试（perf/accuracy/context/custom）与上下文矩阵已删除；
-> 当前只有性能基准测试。准确性判分代码保留但**不参与运行**。
+- **性能（`method=performance`）**：按测试集场景（1K / 8K / 32K 分桶）逐样本采集
+  **TTFT、TG TPS、峰值内存、输入上下文大小**，按 `(模型, 场景, 数据集, 档位)` 形成 cell，
+  不判分（`score` 恒 null）。
+- **精度（`method=accuracy`）**：8 场景 × 250 = 2,000 条固定样本，`temperature=0` / 冷缓存 /
+  无 decode guard / `repeats=1`，用 5 类**确定性判题器**逐样本判分，输出场景分、8 场景宏平均、
+  语言/数据集剖面，并支持 bf16 vs 量化的配对 Δ（McNemar/Holm）。
+
+每次 run 自动采集硬件与 oMLX 配置快照，保留逐样本证据；提供本地 Web 控制台与 CLI。
+两种方法**不混算、不合成综合分**，用 `run_id` 的方法段（`__performance__`/`__accuracy__`）区分。
 
 ## 新机器安装
 
@@ -27,6 +31,9 @@ cd /d D:\path\to\modelbenchmark
 - 一键脚本会在项目内创建 `.venv` 并安装 `.[dev]`；也可手动
   `python3.12 -m venv .venv` + `pip install -e ".[dev]"`（Windows 用 `py -3.12` 与
   `.venv\Scripts\python.exe -m pip`）。
+- **精度测试需要额外安装 `.[eval]`**（判题依赖 `nltk`/`langdetect`/`absl-py`/`immutabledict`/
+  `jieba`/`rouge`）：`.venv/bin/pip install -e ".[eval]"`；缺失时精度 run 会显式告警并把相关
+  样本记为 `judge_error`（不静默给分），见 [docs/spec/22-accuracy-test-plan.md](docs/spec/22-accuracy-test-plan.md) §3.2。
 - 完整说明（支持矩阵、镜像/代理、可选 extras、安装验证、常见问题、重建）见
   [docs/guides/40-install.md](docs/guides/40-install.md)。
 - live benchmark 还需要**可达的 oMLX 服务**；Windows/Linux 上可先用离线 validate、
@@ -45,8 +52,12 @@ cd /path/to/modelbenchmark
 #    ./modelbench web --no-open              # 不自动打开浏览器
 #    ./modelbench web --idle-timeout 1800    # 无请求 30 分钟后自动停止
 
-# 2) CLI：每个场景取 5 个样本（默认 8 场景共 40 请求，快速对比）
+# 2) CLI：性能 —— 每个场景取 5 个样本（8 场景共 40 请求，快速对比）
 ./modelbench run --models minicpm5-1b qwen3.5-9b --samples 5
+
+# 2b) CLI：精度 —— 全量 2,000 样本（约 3h/模型；先构建 accuracy testset.jsonl）
+./modelbench run --method accuracy --models minicpm5-1b
+./modelbench run --method accuracy --models minicpm5-1b --samples 5   # 冒烟 8×5=40 条
 
 # 查看结果目录索引 / 重建索引 / 校验证据链
 ./modelbench runs
@@ -56,11 +67,13 @@ cd /path/to/modelbenchmark
 # 3) 默认测试集全部样本（耗时最长）
 ./modelbench run --models minicpm5-1b
 
-# 4) 只看计划
+# 4) 只看计划（两种方法）
 ./modelbench run --models minicpm5-1b --samples 5 --dry-run
+./modelbench run --method accuracy --models minicpm5-1b --samples 5 --dry-run
 
-# 5) 结果对比（run 目录或单段 run_id）
+# 5) 结果对比（run 目录或单段 run_id）：性能用默认，精度加 --method accuracy
 ./modelbench analyze <run_id_a> <run_id_b>
+./modelbench analyze <run_id_bf16> <run_id_quant> --paired --method accuracy
 ```
 
 > 源码根目录为 `src/`（Python 标准库已有 `code` 模块，避免包名冲突）；其余按
@@ -100,36 +113,46 @@ REM Windows（cmd）；PowerShell 把 .cmd 换成 .ps1
 
 ## 测试内容（概览）
 
-对每个 `模型 × 场景 × 上下文档位`（cell）串行测量逐样本 TTFT / TG TPS / TPOT / 峰值内存 /
-输入上下文大小；默认 8 场景 × 1K/8K/32K × 10 = 240 measured 请求 / 24 cells；每次 run 采集
-硬件 + oMLX 环境快照。性能不判分；固定一套 testset 全模型复用，actual ISL 按 target ±10%
-入带聚合（不跳过样本）。
+两种方法共用测量内核（冷缓存 fail-closed、模型默认配置、双锁串行、逐样本证据、环境快照），
+但口径、判分与产物形状不同：
+
+- **性能**：对每个 `模型 × 场景 × 上下文档位`（cell）串行测量逐样本 TTFT / TG TPS / TPOT /
+  峰值内存 / 输入上下文大小；默认 8 场景 × 1K/8K/32K × 10 = 240 measured 请求 / 24 cells；
+  不判分；固定一套 testset 全模型复用，actual ISL 按 target ±10% 入带聚合（不跳过样本）。
+- **精度**：8 场景 × 250 = 2,000 条固定样本；`temperature=0` / cold / 无 decode guard /
+  `repeats=1`；5 类确定性判题（`mc_letter`/`ifeval`/`normalized_match`/`code_exec`/
+  `tool_call`，无 LLM judge、无网络）；输出场景分、8 场景宏平均、语言/数据集剖面与配对 Δ；
+  全量约 3h/模型（长上下文约 2–2.5h）。
 
 **口径与判据的单一事实源**（本 README 只留概览，细节以链接为准）：
 
 - 测量口径/指标定义：[docs/spec/20-methodology.md](docs/spec/20-methodology.md)
-- 测试方案与验收：[docs/spec/21-test-plan.md](docs/spec/21-test-plan.md)
+- 性能测试方案与验收：[docs/spec/21-test-plan.md](docs/spec/21-test-plan.md)
+- 精度测试方案与验收：[docs/spec/22-accuracy-test-plan.md](docs/spec/22-accuracy-test-plan.md)
+- 双方法架构/分派：[docs/design/32-method-architecture.md](docs/design/32-method-architecture.md)
 - 测试集设计与 ±10% 带推导：[docs/spec/11-performance-testset.md](docs/spec/11-performance-testset.md)
-- `output/` 产物契约：[docs/design/31-output-contract.md](docs/design/31-output-contract.md)
+  与 [docs/spec/12-accuracy-testset.md](docs/spec/12-accuracy-testset.md)
+- `output/` 产物契约（两种方法形状）：[docs/design/31-output-contract.md](docs/design/31-output-contract.md)
 - 数据根（raw/testset/许可）：[dataset/README.md](dataset/README.md)
-- 配置：`src/modelbench/resources/config/default.yaml`（`perf`/`run`/`datasets`）与
+- 配置：`src/modelbench/resources/config/default.yaml`（`method`/`perf`/`accuracy`/`run`/`datasets`）与
   `models.yaml`（模型清单，仅 MoE 模型带加载设置）
 
-> `dataset/test/accuracy/`（2,000 条）是隐藏离线资产，不参与运行。
-> 默认口径与 vLLM / oMLX 官方榜不同，**不可直接横比**。
+> `dataset/test/accuracy/`（2,000 条）已接入精度方法（`method=accuracy`，独立 run），
+> 不参与性能 run。默认口径与 vLLM / oMLX 官方榜不同，**不可直接横比**；精度分数也不得与
+> 性能指标合并。
 
 ## 目录
 
 ```
 dataset/raw/    # 上游原始文件（只读；download_manifest.json 记 url/size/sha256）
-dataset/test/   # 测试集：performance/（默认 240 条）、accuracy/（隐藏离线资产）
+dataset/test/   # 测试集：performance/（240 条）、accuracy/（2,000 条，method=accuracy）
 dataset/.cache/ # tokenizer 计数缓存（可删，重跑重建）
 output/         # 运行结果与证据：runs/<run_id>/（平铺 bundle）、batches/（批次元数据）、
-                # blobs/prompts/（prompt 池）、exports/（按需 Excel）、
+                # blobs/prompts/（prompt 池）、exports/（Excel）、
                 # archive/（归档，GC 引用根）、.state/、index.json
 src/modelbench/
-  domain/       # 纯领域：models/metrics/scenarios/evaluators
-  application/  # 编排：ports/plan/benchmark
+  domain/       # 纯领域：models/metrics/accuracy_metrics/method/scenarios/judges
+  application/  # 编排：ports/methods/plan/benchmark/accuracy
   adapters/     # IO：config/datasets/omlx/storage/host
   interfaces/   # 交付：cli/web/analysis
   resources/    # YAML 配置（随包分发）
@@ -144,13 +167,16 @@ docs/           # 文档：spec/（规范）、design/（设计/契约）、guid
 ## 文档
 
 - [docs/README.md](docs/README.md)：**文档索引与防漂移机制**（先看这里）
-- 规范：[docs/spec/21-test-plan.md](docs/spec/21-test-plan.md)（测试方案与验收）、
-  [docs/spec/20-methodology.md](docs/spec/20-methodology.md)（指标/缓存/token 口径）、
+- 规范：[docs/spec/21-test-plan.md](docs/spec/21-test-plan.md)（性能测试方案与验收）、
+  [docs/spec/22-accuracy-test-plan.md](docs/spec/22-accuracy-test-plan.md)（精度测试方案与验收）、
+  [docs/spec/20-methodology.md](docs/spec/20-methodology.md)（指标/缓存/token/判分口径）、
   [docs/spec/11-performance-testset.md](docs/spec/11-performance-testset.md)、
   [docs/spec/12-accuracy-testset.md](docs/spec/12-accuracy-testset.md)（样本集设计）、
+  [docs/spec/13-testset-portability.md](docs/spec/13-testset-portability.md)（跨设备/跨系统比较准入）、
   [dataset/README.md](dataset/README.md)（数据根：来源/许可/数据流）
 - 设计：[docs/design/30-architecture.md](docs/design/30-architecture.md)（架构与实现）、
   [docs/design/31-output-contract.md](docs/design/31-output-contract.md)（`output/` 契约/schema 3.0）、
+  [docs/design/32-method-architecture.md](docs/design/32-method-architecture.md)（双方法架构/分派）、
   [docs/design/34-feasibility.md](docs/design/34-feasibility.md)（可行性/预算）、
   [docs/design/33-project-structure.md](docs/design/33-project-structure.md)（自动生成的源码清单）
 - 操作：[docs/guides/40-install.md](docs/guides/40-install.md)（安装）、

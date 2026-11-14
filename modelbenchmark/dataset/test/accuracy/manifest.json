@@ -1,10 +1,10 @@
 {
   "schema_version": "accuracy/v1",
   "name": "accuracy",
-  "description": "8 scenarios x 250 rows, small-model accuracy set (bf16 vs quantized); hidden offline data asset",
-  "status": "offline-asset",
-  "runner": "not wired",
-  "hidden": true,
+  "description": "8 scenarios x 250 rows, wired accuracy test set (bf16 vs quantized); deterministic judging",
+  "status": "wired",
+  "runner": "accuracy",
+  "hidden": false,
   "rows": 2000,
   "per_scenario": 250,
   "seed": 42,
@@ -1978,7 +1978,7 @@
     "Instruction following uses IFEval; the performance set's reference pool uses the same IFEval source but is never scored.",
     "Coding uses HumanEval + MBPP (not LiveCodeBench); both are easier sets chosen for 1B-class models.",
     "Every row carries judge.max_new_tokens (knowledge/multilingual 1536, instruction 1024, math 512, coding 768, general_agent 256, search 32, long_context the official task maxlen).",
-    "Accuracy is a hidden offline data asset: no evaluator is wired into the run and no score may be quoted from it."
+    "Accuracy is a first-class test method: every response is scored by a deterministic judge and accuracy scores are never mixed into performance aggregates."
   ],
   "files": {
     "testset.jsonl": {

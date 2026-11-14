@@ -2,6 +2,8 @@
 const state = {
   overview: null,
   models: new Set(),
+  // Active test method (not persisted: a fresh page always starts on performance).
+  method: "performance",
   testset: null,
   scenarios: new Map(),   // scenario -> {selected, count, samples, total, selectedIds, manual, loading}
   sampleModal: null,      // {scenario, testset, filter}
@@ -15,6 +17,26 @@ const state = {
   samplesSeq: 0,          // guards against out-of-order pagination responses
   samplesLoaded: false,
 };
+
+//: Method UI metadata (server also exposes the overview methods field; the cards are
+//: static so the first paint works before the overview request returns).
+const METHOD_INFO = {
+  performance: {
+    title: "性能测试",
+    defaultTestset: "performance",
+    buildHint: "性能数据未就绪：按 dataset/README.md 初始化 dataset/raw 并构建 dataset/test/performance/testset.jsonl",
+  },
+  accuracy: {
+    title: "精度测试",
+    defaultTestset: "accuracy",
+    buildHint: "精度数据未就绪：先运行 python tool/dataset/accuracy/fetch.py && python tool/dataset/accuracy/build.py（见 dataset/README.md）",
+  },
+};
+const currentMethod = () => state.method || "performance";
+const methodLabel = (method) => (METHOD_INFO[method] || METHOD_INFO.performance).title;
+const boolText = (value) => (value === true ? "是" : value === false ? "否" : "-");
+const ciText = (low, high, digits = 3) =>
+  low != null && high != null ? `${fmt(low, digits)}–${fmt(high, digits)}` : "-";
 
 const PAGE_SIZE = 100;
 const $ = (sel) => document.querySelector(sel);
@@ -109,18 +131,60 @@ function renderOverview(data) {
     // per-cell count is intentionally not a UI parameter.
     $("#warmup-enabled").checked = Number(runDefaults.warmup_per_model) > 0;
   }
+  renderMethodCards();
   renderModels(data.models || [], data.model_sync || null);
-  if (!state.testset) {
-    const testsets = data.testsets || [];
-    const first = testsets.find((ts) => ts.name === "performance") || testsets[0];
-    if (first) {
-      state.testset = first.name;
-      state.openTestsets.add(first.name);
-      resetScenarioState(first);
-    }
-  }
+  ensureTestsetForMethod();
   renderTestsets();
   renderRuns(data.runs || []);
+  updateEstimate();
+}
+
+function renderMethodCards() {
+  const method = currentMethod();
+  $$(".method-card").forEach((card) => {
+    const active = card.dataset.method === method;
+    card.classList.toggle("active", active);
+    card.setAttribute("aria-checked", String(active));
+  });
+  const pill = $("#method-pill");
+  if (pill) pill.textContent = method;
+  const paramsPill = $("#params-pill");
+  if (paramsPill) paramsPill.textContent = method === "accuracy" ? "accuracy" : "perf";
+  $("#perf-params")?.classList.toggle("hidden", method !== "performance");
+  $("#accuracy-params")?.classList.toggle("hidden", method !== "accuracy");
+}
+
+function visibleTestsets() {
+  const method = currentMethod();
+  return (state.overview?.testsets || []).filter(
+    (ts) => (ts.method || "performance") === method
+  );
+}
+
+function ensureTestsetForMethod() {
+  const visible = visibleTestsets();
+  if (visible.some((ts) => ts.name === state.testset)) return currentTestset();
+  const preferred = (METHOD_INFO[currentMethod()] || {}).defaultTestset;
+  const target = visible.find((ts) => ts.name === preferred) || visible[0] || null;
+  state.testset = target ? target.name : "";
+  state.scenarios = new Map();
+  if (target) {
+    state.openTestsets.add(target.name);
+    resetScenarioState(target);
+  }
+  return target;
+}
+
+function switchMethod(method) {
+  if (!METHOD_INFO[method] || method === currentMethod()) return;
+  state.method = method;
+  renderMethodCards();
+  const target = ensureTestsetForMethod();
+  renderTestsets();
+  // Missing accuracy data must not crash the console: show the build command.
+  if (target && target.available === false) {
+    toast(METHOD_INFO[method].buildHint, true);
+  }
   updateEstimate();
 }
 
@@ -314,6 +378,21 @@ function currentTestset() {
   return (state.overview?.testsets || []).find((t) => t.name === state.testset);
 }
 
+// Strict input-token contract: the test set declares it (testset.yaml
+// ``strict_input_tokens``).  Prompts must be rebuilt per model before running.
+const testsetIsStrict = (ts) => Boolean(ts && ts.strict_input_tokens);
+
+function renderStrictHint() {
+  const node = $("#strict-hint");
+  if (!node) return;
+  const ts = currentTestset();
+  const strict = testsetIsStrict(ts);
+  node.classList.toggle("hidden", !strict);
+  if (!strict) return;
+  node.innerHTML = "严格对齐：跑分前用 <code>tool/dataset/performance/align.py</code> "
+    + "按目标模型 tokenizer 对齐样本；未对齐的样本会跳过。";
+}
+
 function resetScenarioState(testset) {
   state.scenarios = new Map();
   for (const scenario of testset.scenarios || []) {
@@ -344,21 +423,33 @@ function ensureTestset(name) {
 
 function renderTestsets() {
   const container = $("#testsets");
-  const testsets = state.overview?.testsets || [];
+  const all = state.overview?.testsets || [];
+  const method = currentMethod();
+  const testsets = all.filter((ts) => (ts.method || "performance") === method);
   if (!testsets.length) {
-    container.innerHTML = `<div class="empty">dataset/test/ 下没有测试集</div>`;
+    const hint = all.length
+      ? `当前方法（${methodLabel(method)}）没有可用测试集`
+      : "dataset/test/ 下没有测试集";
+    container.innerHTML = `<div class="empty">${esc(hint)}</div>`;
+    renderContextWindows();
+    renderStrictHint();
     return;
   }
   container.innerHTML = testsets.map((ts) => {
     const active = ts.name === state.testset;
     const scenarios = ts.scenarios || [];
-    const nSamples = scenarios.reduce((sum, s) => sum + (s.samples_total || 0), 0);
-    const nCells = scenarios.reduce((sum, s) => sum + (s.cells_total || 0), 0);
+    const nSamples = ts.samples_total ?? scenarios.reduce((sum, s) => sum + (s.samples_total || 0), 0);
+    const nCells = ts.cells_total ?? scenarios.reduce((sum, s) => sum + (s.cells_total || 0), 0);
+    const unavailable = ts.available === false
+      ? ` <span class="badge warn" title="数据未构建">数据缺失</span>` : "";
+    const strictBadge = testsetIsStrict(ts)
+      ? ` <span class="badge" title="prompt token 必须精确等于档位目标；跑分前用 align.py 对齐">严格对齐</span>` : "";
+    const maxTokens = ts.max_tokens != null ? ` · max_tokens ${esc(ts.max_tokens)}` : "";
     return `<label class="testset-item ${active ? "active" : ""}" data-testset="${esc(ts.name)}">
       <input type="checkbox" data-testset-check ${active ? "checked" : ""} title="选择该测试集">
       <span class="testset-main">
-        <span class="testset-title">${esc(ts.title || ts.name)}</span>
-        <span class="testset-meta">${esc(ts.directory || "")} · ${scenarios.length} 场景 · ${nSamples} 样本 · ${nCells} 测试项</span>
+        <span class="testset-title"><span class="badge">${esc(methodLabel(ts.method || "performance"))}</span> ${esc(ts.title || ts.name)}${unavailable}${strictBadge}</span>
+        <span class="testset-meta">${esc(ts.directory || "")} · ${scenarios.length} 场景 · ${nSamples || "-"} 样本 · ${nCells || "-"} 测试项${maxTokens}</span>
       </span>
     </label>`;
   }).join("");
@@ -376,7 +467,29 @@ function renderTestsets() {
       updateEstimate();
     });
   });
+  // Context buckets only exist for the performance method.
   renderContextWindows();
+  renderStrictHint();
+  syncMaxTokensPlaceholder();
+}
+
+function syncMaxTokensPlaceholder() {
+  const input = $("#max-tokens");
+  if (!input) return;
+  const ts = currentTestset();
+  const declared = ts && ts.max_tokens != null ? ts.max_tokens : null;
+  input.placeholder = declared != null
+    ? `留空 = 测试集声明（${declared}）`
+    : "留空 = 配置默认（50）";
+  input.title = declared != null
+    ? `该测试集声明 max_tokens=${declared}；填写本项会覆盖它（仅改生成长度，不影响输入长度对齐）`
+    : "留空使用配置默认值（50）；该测试集未声明 max_tokens";
+  const hint = $("#max-tokens-hint");
+  if (hint) {
+    hint.textContent = declared != null
+      ? `当前生效 ${declared}（测试集声明；填写可覆盖，仅改生成长度）`
+      : "该测试集未声明，留空即配置默认 50；填写可覆盖";
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -447,7 +560,7 @@ function renderSampleModal() {
       ${st.selectedIds.has(sample.sample_id) ? "checked" : ""}></td>
     <td class="mono">${esc(sample.sample_id)}</td>
     <td class="sample-question" title="${esc(sample.question || "")}">${esc(sample.question || "")}</td>
-    <td>${int(sample.context_chars)}</td>
+    <td title="${int(sample.context_chars)} 字符">${sample.est_context_tokens != null ? int(sample.est_context_tokens) : "-"}</td>
   </tr>`).join("") || `<tr><td colspan="4" class="empty">没有匹配样本</td></tr>`;
   const all = st.samples || [];
   const allChecked = all.length > 0 && all.every((sample) => st.selectedIds.has(sample.sample_id));
@@ -497,18 +610,7 @@ function scenarioPlan(name) {
 
 let estimateSeq = 0;
 
-function estimatePayload(names) {
-  const payload = {
-    models: [...state.models],
-    testset: state.testset,
-    scenarios: names,
-  };
-  const globalSamples = parseInt($("#samples").value, 10);
-  if (globalSamples) payload.samples = globalSamples;
-  const repeats = parseInt($("#repeats").value, 10);
-  if (repeats) payload.repeats = repeats;
-  const windows = selectedContextWindows();
-  if (windows.length) payload.context_windows = windows;
+function addScenarioSelections(payload, names) {
   const scenarioSamples = {};
   const sampleIds = {};
   for (const name of names) {
@@ -519,10 +621,41 @@ function estimatePayload(names) {
   }
   if (Object.keys(scenarioSamples).length) payload.scenario_samples = scenarioSamples;
   if (Object.keys(sampleIds).length) payload.sample_ids = sampleIds;
+}
+
+function estimatePayload(names) {
+  const method = currentMethod();
+  const payload = {
+    models: [...state.models],
+    testset: state.testset,
+    scenarios: names,
+    method,
+  };
+  if (method === "accuracy") {
+    // Accuracy: only the per-scenario sample count (+ thinking/warmup). The
+    // protocol (cold / temp=0 / no guard / repeats=1) is fixed server-side.
+    const accuracySamples = parseInt($("#accuracy-samples").value, 10);
+    if (accuracySamples) payload.samples = accuracySamples;
+    payload.thinking_mode = $("#thinking-mode").value;
+    payload.warmup_per_model = $("#warmup-enabled").checked ? 1 : 0;
+    addScenarioSelections(payload, names);
+    return payload;
+  }
+  const globalSamples = parseInt($("#samples").value, 10);
+  if (globalSamples) payload.samples = globalSamples;
+  const repeats = parseInt($("#repeats").value, 10);
+  if (repeats) payload.repeats = repeats;
+  const windows = selectedContextWindows();
+  if (windows.length) payload.context_windows = windows;
+  addScenarioSelections(payload, names);
   return payload;
 }
 
 function renderEstimateText(models, names, estimate, error) {
+  if (currentMethod() === "accuracy") {
+    renderAccuracyEstimate(models, names, estimate, error);
+    return;
+  }
   const windows = selectedContextWindows();
   const parts = [`${models} 模型`, `${names.length} 数据集`];
   if (error) {
@@ -537,6 +670,33 @@ function renderEstimateText(models, names, estimate, error) {
     parts.push("预计 样本数开始后确定");
   }
   if (windows.length) parts.push(`上下文筛选 ${contextFilterLabel(windows)}`);
+  const ts = currentTestset();
+  if (testsetIsStrict(ts)) parts.push("严格对齐");
+  if (ts && ts.max_tokens != null) parts.push(`max_tokens ${ts.max_tokens}`);
+  $("#estimate").textContent = parts.join(" · ");
+}
+
+function renderAccuracyEstimate(models, names, estimate, error) {
+  const parts = [`精度 · ${models} 模型`, `${names.length} 场景`];
+  let perModel = null;
+  if (error) {
+    parts.push("预计样本数开始后确定");
+    parts.push(`估算失败：${error}`);
+  } else if (estimate && estimate.samples_total != null) {
+    parts.push(`计划 ${estimate.samples_total} 个样本`);
+    perModel = models ? Math.round(estimate.samples_total / models) : null;
+    if (perModel != null && names.length) {
+      parts.push(`约 ${Math.round(perModel / names.length)} 样本/场景`);
+    }
+  } else {
+    parts.push("预计样本数开始后确定（默认 8 × 250 = 2,000/模型）");
+  }
+  const hint = $("#accuracy-estimate-hint");
+  if (hint) {
+    hint.textContent = perModel != null
+      ? `计划约 ${perModel} 样本/模型（${names.length} 场景）。`
+      : "每场景 250 × 8 = 2,000 样本/模型；全量约 3h/模型。";
+  }
   $("#estimate").textContent = parts.join(" · ");
 }
 
@@ -575,34 +735,36 @@ async function updateEstimate() {
 async function startRun() {
   const names = selectedScenarioNames();
   if (!state.models.size || !names.length) return;
+  const method = currentMethod();
   const payload = {
     models: [...state.models],
     testset: state.testset,
     scenarios: names,
-    cache_mode: $("#cache-mode").value,
-    thinking_mode: $("#thinking-mode").value,
+    method,
   };
-  const globalSamples = parseInt($("#samples").value, 10);
-  const maxTokens = parseInt($("#max-tokens").value, 10);
-  const repeats = parseInt($("#repeats").value, 10);
-  if (globalSamples) payload.samples = globalSamples;
-  if (maxTokens) payload.max_tokens = maxTokens;
-  if (repeats) payload.repeats = repeats;
-  // On = default model-level warmup (1 discarded request after load);
-  // off = no warmup, i.e. a non-default measurement protocol.
-  payload.warmup_per_model = $("#warmup-enabled").checked ? 1 : 0;
-  const contextWindows = selectedContextWindows();
-  if (contextWindows.length) payload.context_windows = contextWindows;
-  const scenarioSamples = {};
-  const sampleIds = {};
-  for (const name of names) {
-    const st = state.scenarios.get(name);
-    if (!st) continue;
-    if (st.manual && st.selectedIds.size) sampleIds[name] = [...st.selectedIds];
-    else if (st.count) scenarioSamples[name] = parseInt(st.count, 10);
+  if (method === "accuracy") {
+    // Fixed accuracy protocol: never send performance-only parameters.
+    payload.thinking_mode = $("#thinking-mode").value;
+    payload.warmup_per_model = $("#warmup-enabled").checked ? 1 : 0;
+    const accuracySamples = parseInt($("#accuracy-samples").value, 10);
+    if (accuracySamples) payload.samples = accuracySamples;
+    addScenarioSelections(payload, names);
+  } else {
+    payload.cache_mode = $("#cache-mode").value;
+    payload.thinking_mode = $("#thinking-mode").value;
+    const globalSamples = parseInt($("#samples").value, 10);
+    const maxTokens = parseInt($("#max-tokens").value, 10);
+    const repeats = parseInt($("#repeats").value, 10);
+    if (globalSamples) payload.samples = globalSamples;
+    if (maxTokens) payload.max_tokens = maxTokens;
+    if (repeats) payload.repeats = repeats;
+    // On = default model-level warmup (1 discarded request after load);
+    // off = no warmup, i.e. a non-default measurement protocol.
+    payload.warmup_per_model = $("#warmup-enabled").checked ? 1 : 0;
+    const contextWindows = selectedContextWindows();
+    if (contextWindows.length) payload.context_windows = contextWindows;
+    addScenarioSelections(payload, names);
   }
-  if (Object.keys(scenarioSamples).length) payload.scenario_samples = scenarioSamples;
-  if (Object.keys(sampleIds).length) payload.sample_ids = sampleIds;
   try {
     $("#start").disabled = true;
     const res = await api("/api/run", { method: "POST", body: JSON.stringify(payload) });
@@ -684,9 +846,15 @@ function renderJob(job) {
   const cur = job.current || {};
   const progress = job.progress || {};
   if (cur.event === "record") {
-    $("#job-current").textContent =
-      `${cur.model} · ${cur.dataset || cur.scenario} · ${cur.sample_id} · r${cur.repeat} · ` +
-      `输入 ${cur.input_context_tokens ?? "-"} token · TTFT ${cur.ttft_ms ?? "-"}ms · ${cur.gen_tps ?? "-"} tok/s`;
+    if (cur.score != null || cur.correct != null || (job.method || currentMethod()) === "accuracy") {
+      $("#job-current").textContent =
+        `${cur.model} · ${cur.scenario || cur.dataset} · ${cur.sample_id} · ` +
+        `判题 ${cur.judge_family || "-"} · 得分 ${cur.score ?? "-"} · 正确 ${boolText(cur.correct)}`;
+    } else {
+      $("#job-current").textContent =
+        `${cur.model} · ${cur.dataset || cur.scenario} · ${cur.sample_id} · r${cur.repeat} · ` +
+        `输入 ${cur.input_context_tokens ?? "-"} token · TTFT ${cur.ttft_ms ?? "-"}ms · ${cur.gen_tps ?? "-"} tok/s`;
+    }
   } else if (cur.event === "cell_start") {
     $("#job-current").textContent =
       `开始测试项 ${cur.cell_index}/${cur.cell_total}：${cur.model} · ${cur.scenario} (${cur.dataset}) · ` +
@@ -852,18 +1020,27 @@ async function openRun(runId, focus = "overall") {
 
 function renderDetail(data) {
   const summary = data.summary || {};
+  const mode = summary.mode || summary.method || "performance";
+  const accuracy = mode === "accuracy";
+  prepareModalForMethod(mode);
   const perf = summary.perf || {};
   const run = summary.run || {};
   $("#modal-title").textContent = `Run ${summary.run_id || ""}`;
   const batch = summary.batch || {};
-  $("#modal-sub").textContent =
-    `${batch.method || summary.mode || "performance"} · 模型 ${batch.model_id || batch.model || ""} · ` +
-    `样本 ${summary.n_samples ?? "-"} · cells ${summary.n_cells ?? "-"} · ` +
-    `耗时 ${summary.duration_s ?? "-"}s · 样本数/数据集 ${perf.samples_per_dataset ?? "全部"} · ` +
-    `max_tokens ${perf.max_tokens ?? "-"} · decode guard ${perf.decode_guard === true ? "开" : perf.decode_guard === false ? "关" : "未知"} · ` +
-    `上下文 ${contextFilterLabel(perf.context_windows || [])} · ` +
-    `预热 ${run.warmup_per_model ?? "-"} 次/模型 · 缓存 ${run.cache_mode || "-"} · ` +
-    `ISL入带 ${summary.n_isl_in_band ?? 0} · ISL出带 ${summary.n_isl_out_of_band ?? 0} · TG无效 ${summary.n_gen_tps_invalid ?? 0}`;
+  if (accuracy) {
+    $("#modal-sub").textContent = accuracySubtitle(summary);
+  } else {
+    const strict = Boolean(perf.strict_input_tokens);
+    const skipped = skippedCount(summary, data);
+    $("#modal-sub").textContent =
+      `${batch.method || summary.mode || "performance"} · 模型 ${batch.model_id || batch.model || ""} · ` +
+      `样本 ${summary.n_samples ?? "-"} · cells ${summary.n_cells ?? "-"} · ` +
+      `耗时 ${summary.duration_s ?? "-"}s · 样本数/数据集 ${perf.samples_per_dataset ?? "全部"} · ` +
+      `max_tokens ${perf.max_tokens ?? "-"} · ` +
+      `上下文 ${contextFilterLabel(perf.context_windows || [])} · ` +
+      `预热 ${run.warmup_per_model ?? "-"} 次/模型 · 缓存 ${run.cache_mode || "-"} · ` +
+      `ISL ${strict ? "严格等值" : "未严格对齐"}${skipped ? ` · 跳过 ${skipped} 条` : ""} · TG无效 ${summary.n_gen_tps_invalid ?? 0}`;
+  }
   const skipped = data.skipped || [];
   const banner = $("#modal-skipped");
   if (skipped.length) {
@@ -892,8 +1069,13 @@ function renderDetail(data) {
     }
   };
   renderFileBar(data);
-  renderOverall(summary, data);
-  renderCells(summary);
+  if (accuracy) {
+    renderAccuracyOverall(summary);
+    renderAccuracyCells(summary);
+  } else {
+    renderOverall(summary, data);
+    renderCells(summary);
+  }
   renderSampleFilters(data);
   // Per-sample rows are paginated from the server (samples.csv); they load on
   // first visit to the tab instead of bloating every run-detail response.
@@ -901,6 +1083,29 @@ function renderDetail(data) {
   state.samplesLoaded = false;
   renderEnvironment(data);
   $("#modal-report").textContent = data.report || "(无 report.md)";
+}
+
+function prepareModalForMethod(mode) {
+  const accuracy = mode === "accuracy";
+  // Table headers and the 错误统计 tab are method-specific (design §9.2).
+  [["overall", "overall"], ["cells", "cells"], ["samples", "samples"]].forEach(([base]) => {
+    $(`#${base}-head-perf`)?.classList.toggle("hidden", accuracy);
+    $(`#${base}-head-accuracy`)?.classList.toggle("hidden", !accuracy);
+  });
+  const errorsTab = document.querySelector('#modal-tabs .tab[data-tab="errors"]');
+  if (errorsTab) errorsTab.classList.toggle("hidden", !accuracy);
+  if (!accuracy) $("#tab-errors")?.classList.add("hidden");
+}
+
+function accuracySubtitle(summary) {
+  const overall = (summary.overall || [])[0] || {};
+  const run = summary.run || {};
+  const batch = summary.batch || {};
+  const model = overall.model || batch.model_id || batch.model || "-";
+  const scenarios = overall.n_scenarios_scored ?? (summary.cells || []).length ?? "-";
+  return `accuracy · 模型 ${model} · 场景 ${scenarios} · 样本 ${summary.n_samples ?? "-"} · ` +
+    `宏平均 ${fmt(overall.macro_score, 4)} · 协议 cold / temp=0 / no-guard / repeats=${run.repeats ?? 1} · ` +
+    `判题族 ${(overall.judge_families || []).join("/") || (summary.accuracy && summary.accuracy.judge_families || []).join("/") || "-"}`;
 }
 
 function renderFileBar(data) {
@@ -917,44 +1122,41 @@ function renderFileBar(data) {
     `<span class="hint" style="align-self:center">原始输出</span>${links}`;
 }
 
+function skippedCount(summary, data) {
+  const skipped = data?.skipped || summary.skipped || [];
+  return skipped.length;
+}
+
 function renderOverall(summary, data) {
   const legacy = data.legacy === true || summary.legacy === true;
   const rows = (summary.overall || []).map((entry) => {
-    const p = entry.perf || {};
-    const pa = entry.perf_all || {};
+    const pa = entry.perf_all || entry.perf || {};
     const tpsN = pa.gen_tps?.n;
     const tps = fmt(pa.gen_tps?.mean) + (tpsN != null && tpsN < entry.n_valid ? ` (${tpsN}/${entry.n_valid})` : "");
-    const fTpsN = p.gen_tps?.n;
-    const fTps = fmt(p.gen_tps?.mean) + (fTpsN != null && fTpsN < entry.n_isl_in_band ? ` (${fTpsN}/${entry.n_isl_in_band})` : "");
     return `<tr>
       <td>${esc(entry.model)}</td>
       <td>${entry.context_length != null ? bucketLabel(entry.context_length) : `<span class="pill soft" title="没有声明的上下文档位：该行是跨全部上下文的合并值，不要与按档位结果混比">全部*</span>`}</td>
       <td>${int(entry.n_datasets)}</td>
       <td>${int(entry.n_samples)}</td>
       <td>${int(entry.n_valid)}</td>
-      <td title="finish_reason=length（达到 max_tokens）；这些样本正常参与全部平均">${int(entry.n_length_capped)}</td>
+      <td title="finish_reason=length（达到 max_tokens）；这些样本正常参与平均">${int(entry.n_length_capped)}</td>
       <td title="TG TPS 被抑制的样本数">${int(entry.n_gen_tps_invalid)}</td>
-      <td title="target tokenizer 实际 prompt 在 ±10% 带内的样本数；只有这些进入（±10%过滤）列">${int(entry.n_isl_in_band)}</td>
-      <td title="actual 在 ±10% 带外、仍测量但不进入（±10%过滤）列的样本数">${int(entry.n_isl_out_of_band)}</td>
-      <td title="全样本口径（含 ISL 出带样本）">${fmt(pa.ttft_ms?.mean)}</td>
+      <td>${fmt(pa.ttft_ms?.mean)}</td>
       <td>${tps}</td>
-      <td title="±10%入带口径（跨 run 比较口径）">${fmt(p.ttft_ms?.mean)}</td>
-      <td>${fTps}</td>
       <td>${fmt(memGb(pa))}</td>
       <td>${fmt(pa.input_context_tokens?.mean, 0)}</td>
-      <td title="insufficient_samples = 入带样本 <8（默认每 cell 10）；--samples<8 的冒烟 run 必然触发，不代表数据异常">${entry.insufficient_samples ? `<span class="pill warn">insufficient_samples</span>` : entry.unstable ? `<span class="pill warn">unstable</span>` : `<span class="pill ok">ok</span>`}</td>
+      <td title="insufficient_samples = 有效样本 <8（默认每 cell 10）；--samples<8 的冒烟 run 必然触发">${entry.insufficient_samples ? `<span class="pill warn">insufficient_samples</span>` : entry.unstable ? `<span class="pill warn">unstable</span>` : `<span class="pill ok">ok</span>`}</td>
     </tr>`;
   });
   if (!rows.length) {
-    rows.push(`<tr><td colspan="16" class="empty">${legacy ? "旧 schema run：没有 overall 数据" : "没有整体结果"}</td></tr>`);
+    rows.push(`<tr><td colspan="12" class="empty">${legacy ? "旧 schema run：没有 overall 数据" : "没有整体结果"}</td></tr>`);
   }
   $("#overall-body").innerHTML = rows.join("");
 }
 
 function renderCells(summary) {
   const rows = (summary.cells || []).map((cell) => {
-    const p = cell.perf || {};
-    const pa = cell.perf_all || {};
+    const pa = cell.perf_all || cell.perf || {};
     return `<tr>
       <td>${esc(cell.model)}</td>
       <td>${esc(cell.dataset)}</td>
@@ -962,18 +1164,153 @@ function renderCells(summary) {
       <td>${int(cell.n_valid)}/${int((cell.n_samples || 0) * Math.max(cell.n_repeats || 1, 1))}</td>
       <td>${int(cell.n_length_capped)}</td>
       <td title="TG TPS 被抑制的样本数">${int(cell.n_gen_tps_invalid)}</td>
-      <td title="in-band 样本数（进入（±10%过滤）列）">${int(cell.n_isl_in_band)}</td>
-      <td title="out-of-band 样本数（不进入（±10%过滤）列）">${int(cell.n_isl_out_of_band)}</td>
-      <td title="全样本口径（含 ISL 出带样本）">${fmt(pa.ttft_ms?.mean)}</td>
-      <td title="全样本口径 TG TPS">${fmt(pa.gen_tps?.mean)}</td>
-      <td title="±10%入带口径（跨 run 比较口径）">${fmt(p.ttft_ms?.mean)}</td>
-      <td title="±10%入带口径 TG TPS">${fmt(p.gen_tps?.mean)}</td>
+      <td>${fmt(pa.ttft_ms?.mean)}</td>
+      <td>${fmt(pa.gen_tps?.mean)}</td>
       <td>${fmt(memGb(pa, "max"))}</td>
       <td>${fmt(pa.input_context_tokens?.mean, 0)}</td>
-      <td title="insufficient_samples = 入带样本 <8；小样本冒烟 run 会触发">${cell.insufficient_samples ? `<span class="pill warn">insufficient_samples</span>` : `<span class="pill ok">ok</span>`}</td>
+      <td title="insufficient_samples = 有效样本 <8；小样本冒烟 run 会触发">${cell.insufficient_samples ? `<span class="pill warn">insufficient_samples</span>` : `<span class="pill ok">ok</span>`}</td>
     </tr>`;
   });
-  $("#cells-body").innerHTML = rows.join("") || `<tr><td colspan="15" class="empty">没有数据集结果</td></tr>`;
+  $("#cells-body").innerHTML = rows.join("") || `<tr><td colspan="11" class="empty">没有数据集结果</td></tr>`;
+}
+
+/* ------------------------------------------------------------------ */
+/* accuracy result views (method=accuracy)                            */
+/* ------------------------------------------------------------------ */
+
+function renderAccuracyOverall(summary) {
+  const rows = (summary.overall || []).map((entry) => {
+    const languages = Object.keys(entry.by_language || {});
+    const datasets = entry.n_datasets ?? Object.keys(entry.by_dataset || {}).length;
+    return `<tr>
+      <td>${esc(entry.model)}</td>
+      <td title="已计分场景数（8 场景等权）">${int(entry.n_scenarios_scored)}</td>
+      <td title="${esc(languages.join(", "))}">${languages.length ? esc(languages.join("/")) : "-"}</td>
+      <td>${datasets ? int(datasets) : "-"}</td>
+      <td>${int(entry.n_samples)}</td>
+      <td>${int(entry.n_valid)}</td>
+      <td title="n_scored = 有效（判题失败计 0 但仍在分母）">${int(entry.n_scored)}</td>
+      <td>${int(entry.n_correct)}</td>
+      <td>${int(entry.n_format_failure)}</td>
+      <td>${int(entry.n_judge_error)}</td>
+      <td title="全部行平均（辅助口径）">${fmt(entry.micro_score, 4)}</td>
+      <td title="0/1 判题族准确率（F1 场景不适用）">${fmt(entry.macro_accuracy, 4)}</td>
+      <td class="acc-ci">${ciText(entry.score_ci95_low, entry.score_ci95_high)}</td>
+      <td title="8 场景等权平均（结论口径）">${fmt(entry.macro_score, 4)}</td>
+    </tr>`;
+  });
+  $("#overall-body").innerHTML = rows.join("") ||
+    `<tr><td colspan="14" class="empty">没有整体精度结果</td></tr>`;
+}
+
+function renderAccuracyCells(summary) {
+  const rows = (summary.cells || []).map((cell) => `<tr>
+    <td>${esc(cell.model)}</td>
+    <td>${esc(cell.scenario)}</td>
+    <td>${esc(cell.dataset)}</td>
+    <td>${int(cell.n_samples)}</td>
+    <td>${int(cell.n_valid)}</td>
+    <td>${fmt(cell.mean_score, 4)}</td>
+    <td>${fmt(cell.accuracy, 4)}</td>
+    <td class="acc-ci">${ciText(cell.score_ci95_low, cell.score_ci95_high)}</td>
+    <td>${esc(cell.judge_family || "-")}</td>
+    <td>${esc(cell.metric || "-")}</td>
+    <td>${int(cell.n_judge_error)}</td>
+  </tr>`);
+  $("#cells-body").innerHTML = rows.join("") ||
+    `<tr><td colspan="11" class="empty">没有场景得分结果</td></tr>`;
+}
+
+function errorItemText(item) {
+  const text = skipText(item);
+  return esc(text);
+}
+
+function renderErrors(data) {
+  const detail = data || state.detail || {};
+  const summary = detail.summary || {};
+  const overall = summary.overall || [];
+  const cells = summary.cells || [];
+  const skipped = detail.skipped || summary.skipped || [];
+  const warnings = detail.warnings || summary.warnings || [];
+  const sum = (key) => overall.reduce((acc, entry) => acc + (Number(entry[key]) || 0), 0);
+  const counts = {
+    n_samples: sum("n_samples"),
+    n_valid: sum("n_valid"),
+    n_error: sum("n_error"),
+    n_timeout: sum("n_timeout"),
+    n_scored: sum("n_scored"),
+    n_correct: sum("n_correct"),
+    n_format_failure: sum("n_format_failure"),
+    n_judge_error: sum("n_judge_error"),
+  };
+  if (!overall.length) {
+    // Fall back to cell counters (older/partial bundles without overall[]).
+    counts.n_error = cells.reduce((acc, cell) => acc + (Number(cell.n_error) || 0), 0);
+    counts.n_timeout = cells.reduce((acc, cell) => acc + (Number(cell.n_timeout) || 0), 0);
+    counts.n_judge_error = cells.reduce((acc, cell) => acc + (Number(cell.n_judge_error) || 0), 0);
+    counts.n_format_failure = cells.reduce((acc, cell) => acc + (Number(cell.n_format_failure) || 0), 0);
+  }
+  const chip = (label, value, cls = "") =>
+    `<span class="error-chip ${cls}">${esc(label)} <b>${int(value)}</b></span>`;
+  const modelRows = overall.map((entry) => `<tr>
+    <td>${esc(entry.model)}</td>
+    <td>${int(entry.n_samples)}</td>
+    <td>${int(entry.n_valid)}</td>
+    <td>${int(entry.n_error)}</td>
+    <td>${int(entry.n_timeout)}</td>
+    <td>${int(entry.n_scored)}</td>
+    <td>${int(entry.n_correct)}</td>
+    <td>${int(entry.n_format_failure)}</td>
+    <td>${int(entry.n_judge_error)}</td>
+  </tr>`);
+  const problemCells = cells.filter(
+    (cell) => (Number(cell.n_error) || 0) + (Number(cell.n_timeout) || 0) +
+      (Number(cell.n_judge_error) || 0) + (Number(cell.n_format_failure) || 0) > 0
+  );
+  const cellRows = problemCells.map((cell) => `<tr>
+    <td>${esc(cell.scenario)}</td>
+    <td>${esc(cell.dataset)}</td>
+    <td>${int(cell.n_error)}</td>
+    <td>${int(cell.n_timeout)}</td>
+    <td>${int(cell.n_format_failure)}</td>
+    <td>${int(cell.n_judge_error)}</td>
+  </tr>`);
+  const list = (items, empty) => items.length
+    ? `<ul class="errors-list">${items.map((item) => `<li><code>${errorItemText(item)}</code></li>`).join("")}</ul>`
+    : `<p class="hint">${esc(empty)}</p>`;
+  $("#errors-body").innerHTML = `
+    <div class="errors-block">
+      <h3>判分覆盖与错误计数</h3>
+      <div class="error-chips">
+        ${chip("样本", counts.n_samples)}
+        ${chip("有效", counts.n_valid)}
+        ${chip("判分", counts.n_scored, "ok")}
+        ${chip("正确", counts.n_correct, "ok")}
+        ${chip("格式失败", counts.n_format_failure, counts.n_format_failure ? "warn" : "")}
+        ${chip("判题错误", counts.n_judge_error, counts.n_judge_error ? "err" : "")}
+        ${chip("error", counts.n_error, counts.n_error ? "err" : "")}
+        ${chip("timeout", counts.n_timeout, counts.n_timeout ? "warn" : "")}
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>模型</th><th>样本</th><th>有效</th><th>error</th><th>timeout</th><th>判分</th><th>正确</th><th>格式失败</th><th>判题错误</th></tr></thead>
+        <tbody>${modelRows.join("") || `<tr><td colspan="9" class="empty">没有判分计数</td></tr>`}</tbody>
+      </table></div>
+    </div>
+    <div class="errors-block">
+      <h3>有异常的场景（数据集）</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>场景</th><th>数据集</th><th>error</th><th>timeout</th><th>格式失败</th><th>判题错误</th></tr></thead>
+        <tbody>${cellRows.join("") || `<tr><td colspan="6" class="empty">所有场景无错误</td></tr>`}</tbody>
+      </table></div>
+    </div>
+    <div class="errors-block">
+      <h3>跳过 / 警告</h3>
+      <p class="hint">跳过（${skipped.length}）：</p>
+      ${list(skipped, "无跳过样本")}
+      <p class="hint">警告（${warnings.length}）：</p>
+      ${list(warnings, "无警告")}
+    </div>`;
 }
 
 function renderSampleFilters(data) {
@@ -1013,7 +1350,9 @@ async function renderSamples() {
   if (filter.status) params.set("status", filter.status);
   const query = filter.q.trim();
   if (query) params.set("q", query);
-  $("#samples-body").innerHTML = `<tr><td colspan="10" class="empty">正在加载逐样本数据…</td></tr>`;
+  const accuracy = (summary.mode || summary.method || "performance") === "accuracy";
+  const colSpan = accuracy ? 13 : 10;
+  $("#samples-body").innerHTML = `<tr><td colspan="${colSpan}" class="empty">正在加载逐样本数据…</td></tr>`;
   try {
     const data = await api(
       `/api/runs/${encodeURIComponent(runId)}/samples?${params.toString()}`
@@ -1029,18 +1368,36 @@ async function renderSamples() {
       return;
     }
     const rows = data.rows || [];
-    $("#samples-body").innerHTML = rows.map((sample) => `<tr>
-      <td>${esc(sample.model)}</td>
-      <td>${esc(sample.dataset)}</td>
-      <td title="${esc(sample.sample_id)}">${esc(sample.sample_id)}${sample.truncated ? " (truncated)" : ""}</td>
-      <td>${int(sample.input_context_tokens)}</td>
-      <td>${int(sample.input_context_chars)}</td>
-      <td>${fmt(sample.ttft_ms)}</td>
-      <td>${fmt(sample.gen_tps)}</td>
-      <td>${fmt(sampleMemGb(sample))}</td>
-      <td>${esc(sample.finish_reason || "-")}${sample.length_capped ? ' <span class="pill soft">触顶</span>' : ""}</td>
-      <td>${esc(sample.status)}</td>
-    </tr>`).join("") || `<tr><td colspan="10" class="empty">${total ? "该页没有数据" : "没有逐样本结果"}</td></tr>`;
+    if (accuracy) {
+      $("#samples-body").innerHTML = rows.map((sample) => `<tr>
+        <td>${esc(sample.model)}</td>
+        <td>${esc(sample.scenario)}</td>
+        <td>${esc(sample.dataset)}</td>
+        <td title="${esc(sample.sample_id)}">${esc(sample.sample_id)}${sample.truncated ? " (truncated)" : ""}</td>
+        <td>${esc(sample.language || "-")}</td>
+        <td>${esc(sample.judge_family || "-")}</td>
+        <td>${fmt(sample.score, 4)}</td>
+        <td>${boolText(sample.correct)}</td>
+        <td>${boolText(sample.format_failure)}</td>
+        <td>${boolText(sample.judge_error)}</td>
+        <td>${int(sample.max_new_tokens)}</td>
+        <td>${fmt(sample.e2e_ms)}</td>
+        <td>${esc(sample.status)}</td>
+      </tr>`).join("") || `<tr><td colspan="${colSpan}" class="empty">${total ? "该页没有数据" : "没有逐样本结果"}</td></tr>`;
+    } else {
+      $("#samples-body").innerHTML = rows.map((sample) => `<tr>
+        <td>${esc(sample.model)}</td>
+        <td>${esc(sample.dataset)}</td>
+        <td title="${esc(sample.sample_id)}">${esc(sample.sample_id)}${sample.truncated ? " (truncated)" : ""}</td>
+        <td>${int(sample.input_context_tokens)}</td>
+        <td>${int(sample.input_context_chars)}</td>
+        <td>${fmt(sample.ttft_ms)}</td>
+        <td>${fmt(sample.gen_tps)}</td>
+        <td>${fmt(sampleMemGb(sample))}</td>
+        <td>${esc(sample.finish_reason || "-")}${sample.length_capped ? ' <span class="pill soft">触顶</span>' : ""}</td>
+        <td>${esc(sample.status)}</td>
+      </tr>`).join("") || `<tr><td colspan="${colSpan}" class="empty">${total ? "该页没有数据" : "没有逐样本结果"}</td></tr>`;
+    }
     $("#sample-count").textContent = `${total} 条`;
     $("#sample-page").textContent = `第 ${filter.page + 1}/${pages} 页`;
     $("#sample-prev").disabled = filter.page <= 0;
@@ -1050,7 +1407,7 @@ async function renderSamples() {
     state.samplesPage = null;
     state.samplesLoaded = false;  // allow a retry on the next tab activation
     $("#samples-body").innerHTML =
-      `<tr><td colspan="10" class="empty">加载逐样本数据失败：${esc(err.message)}</td></tr>`;
+      `<tr><td colspan="${colSpan}" class="empty">加载逐样本数据失败：${esc(err.message)}</td></tr>`;
     $("#sample-count").textContent = "-";
     $("#sample-page").textContent = "";
     $("#sample-prev").disabled = true;
@@ -1089,18 +1446,67 @@ function renderEnvironment(data) {
   }).join("");
   const kv = (obj) => Object.entries(obj || {}).map(([k, v]) =>
     `<dt>${esc(k)}</dt><dd>${esc(typeof v === "object" ? JSON.stringify(v) : v)}</dd>`).join("");
-  $("#environment-body").innerHTML = `
-    <div class="env-block">
-      <h3>硬件</h3><dl class="kv">${kv({
-        chip: `${upload.chip_name || ""} ${upload.chip_variant || ""}`.trim(),
-        memory_gb: upload.memory_gb,
-        gpu_cores: upload.gpu_cores,
-        os_version: upload.os_version,
-        omlx_version: upload.omlx_version,
-        cores: hardware.cpu?.logical_cores,
+  const summary = data.summary || {};
+  const isAccuracy = (summary.method || summary.mode) === "accuracy";
+  const accuracy = summary.accuracy || {};
+  const judgeCounts = summary.judge_counts || {};
+  const testset = summary.testset || {};
+  const deps = summary.judge_dependencies || [];
+  // The writer persists {"used":[...], "missing":[...], "probe_error"?} (dict);
+  // legacy bundles/tests may carry a plain list.  Render both shapes instead of
+  // showing a meaningless "未记录".
+  const depsText = (() => {
+    const formatBlock = (block) => {
+      const used = Array.isArray(block.used) ? block.used.join("/") : (block.used || "");
+      const missing = Array.isArray(block.missing) ? block.missing : [];
+      const parts = [];
+      if (used) parts.push(`used=${used}`);
+      if (missing.length) parts.push(`缺少 ${missing.join(", ")}`);
+      if (block.probe_error) parts.push(`探测失败 ${block.probe_error}`);
+      return parts.join("; ");
+    };
+    if (Array.isArray(deps)) {
+      const parts = deps
+        .map((item) => (item && typeof item === "object" ? formatBlock(item) : String(item)))
+        .filter(Boolean);
+      return parts.join("; ") || "未记录";
+    }
+    if (deps && typeof deps === "object") return formatBlock(deps) || "未记录";
+    return "未记录";
+  })();
+  // Method-specific parameter block: accuracy must not display performance
+  // calibres (max_tokens=50 / ISL buckets) that do not apply to it.
+  const paramsBlock = isAccuracy
+    ? `<div class="env-block">
+      <h3>精度参数与协议</h3><dl class="kv">${kv({
+        samples_per_scenario: accuracy.samples_per_scenario ?? "全部 250/场景",
+        model_size_gb: data.model_size_gb,
+        cache_mode: run.cache_mode,
+        temperature: "0（固定）",
+        top_p: "1（固定）",
+        decode_guard: "无（精度不追加）",
+        repeats: run.repeats,
+        max_retries: run.max_retries,
+        warmup_per_model: run.warmup_per_model,
+        thinking_mode: run.thinking_mode,
       })}</dl>
     </div>
     <div class="env-block">
+      <h3>精度溯源（判题）</h3><dl class="kv">${kv({
+        testset_path: testset.path || "-",
+        testset_sha256: testset.sha256 || "-",
+        testset_rows: testset.rows ?? "-",
+        judge_families: (summary.overall?.[0]?.judge_families || []).join(", ") || "-",
+        judge_dependencies: depsText,
+        n_measured: judgeCounts.n_measured ?? summary.n_records ?? "-",
+        n_ok: judgeCounts.n_ok ?? "-",
+        n_scored: judgeCounts.n_scored ?? "-",
+        n_correct: judgeCounts.n_correct ?? "-",
+        n_judge_error: judgeCounts.n_judge_error ?? 0,
+        n_format_failure: judgeCounts.n_format_failure ?? 0,
+      })}</dl>
+    </div>`
+    : `<div class="env-block">
       <h3>性能参数</h3><dl class="kv">${kv({
         samples_per_dataset: perf.samples_per_dataset ?? "全部",
         max_tokens: perf.max_tokens,
@@ -1112,7 +1518,19 @@ function renderEnvironment(data) {
         cache_mode: run.cache_mode,
         thinking_mode: run.thinking_mode,
       })}</dl>
+    </div>`;
+  $("#environment-body").innerHTML = `
+    <div class="env-block">
+      <h3>硬件</h3><dl class="kv">${kv({
+        chip: `${upload.chip_name || ""} ${upload.chip_variant || ""}`.trim(),
+        memory_gb: upload.memory_gb,
+        gpu_cores: upload.gpu_cores,
+        os_version: upload.os_version,
+        omlx_version: upload.omlx_version,
+        cores: hardware.cpu?.logical_cores,
+      })}</dl>
     </div>
+    ${paramsBlock}
     <div class="env-block">
       <h3>加速特性（应为空）</h3><dl class="kv">${kv({
         feature_flags: flagsText(omlx.feature_flags),
@@ -1138,6 +1556,10 @@ function switchTab(name) {
   // Pagination is lazy: the first visit to the per-sample tab fetches page 1.
   if (name === "samples" && state.detail && !state.samplesLoaded) {
     renderSamples();
+  }
+  // Accuracy-only error statistics tab (rendered from the already loaded detail).
+  if (name === "errors" && state.detail) {
+    renderErrors(state.detail);
   }
 }
 
@@ -1194,6 +1616,10 @@ document.addEventListener("DOMContentLoaded", () => {
   $("#cancel").addEventListener("click", cancelRun);
   ["samples", "max-tokens", "repeats"].forEach((id) =>
     $(`#${id}`).addEventListener("input", updateEstimate));
+  $("#accuracy-samples")?.addEventListener("input", updateEstimate);
+  // Method cards (radio semantics): switching resets the test-set/parameter UI.
+  $$(".method-card").forEach((card) =>
+    card.addEventListener("click", () => switchMethod(card.dataset.method)));
   document.querySelectorAll("[data-models]").forEach((button) => button.addEventListener("click", () => {
     const all = button.dataset.models === "all";
     state.models.clear();

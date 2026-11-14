@@ -12,7 +12,6 @@ from .knowledge import KnowledgeQAScenario
 from .long_context import LongContextScenario
 from .math import MathLogicScenario
 from .multilingual import MultilingualScenario
-from .perf import ThroughputScenario
 from .search import SearchAgentScenario
 from .speculative import SpeculativeDecodingScenario
 
@@ -28,7 +27,6 @@ _REGISTRY: Dict[str, Type[ScenarioAdapter]] = {
         SearchAgentScenario,
         MultilingualScenario,
         SpeculativeDecodingScenario,
-        ThroughputScenario,
     )
 }
 

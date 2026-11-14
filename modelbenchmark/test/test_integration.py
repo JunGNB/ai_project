@@ -1008,6 +1008,212 @@ def test_prebuilt_prompt_too_long_is_skipped_not_truncated(fake_server, tmp_path
     assert state.chat_requests == []
 
 
+def test_strict_input_tokens_match_is_measured_with_exact_bounds(fake_server, tmp_path):
+    """Strict mode: exact alignment -> measured, isl_tolerance is a single point."""
+    server, state = fake_server
+    # 8K bucket + 50-token generation exceeds the default 4K fake window.
+    state.max_window = 65536
+    cfg = _fake_config(
+        fake_server, tmp_path, repeats=1, samples=2, tokens=8192, bucket="8k"
+    )
+    cfg.perf.strict_input_tokens = True
+    # The fixture prompt carries ``target=8192`` and the fake tokenizer reads
+    # it, so it counts exactly the bucket target (the dataset-side guarantee).
+    client = OMLXClient(base_url=cfg.server.base_url, api_key="fake-key")
+    writer = RunWriter(tmp_path, run_id="strict-match")
+    try:
+        summary = Orchestrator(cfg, client, writer).run()
+    finally:
+        client.close()
+
+    assert summary["n_samples"] == 2
+    assert summary["skipped"] == []
+    run_dir = Path(summary["run_dir"])
+    records = [
+        json.loads(line)
+        for line in (run_dir / "records.jsonl").read_text().splitlines()
+    ]
+    measured = [r for r in records if r["phase"] == "measured"]
+    assert len(measured) == 2
+    # 2 measured records + 1 per-cell warmup record.
+    assert summary["n_records"] == len(records) == 3
+    for record in measured:
+        assert record["status"] == "ok", record.get("error")
+        assert record["context_length"] == 8192
+        assert record["request"]["actual_prompt_tokens"] == 8192
+        context_meta = record["request"]["context_meta"]
+        assert context_meta["tokenized_prompt_tokens"] == 8192
+        assert context_meta["strict_input_tokens"] is True
+        # Strict alignment: the guard user message is not appended, so the
+        # request body is exactly the dataset prompt.
+        assert context_meta["decode_guard_applied"] is False
+        assert "decode_guard" not in context_meta
+        tolerance = context_meta["isl_tolerance"]
+        assert tolerance["ok"] is True
+        assert tolerance["low"] == tolerance["high"] == 8192
+        assert tolerance["target"] == 8192
+        assert tolerance["actual"] == 8192
+    # Every request actually sent (warmup + measured) carries only the single
+    # dataset user message; no decode-guard message was injected.
+    assert state.chat_requests
+    for body in state.chat_requests:
+        sent = body["messages"]
+        assert len(sent) == 1, sent
+        assert "Fixture question" in sent[0]["content"]
+        assert "performance measurement" not in sent[0]["content"]
+    outcome = _run_json(Path(summary["run_dir"]))["outcome"]
+    assert any(
+        "strict input alignment: decode guard disabled" in warning
+        for warning in outcome["warnings"]
+    )
+    # Strict alignment is not a ±10% band: the run/aggregates report 0/0 and
+    # never a misleading in-band ratio; the full valid set still aggregates.
+    assert outcome["n_isl_in_band"] == 0
+    assert outcome["n_isl_out_of_band"] == 0
+    aggregates = json.loads((run_dir / "aggregates.json").read_text())
+    assert aggregates["overall"]
+    for entry in aggregates["cells"]:
+        assert entry["n_isl_in_band"] == 0
+        assert entry["n_isl_out_of_band"] == 0
+        assert entry["insufficient_samples"] is False
+        assert entry["perf"]["ttft_ms"]["n"] == entry["n_valid"]
+    for entry in aggregates["overall"]:
+        assert entry["n_isl_in_band"] == 0
+        assert entry["n_isl_out_of_band"] == 0
+        assert entry["insufficient_samples"] is False
+    report = (run_dir / "report.md").read_text()
+    assert "严格等值" in report
+    assert "ISL 带宽" not in report
+    # The rendered report is single-calibre: no band counters or filtered columns.
+    assert "ISL入带" not in report
+    assert "ISL出带" not in report
+    assert "（±10%过滤）" not in report
+    assert "decode guard）：关闭" in report
+
+
+def test_strict_input_tokens_mismatch_is_skipped_not_measured(fake_server, tmp_path):
+    """Strict mode: one-token mismatch -> skipped with expected/got, run continues."""
+    server, state = fake_server
+    cfg = _fake_config(fake_server, tmp_path, repeats=1, samples=2)
+    cfg.perf.strict_input_tokens = True
+    # One token short of the 1K target: the sample must not be sent/measured.
+    state.tokenize_override = 1023
+    client = OMLXClient(base_url=cfg.server.base_url, api_key="fake-key")
+    writer = RunWriter(tmp_path, run_id="strict-mismatch")
+    try:
+        summary = Orchestrator(cfg, client, writer).run()
+    finally:
+        client.close()
+
+    assert summary["n_samples"] == 0
+    assert summary["n_records"] == 0
+    skipped = list(summary["skipped"])
+    assert len(skipped) == 2, skipped
+    for item in skipped:
+        assert item.startswith("strict_input_tokens: ")
+        assert "knowledge_qa/mmlu@1k/fixture-knowledge_qa-1k-" in item
+        assert "expected 1024 got 1023" in item
+    # No chat request was sent for the unaligned samples (no warmup either:
+    # the warmup build hit the same strict skip and fell through).
+    assert state.chat_requests == []
+    # The run itself completed normally; every selected sample is accounted for.
+    outcome = _run_json(Path(summary["run_dir"]))["outcome"]
+    assert outcome["status"] == "ok"
+    assert outcome["n_measured"] == 0
+    assert outcome["n_selected"] == len(skipped) == 2
+    # Even a fully-skipped strict cell records why the guard was disabled.
+    assert any(
+        "strict input alignment: decode guard disabled" in warning
+        for warning in outcome["warnings"]
+    )
+
+
+def test_strict_window_overflow_skips_as_window_problem_first(fake_server, tmp_path):
+    """Strict order: window check runs before the equality check.
+
+    An over-long strict sample must be reported as a window problem (no silent
+    truncation), not as ``strict_input_tokens: expected ... got ...``.
+    """
+    server, state = fake_server
+    # 8K prompt + generation cannot fit this window.
+    state.max_window = 4096
+    cfg = _fake_config(
+        fake_server, tmp_path, repeats=1, samples=1, tokens=8192, bucket="8k"
+    )
+    cfg.perf.strict_input_tokens = True
+    client = OMLXClient(base_url=cfg.server.base_url, api_key="fake-key")
+    try:
+        summary = Orchestrator(
+            cfg, client, RunWriter(tmp_path, run_id="strict-window")
+        ).run()
+    finally:
+        client.close()
+
+    skipped = summary["skipped"]
+    # Per-cell warmup and the measured sample both report the window overflow
+    # (existing warmup-abort accounting); neither is a strict mismatch.
+    assert len(skipped) == 2
+    for reason in skipped:
+        assert "prebuilt prompt too long" in reason
+        assert "strict_input_tokens: " not in reason
+    assert summary["n_samples"] == 0
+    assert state.chat_requests == []
+    outcome = _run_json(Path(summary["run_dir"]))["outcome"]
+    assert outcome["status"] == "ok"
+    assert outcome["n_measured"] == 0
+    assert outcome["n_selected"] == len(skipped)
+
+
+def test_non_strict_testset_still_measures_same_fixture(fake_server, tmp_path):
+    """Regression: without strict_input_tokens the ±10% band behaviour is unchanged."""
+    server, state = fake_server
+    cfg = _fake_config(fake_server, tmp_path, repeats=1, samples=2)
+    assert cfg.perf.strict_input_tokens is False
+    client = OMLXClient(base_url=cfg.server.base_url, api_key="fake-key")
+    writer = RunWriter(tmp_path, run_id="non-strict-regression")
+    try:
+        summary = Orchestrator(cfg, client, writer).run()
+    finally:
+        client.close()
+
+    assert summary["n_samples"] == 2
+    assert summary["skipped"] == []
+    run_dir = Path(summary["run_dir"])
+    records = [
+        json.loads(line)
+        for line in (run_dir / "records.jsonl").read_text().splitlines()
+    ]
+    measured = [r for r in records if r["phase"] == "measured"]
+    assert len(measured) == 2
+    for record in measured:
+        assert record["status"] == "ok", record.get("error")
+        tolerance = record["request"]["context_meta"]["isl_tolerance"]
+        # Historical ±10% band for 1K: 921..1126, actual (fake) 1024 in band.
+        assert tolerance["low"] == 921
+        assert tolerance["high"] == 1126
+        assert tolerance["actual"] == 1024
+        assert tolerance["ok"] is True
+        assert "strict_input_tokens" not in record["request"]["context_meta"]
+        # Historical mode still appends the decode guard after the dataset
+        # prompt (unchanged measurement protocol).
+        assert record["request"]["context_meta"]["decode_guard_applied"] is True
+        assert record["request"]["context_meta"]["decode_guard"] is True
+    assert state.chat_requests
+    for body in state.chat_requests:
+        sent = body["messages"]
+        assert len(sent) == 2, sent
+        assert "performance measurement" in sent[-1]["content"]
+    # Non-strict keeps the historical ±10% in-band accounting.
+    outcome = _run_json(run_dir)["outcome"]
+    assert outcome["n_isl_in_band"] == 2
+    assert outcome["n_isl_out_of_band"] == 0
+    # Non-strict reports keep the band counters and the filtered columns.
+    non_strict_report = Path(run_dir, "report.md").read_text()
+    assert "ISL入带" in non_strict_report
+    assert "（±10%过滤）" in non_strict_report
+    assert "decode guard）：开启" in non_strict_report
+
+
 def test_cells_split_by_dataset_and_context_length(fake_server, tmp_path):
     """One cell per (scenario, dataset, context_length), matching the aggregates."""
     server, state = fake_server

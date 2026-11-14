@@ -3,10 +3,14 @@
 > 本文是 `output/` 的**现状契约**（bundle schema **3.0** / 索引 schema **2.0**）：
 > 目录层次、每个文件的职责与权威性、索引字段、二次分析方式、派生工具与保留策略。
 > **`runs/` 是一层平铺**：一个 run 一个目录，目录名就是 `run_id`；批次元数据单独放在
-> `output/batches/<batch_id>.json`。Web 控制台、`./modelbench` 的
+> `output/batches/<batch_id>.json`。两种测试方法（`method=performance` /
+> `method=accuracy`）共用同一布局与 schema，差异只在 `aggregates.json`/`samples.csv`/
+> `report.md` 的形状与部分 outcome 计数（§4.2/§4.4–§4.6）；方法架构见
+> [32-method-architecture.md](32-method-architecture.md)。Web 控制台、`./modelbench` 的
 > `runs/analyze/export-analysis/gc/verify/rebuild/pack` 都以本页为准；布局的唯一代码实现在
 > `src/modelbench/adapters/storage/layout.py`。设计依据见
-> [OUTPUT_LAYOUT.md](../archive/OUTPUT_LAYOUT.md)，测量口径见 [20-methodology.md](../spec/20-methodology.md)。
+> [OUTPUT_LAYOUT.md](../archive/OUTPUT_LAYOUT.md)，测量口径见 [20-methodology.md](../spec/20-methodology.md)
+> 与 [22-accuracy-test-plan.md](../spec/22-accuracy-test-plan.md)。
 
 ---
 
@@ -81,7 +85,7 @@ output/
 | 标识 | 规则 | 例 |
 |---|---|---|
 | `batch_id` | `<UTC 时间戳>-<4 hex>`；不带 `web-` 前缀，来源写进 `batches/<batch_id>.json` 的 `source` | `20261107T032029Z-4184` |
-| `method` | 固定枚举：`performance`（精度 `accuracy` 未来同构） | `performance` |
+| `method` | 固定枚举：`performance` \| `accuracy`（方法见 [32-method-architecture.md](32-method-architecture.md)） | `performance` |
 | `model_slug` | 模型 alias/id 的 `sanitize_name()`（非字母数字转 `_`） | `gemma-4-e4b-oq4` |
 | `run_id` | **单段**稳定键 `<batch_id>__<method>__<model_slug>`，不含 `/`；**同时是 `runs/` 下的目录名** | `20261107T032029Z-4184__performance__gemma-4-e4b-oq4` |
 | `run_path` | 相对 `output/` 的路径，索引与 Web/CLI 导航用，恒为 `runs/<run_id>` | `runs/20261107T032029Z-4184__performance__gemma-4-e4b-oq4` |
@@ -134,6 +138,8 @@ output/
     "run_path": "runs/20261107T032029Z-4184__performance__gemma-4-e4b-oq4",
     "batch_id": "…", "batch_index": 0, "batch_models_total": 3,
     "method": "performance", "mode": "performance", "legacy": false,
+    // ↑ `mode` 是方法名的历史字段（= performance | accuracy，与 `method` 同值）；
+    //   旧索引行缺 `method` 时读取侧按 `mode` 回退。新增字段一律以 `method` 为准。
     "model": "gemma-4-E4B-it-oQ4", "model_id": "…", "model_slug": "gemma-4-e4b-oq4",
     "model_size_gb": 5.2, "created_at": "…", "duration_s": 3012.4,
     "status": "ok", "cancelled": false,
@@ -265,6 +271,7 @@ run 目录**，互不混合；批次关系由 `batches/<batch_id>.json` 与 `ind
     "truncated": false, "padded": false,
     "context_meta": {"bucket": "1k", "decode_guard": true,
                      "window_check_basis": "tokenized",
+                     "thinking_control": "disabled:explicit_false",  // 或 disabled:omit/auto/enabled
                      "tokenize_latency_ms": 3.7,   // 测量窗口外（tokenize 仅用于口径判定）
                      "isl_tolerance": {"target": 1024, "low": 921, "high": 1126,
                                        "actual": 1174, "ok": false}, "…": "…"}
@@ -312,16 +319,20 @@ run 目录**，互不混合；批次关系由 `batches/<batch_id>.json` 与 `ind
   `decode_window_ms >= 50`、`finish_reason != tool_calls`、值 ≤ 10,000）；否则置 null 并在
   `metrics.gen_tps_invalid` 记录原因（完整枚举见 [20-methodology.md](../spec/20-methodology.md) §2）。
 - **实际输入大小（actual ISL）**：`request.tokenized_prompt_tokens` 是目标模型对最终
-  messages+tools（含 chat template 与 decode guard）的 tokenize 结果；`context_meta.isl_tolerance`
+  messages（strict 集不含 decode guard）的 tokenize 结果；`context_meta.isl_tolerance`
   记录 `{target, low, high, actual, ok}`，`context_meta.window_check_basis` 说明窗口判定用的是
-  `tokenized` 还是回退的 `declared`。**actual 不驱动跳过**：所有能测样本都 measured；
-  聚合只使用 actual 在 **target ±10%**（所有档位对称，区间见 [20-methodology.md](../spec/20-methodology.md) §5）的入带样本，出带样本保留在 records/samples.csv（`isl_band=false`）但
-  不进平均值。计数在 `run.json.outcome.n_isl_in_band/n_isl_out_of_band` 与
-  `aggregates.*` 同名计数；`samples.csv` 在 `actual_prompt_tokens` 后有 `isl_band` 列。
-  原因：数据集构造用参考 tokenizer 控制内容 token，运行时按目标模型 tokenizer 计数
-  且叠加 template/guard（构造 ±5% 与运行 ±10% 的完整推导见
-  [11-performance-testset.md](../spec/11-performance-testset.md) §4.5 单一事实源），故用
-  ±10% 入带聚合而非跳过；跨系统比较准入见
+  `tokenized` 还是回退的 `declared`。
+  - **strict 集**（testset 声明 `strict_input_tokens: true`，默认 `performance`）：
+    `low = high = target`（容差 0），`tokenized_prompt_tokens == bucket` 才 measured；不等或 tokenize
+    失败 → 该样本 skip 进 `run.json.outcome.skipped`（原因带 expected/got），不发生误差统计；
+    `n_isl_in_band == n_measured`、`n_isl_out_of_band == 0` 是恒定值，仅作对账；
+    `records[].context_meta.decode_guard_applied = false`。长度由运行前 `align.py` 按目标模型
+    tokenizer 重建保证（见 [../spec/11-performance-testset.md](../spec/11-performance-testset.md) §4）。
+  - **非 strict 集**（历史/精度口径）：`{target, low, high}` 为 target ±10% 带
+    （区间见 [20-methodology.md](../spec/20-methodology.md) §5）；actual 不驱动跳过，聚合只使用入带
+    样本，出带样本保留在 records/samples.csv（`isl_band=false`）但不进平均值。
+  计数在 `run.json.outcome.n_isl_in_band/n_isl_out_of_band` 与 `aggregates.*` 同名计数；
+  `samples.csv` 在 `actual_prompt_tokens` 后有 `isl_band` 列。跨系统比较准入见
   [../spec/13-testset-portability.md](../spec/13-testset-portability.md)。
 - **tokenize 在测量窗口之外**：`context_meta.tokenize_latency_ms` 记录"tokenize → 清 hot+SSD →
   measured 请求"流程中**第一步**的耗时，**不进入 TTFT/TPS/内存**（测量窗口从清缓存后的请求开始）。
@@ -340,8 +351,13 @@ run 目录**，互不混合；批次关系由 `batches/<batch_id>.json` 与 `ind
   "created_at": "…", "started_at": "…", "finished_at": "…", "duration_s": 3012.4,
   "git": {"commit": "…", "dirty": false},
   "config": {                              // 当时生效的完整配置（密钥脱敏）
-    "server": {}, "run": {}, "perf": {}, "datasets": {},
+    "method": "performance", "server": {}, "run": {}, "perf": {}, "datasets": {},
     "models": [], "scenarios": {}, "selection": {}
+    // method=accuracy 时：`run.json` 同时保留 `perf`（共享配置快照）与 `accuracy`
+    // 配置块（samples_per_scenario/samples_by_scenario/sample_ids）；`run` 固定
+    // {repeats:1, cache_mode:"cold", max_retries:1, warmup_requests:0, thinking_mode}；
+    // `method` 为 "accuracy"；`testset`/`judge_dependencies` 持久化报告溯源。
+    // 批次级 `batches/<id>.json.config` 只放方法自身的块（accuracy 时不写 perf）。
   },
   "env": {
     "hardware": {"chip": "…", "chip_name": "…", "memory_gb": 24, "arch": "arm64",
@@ -392,6 +408,14 @@ run 目录**，互不混合；批次关系由 `batches/<batch_id>.json` 与 `ind
   `n_isl_in_band`/`n_isl_out_of_band` = actual 在 target ±10% 带内/带外的 measured 记录数；
   **只有入带记录进入 averages**，出带记录保留但不进均值。旧口径的 `n_isl_skipped` /
   `n_isl_out_of_tolerance` 已删除（历史 run 字段可忽略）。
+- **`method=accuracy` 的 outcome**：保留上面的通用对账块（`n_selected`/`n_measured`/`n_ok`/
+  `n_records`/`n_samples`/`n_cells`/`skipped`/`warnings`/`duration_s`/`status`），并追加五个判分
+  计数：`n_scored`（判分分母 = `n_ok` + `status=judge_error`；判题失败计 0 但保留在分母）、
+  `n_correct`（归一化分数 == 1.0 的行数）、`n_judge_error`、`n_format_failure`、
+  `n_scenarios_scored`（有判分分母的场景数）。精度 run **不写** `n_gen_tps_invalid` /
+  `n_isl_in_band` / `n_isl_out_of_band`（性能口径不适用，不得用性能规则硬算）；
+  `n_cells` 为 `(model, scenario, dataset)` 数（8 个场景单数据集 → 8）。计数口径见
+  [22-accuracy-test-plan.md](../spec/22-accuracy-test-plan.md) §4。
 
 ### 4.3 `MANIFEST.json`（完整性清单，最后写）
 
@@ -422,16 +446,29 @@ run 目录**，互不混合；批次关系由 `batches/<batch_id>.json` 与 `ind
 
 ### 4.4 `samples.csv`（逐样本主表，派生）
 
-一行一个 measured 样本，列顺序**冻结**（`SAMPLES_CSV_FIELDS`）：
+**列序按方法不同，两套都冻结**：
 
 ```text
+# method=performance（SAMPLES_CSV_FIELDS，36 列）
 model,model_id,scenario,dataset,subtask,context_length,sample_id,repeat,phase,status,
 finish_reason,length_capped,input_context_tokens,input_context_chars,actual_prompt_tokens,isl_band,
 ttft_ms,ttft_visible_ms,tpot_ms,gen_tps,e2e_ms,prefill_tps,total_tps,
 completion_tokens,cached_tokens,cache_mode,cache_cleared,cache_polluted,
 peak_memory_gb,peak_rss_mb,peak_cpu_pct,mean_cpu_pct,
 prompt_sha256,truncated,error,timestamp
+
+# method=accuracy（accuracy_output.SAMPLES_CSV_FIELDS_ACCURACY，29 列，逐项对齐 AccuracySampleResult）
+model,model_id,scenario,dataset,language,sample_id,upstream_id,repeat,phase,status,
+error,judge_family,judge_metric,score,correct,format_failure,judge_error,
+max_new_tokens,completion_tokens,input_context_tokens,actual_prompt_tokens,ttft_ms,e2e_ms,
+finish_reason,cache_mode,cache_cleared,cache_polluted,prompt_sha256,timestamp
 ```
+
+- 精度列语义：`score` 为归一化判分（0/1 或 F1，error/timeout 为 null）、`correct =
+  score==1.0`、`format_failure` 空/无法解析、`judge_error` 判题器异常/依赖缺失（计 0 且在分母）、
+  `judge_family`/`judge_metric` 判题族与指标、`language`/`upstream_id` 剖面与回溯键；
+  无 `context_length`/`isl_band`/TPS/内存列（精度不测这些口径）。Web 读取器按列名类型化
+  （`score` float，`correct/format_failure/judge_error` bool）。
 
 - `model` 与 `model_id` 目前同值（都是模型 id，`SampleResult.model_id` 已产出）；`model_id`
   保留为"服务端 id"的独立列，以便未来 alias 与 id 分离时不必改列序。
@@ -481,9 +518,11 @@ prompt_sha256,truncated,error,timestamp
 - `perf` / `perf_all` 是「指标名 → `Distribution`」映射，`Distribution` 含
   `n/mean/median/std/min/max/p95/ci95_low/ci95_high`；
   `n` 是该指标真实参与统计的样本数（`gen_tps` 只统计可信解码窗口的样本，见 §4.1）。
-- **双口径（T-067）**：`perf` 只统计 actual 在 target ±10% 入带的样本（跨 run/跨系统
+- **双口径（T-067）**：`perf` 只统计 actual 在 target ±10% 入带的样本（**非 strict 集**的跨 run
   比较口径，列名带「（±10%过滤）」）；`perf_all` 统计该行全部 valid measured 样本
-  （默认展示口径，含出带）。两者除 ISL 带过滤外完全同规则（warmup/污染/错误、
+  （默认展示口径）。strict 集（默认 `performance`）长度 0 容差，`perf` 与 `perf_all` 恒等
+  （`n_isl_in_band == n_measured`），双口径列退化为同一口径，保留字段仅为统一 schema。
+  两者除 ISL 带过滤外完全同规则（warmup/污染/错误、
   `gen_tps`/`tpot` 可信窗口判定一致）；schema 3.0 增量字段，旧 run 无 `perf_all`
   时消费端从 `records.jsonl` 现算兜底。
 - **`ci95_low` / `ci95_high`**：**run 内** mean 的正态近似 95% 置信区间
@@ -499,14 +538,72 @@ prompt_sha256,truncated,error,timestamp
 - 这是唯一的机器可读聚合形态；需要 CSV 时用 pandas 从 `samples.csv`/本文件导出，
   不再常驻 CSV 汇总。
 
+**`method=accuracy` 的 `aggregates.json` 形状**（同一 schema 3.0，字段以
+`domain/models.py` 的 `AccuracyOverallAggregate`/`AccuracyCellAggregate`/`AccuracySlice` 为准，
+全部可由 `records.jsonl` 复算，AC-A5）：
+
+```jsonc
+{
+  "schema_version": "3.0", "method": "accuracy", "run_id": "…", "generated_at": "…",
+  "n_records": 2000, "n_samples": 2000, "n_cells": 8,
+  "overall": [{
+    "model": "…", "method": "accuracy",
+    // AccuracySlice 计数与分数
+    "n_samples": 2000, "n_valid": 1992, "n_ok": 1990, "n_error": 6, "n_timeout": 2,
+    "n_judge_error": 2, "n_format_failure": 17, "n_missing_score": 0,
+    "n_scored": 1992, "n_correct": 1200,
+    "mean_score": 0.6123, "accuracy": 0.6030, "score_std": 0.48,
+    "score_ci95_low": 0.59, "score_ci95_high": 0.63,
+    "accuracy_ci95_low": 0.58, "accuracy_ci95_high": 0.62,
+    // 精度总体独有
+    "macro_score": 0.6123,      // 8 场景等权平均（结论口径）
+    "micro_score": 0.6030,      // 全行平均（辅助口径）
+    "macro_accuracy": 0.6030,   // 仅 0/1 判题族场景的宏平均
+    "n_scenarios_scored": 8,
+    "scenario_scores": {"knowledge_qa": 0.60, "…": 0.0},
+    "by_language": {"en": {"…": "AccuracySlice"}, "zh": {"…": "AccuracySlice"}},
+    "judge_families": ["mc_letter", "ifeval", "normalized_match", "code_exec", "tool_call"]
+  }],
+  "cells": [{
+    "model": "…", "method": "accuracy", "scenario": "knowledge_qa", "dataset": "global_mmlu",
+    "judge_family": "mc_letter", "metric": "accuracy",
+    "n_samples": 250, "n_valid": 250, "n_ok": 249, "n_error": 0, "n_timeout": 0,
+    "n_judge_error": 1, "n_format_failure": 3, "n_missing_score": 0,
+    "n_scored": 250, "n_correct": 128,
+    "mean_score": 0.514, "accuracy": 0.514, "score_std": 0.50,
+    "score_ci95_low": 0.452, "score_ci95_high": 0.576,
+    "accuracy_ci95_low": 0.452, "accuracy_ci95_high": 0.576,
+    "by_language": {"en": {"…": "AccuracySlice"}, "zh": {"…": "AccuracySlice"}}
+  }]
+}
+```
+
+- 计数口径（单一事实源：`domain/accuracy_metrics.py` 模块文档）：`n_valid = n_ok + n_judge_error`
+  （产生了判分尝试的 measured 记录）；`n_scored` = `mean_score` 的分母 = `n_valid`（判题失败计 0
+  且**留在分母**）；`error`/`timeout` 不进分母、单列；`n_missing_score` 统计 `status=ok` 但无
+  `score` 的契约违约行（计 0 并暴露）；`n_correct` 只统计归一化分数 == 1.0 的行。
+- `cells` 键为 `(model, scenario, dataset)`，**无 `context_length`**；`overall` 每模型一行。
+  `macro_score` = 8 场景分等权平均（每个场景先聚合自身数据集，数据集多的场景不占权重优势）；
+  `micro_score` 全行平均，仅辅助；`scenario_scores` 是宏平均的逐项来源。
+- CI：0/1 判题族用 Wilson score interval（`accuracy_ci95_*`），`mean_score` 用正态近似
+  （`score_ci95_*`）；`n<2` 均为 null。**run 内抽样不确定性，不是 run-to-run 噪声**。
+- `by_language` 只做剖面（单语 25 条的切片不做排名）；`judge_families` 固定 5 族。
+- 与性能形状的关系：文件同名同 schema，但 `overall/cells` 的行键、字段与含义不同；
+  消费端必须按 `run.json.method`/`aggregates.method` 分派解释，不得把精度行当性能行读。
+
 ### 4.6 `report.md` 与 `logs/run.log`
 
 - `report.md`：人读摘要（运行配置、环境、整体结果、数据集结果、逐样本表 + 口径注脚），
-  Web 报告页直接渲染；内容由 `records.jsonl` 复算，`rebuild` 可重生成。报告显示
-  **ISL入带/ISL出带** 计数，并把 `n_isl_out_of_band` 注明"仍测量但不进（±10%过滤）列，
-  但计入默认全样本列"；整体/数据集表均为双口径：默认列（TTFT/TG TPS/TPOT/E2E 等）
-  为全样本口径（`perf_all`），带「（±10%过滤）」的列为入带口径（`perf`）；
-  in-band 样本不足时标记 `insufficient_samples`。
+  Web 报告页直接渲染；内容由 `records.jsonl` 复算，`rebuild` 可重生成。非 strict 集报告显示
+  **ISL入带/ISL出带** 计数，整体/数据集表双口径：默认列（TTFT/TG TPS/TPOT/E2E 等）为全样本
+  口径（`perf_all`），带「（±10%过滤）」的列为入带口径（`perf`）。strict 集报告只写
+  "ISL 口径：严格等值"，不出现入带/出带或 ±10% 过滤列（未对齐样本在 `outcome.skipped` 里）。
+- **`method=accuracy` 的 `report.md`**：章节顺序为 运行协议（cold / `temperature=0` /
+  无 decode guard / `repeats=1` / 重试 1 次 / 逐行 `judge.max_new_tokens`）→ 环境 → 场景得分表
+  （每模型×场景×数据集：样本/有效/mean_score/accuracy/CI/判题失败/格式失败/错误/超时）→
+  宏平均（结论口径）→ 语言/数据集剖面 → 错误统计（status/judge_error/format_failure/
+  over_window skipped）→ 判题依赖与 warnings。报告头部写明测试集 SHA-256 与"同一 SHA 才可配对
+  比较"；数值全部由 `records.jsonl` 复算（`rebuild` 可重生成）。
 - `logs/run.log`：运行日志，运行中由 Web 任务面板增量读取，结束后仅排障用；随归档清理。
 
 ---
@@ -543,9 +640,14 @@ prompt_sha256,truncated,error,timestamp
       "sha256": "…", "rows": 240,
       "context_windows": [1024, 8192, 32768],
       "decode_guard_version": 1
+      // method=accuracy 时改为（无 context_windows/decode_guard）：
+      // "method": "accuracy",
+      // "sha256": "<testset.jsonl SHA>", "rows": 2000,
+      // "manifest_sha256": "<manifest.json SHA>",
+      // "judge_contract_version": "judges-<sha[:16]>"
     }
   },
-  "config": {"perf": {}, "run": {}, "scenarios": []},
+  "config": {"perf": {}, "run": {}, "scenarios": []},   // 精度为 {"accuracy": {}, "run": {}, "scenarios": []}
   "retention": {"pinned": false, "keep_until": null},
   "provenance": {"git_commit": null, "host": {"python": "3.12.x"}},
   "skipped": [], "warnings": [], "errors": []
@@ -558,7 +660,12 @@ prompt_sha256,truncated,error,timestamp
 - 批次归属的三重校验：`run_id` 前缀 = `<batch_id>__`、本文件 `model_runs[].run_id`、
   各 run 的 `run.json.batch_id`。`./modelbench verify` 会检查它们一致。
 - `inputs.testset.sha256` 是输入文件指纹（`dataset/test/<name>/manifest.json` 已记录同一值），
-  与 `blobs/prompts/` 一起构成「这一次跑了哪 240 行 + 实际发了什么」的自证链。
+  与 `blobs/prompts/` 一起构成「这一次跑了哪 240 行 + 实际发了什么」的自证链。**精度批次**另存
+  `method`、`manifest_sha256` 与 `judge_contract_version`（由 manifest 的 `judges` 声明派生，
+  形如 `judges-<sha[:16]>`）：两次 accuracy run 只有同时满足同一 `sha256` 与同一
+  `judge_contract_version` 才可配对比较（V&V V-16）。
+- `method` 取值 `performance`|`accuracy`，与 `run.json.method`、`model_runs[].method`、
+  `run_id` 方法段一致；批次内不混方法（一次动作 = 一种方法）。
 - `retention.pinned/keep_until` 是保留标记（预留给未来配额/清理策略；当前 `gc` 只按引用
   关系标记清扫，不读该字段，见 §7.2）。
 - **文件内不写任何绝对路径**，因此整个 `output/` 可整体搬移；`BatchRunner.run()` 的返回值里
@@ -703,6 +810,12 @@ assert manifest["blob_refs"]["missing"] == 0
    `legacy_gen_tps_invalid`（历史 run 的非法 `gen_tps`，>10,000 或 <0）；旧 run 的非法值只计入
    `legacy_gen_tps_invalid`，**不导致 verify 失败**；若同一条记录同时有 `gen_tps` 与
    `gen_tps_invalid`（新逻辑自相矛盾）则报 issue。
+6. **按方法分派**：`verify` 先读 `run.json.method`（旧 run 回退 `batch.method` → `performance`），
+   `accuracy` run 走精度对账：判分覆盖（`status=ok` 必须有 `score`；`n_ok + n_error + n_timeout +
+   n_judge_error == n_measured`）、精度计数（`n_scored`/`n_correct`/`n_judge_error`/
+   `n_format_failure`/`n_scenarios_scored`）、场景分与宏平均可复算、`cells` 键
+   `(model,scenario,dataset)`；**不检查** `gen_tps`/ISL 入带（性能口径不适用）。
+   未知 `method` 报 issue 而不是按性能口径硬算。
 
 ```bash
 ./modelbench verify            # 人读：统计 + 问题明细；有问题退出码 1
@@ -735,6 +848,10 @@ assert manifest["blob_refs"]["missing"] == 0
 重建 `samples.csv`、`aggregates.json`、`report.md`、`MANIFEST.json`（`run.json` 与
 `records.jsonl` 只读），随后重建 `index.json`。重建后**语义等价**（字段与取值相同；
 浮点格式化与时间戳会变，不保证字节级相同）。删掉派生物后用它可以恢复。
+
+按 `run.json.method` 分派（旧 run 回退 `batch.method` → `performance`）：性能 run 用
+`domain/metrics.py`；`accuracy` run 用 `accuracy_output` 的纯函数重算精度 aggregates/
+samples/report（与 live writer 同一实现），未知方法报错而不是按性能口径硬算。
 
 ### 7.4 `./modelbench pack`（可移植打包）
 
@@ -799,24 +916,42 @@ Excel 在**每个 batch 结束时自动生成**到 `output/exports/<batch_id>.xl
 - 双口径来自同一 `aggregates.json`（`perf_all` = 全样本、`perf` = ±10% 入带，两者都由
   `records.jsonl` 复算；`export-analysis` 是派生层可随时重建）。旧 run（无 `perf_all`）的
   全样本列由 records 现算兜底。
+- **`method=accuracy` 批次是另一套三页签工作簿**（`excel_report` 按
+  `batches/<batch_id>.json` 的 `method` 分派）：
+
+| 页签 | 内容 |
+|---|---|
+| `场景得分` | 每个 `aggregates.json` cell 一行：模型/场景/数据集/判题族/指标/样本/有效/mean_score/accuracy/95%CI/判题失败/格式失败/错误/超时 |
+| `逐样本判分` | 每个 `samples.csv` 行一条：模型/场景/数据集/语言/样本/判题族/score/correct/format_failure/judge_error/`max_new_tokens`/token/时延/状态；两个模型并排便于逐样本比对 |
+| `错误统计` | 按场景/模型汇总 status、`judge_error`、`format_failure`、over_window skipped 等计数 |
+
+材料来自同一个精度 bundle（`aggregates.json` + `samples.csv`），不重新判题、不改证据；缺文件时
+页签写"无记录"而不是失败。
 
 ---
 
 ## 9. Web 控制台入口
 
+- **测试方法选择**：首屏两张方法卡片（性能测试 / 精度测试），切换后测试集列表只显示该方法的
+  测试集、参数面板切换、结果视图切换；方法元数据来自 `GET /api/overview` 的 `methods` 字段
+  （`name/title/description/default_testset/params/result_views`）。`POST /api/run` 与
+  `POST /api/estimate` 接受 `method`（缺省从测试集推断，冲突 → HTTP 400）。精度首次估算会读取
+  约 15 MB 的 `dataset/test/accuracy/testset.jsonl`（判题族索引缓存后不再重复），之后估算很快。
 - **历史运行**：按批次分组，列表直接读 `output/index.json`（不逐个解析大文件）；
-  行内显示模型/样本数/耗时/体积/已测已选/跳过数。
+  行内显示模型/样本数/耗时/体积/已测已选/跳过数，并带 `method` 标签。
 - **详情页**：整体（按档位）、数据集（cells）、逐样本、环境、报告五个页签。
-  - 顶部汇总行显示 **`ISL入带 N`**（`outcome.n_isl_in_band`）、**`ISL出带 N`**
-    （`n_isl_out_of_band`）与 **`TG无效 N`**（`n_gen_tps_invalid`）；整体/数据集表为
-    双口径：默认列（TTFT/TG TPS 等）为全样本口径（`perf_all`），随后是带
-    「（±10%过滤）」的入带口径列（`perf`）；`n_isl_in_band`/`n_isl_out_of_band`
-    同表展示，出带注明"仍测量但不进（±10%过滤）列"。
+  - 顶部汇总行显示 **`TG无效 N`**（`n_gen_tps_invalid`）与 **`跳过 N`**（`outcome.skipped`）；
+    整体/数据集表为单口径（该档全部 measured+ok 样本）。strict 集额外显示 **`ISL 严格等值`**，
+    不再出现 ISL 入带/出带与 ±10% 过滤列；非 strict 集的历史 run 也按同一单口径展示。
   - 逐样本页**分页**读取 `samples.csv`：`GET /api/runs/<run_id>/samples?offset=&limit=`
     （`limit` 默认 200、上限 1000；可选过滤 `scenario=`、`dataset=`、`status=`、`model=`、
     `context_length=`、`q=`），返回 `{"total":N,"offset":…,"limit":…,"rows":[…]}`；
     `limit` 之外不要假设一次拿全量。
   - 环境页读 `run.json`（唯一环境快照，含 `env.server_models`）；报告页渲染 `report.md`。
+  - **`method=accuracy` 结果视图**：标签页为 整体结果（场景得分表 + 宏平均/CI/判题计数）、
+    数据集（按语言/数据集剖面）、逐样本（判分：score/correct/format_failure/judge_error/理由）、
+    错误统计（status/error/judge_error/format_failure/over_window）、环境与配置（含判题依赖/协议）、
+    报告；服务端把 `summary.method` 透传，前端按方法切换表头与渲染函数（不做业务复制）。
 - **原始文件**：白名单 `run.json`、`MANIFEST.json`、`records.jsonl`（默认下载）、
   `samples.csv`、`aggregates.json`、`report.md`、`logs/run.log`；
   下载走 `/api/runs/<run_id>/file?path=`，服务端做路径穿越校验。
@@ -827,6 +962,9 @@ Excel 在**每个 batch 结束时自动生成**到 `output/exports/<batch_id>.xl
 
 ## 10. 迁移与兼容
 
+- **旧 run 无 `method`**：读取侧按 `run.json.method or batch.method or "performance"` 解析
+  （`tools._run_method`），即历史 run 一律视为 `performance`；`index.json` 旧行缺 `method` 时
+  按 `mode` 回退。旧 run 的派生文件不重写（不伪造精度字段）。
 - **schema 3.0 与 2.x 不兼容，一次切换**：旧 bundle 已整体移入 `output/archive/legacy-v2/`，
   新索引/新工具不读取它们（运行时不再保留兼容读取分支）。
 - **一次性重序列化（可选，已执行过一次）**：`tool/migrate/legacy_v2_to_v3.py` 把

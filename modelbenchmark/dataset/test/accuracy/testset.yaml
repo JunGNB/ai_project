@@ -1,0 +1,47 @@
+name: accuracy
+title: 精度测试（8 场景 × 250 = 2,000 样本）
+description: 8 场景 × 250 条固定样本；逐行判题（5 类确定性判题器），输出场景分/宏平均/配对 Δ。样本由
+  tool/dataset/accuracy/build.py 从 dataset/raw 的上游数据确定性抽样构建，testset.jsonl 为 gitignored
+  离线资产（见 dataset/test/accuracy/manifest.json）。
+method: accuracy
+scenarios:
+  knowledge_qa:
+    dataset: accuracy_jsonl
+    dataset_params:
+      scenario: knowledge_qa
+      path: dataset/test/accuracy/testset.jsonl
+  instruction_following:
+    dataset: accuracy_jsonl
+    dataset_params:
+      scenario: instruction_following
+      path: dataset/test/accuracy/testset.jsonl
+  long_context:
+    dataset: accuracy_jsonl
+    dataset_params:
+      scenario: long_context
+      path: dataset/test/accuracy/testset.jsonl
+  math_logic:
+    dataset: accuracy_jsonl
+    dataset_params:
+      scenario: math_logic
+      path: dataset/test/accuracy/testset.jsonl
+  coding:
+    dataset: accuracy_jsonl
+    dataset_params:
+      scenario: coding
+      path: dataset/test/accuracy/testset.jsonl
+  general_agent:
+    dataset: accuracy_jsonl
+    dataset_params:
+      scenario: general_agent
+      path: dataset/test/accuracy/testset.jsonl
+  search_agent:
+    dataset: accuracy_jsonl
+    dataset_params:
+      scenario: search_agent
+      path: dataset/test/accuracy/testset.jsonl
+  multilingual:
+    dataset: accuracy_jsonl
+    dataset_params:
+      scenario: multilingual
+      path: dataset/test/accuracy/testset.jsonl

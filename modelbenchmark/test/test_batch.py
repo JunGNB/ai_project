@@ -990,3 +990,62 @@ def test_batch_excel_export_failure_warns_but_never_fails_the_run(
     assert "exports" not in batch_json or batch_json["exports"] is None
     assert not list((tmp_path / layout.EXPORTS).glob("*.xlsx"))
     assert events.count("batch_done") == 1
+
+
+# --------------------------------------------------------------------------- #
+# Method dispatch (WP-2): the batch layer is a composition root only
+# --------------------------------------------------------------------------- #
+
+_ACCURACY_JSONL = (
+    Path(__file__).resolve().parents[1]
+    / "dataset"
+    / "test"
+    / "accuracy"
+    / "testset.jsonl"
+)
+_ACCURACY_MANIFEST = _ACCURACY_JSONL.with_name("manifest.json")
+_PERF_JSONL = (
+    Path(__file__).resolve().parents[1]
+    / "dataset"
+    / "test"
+    / "performance"
+    / "testset.jsonl"
+)
+requires_accuracy_data = pytest.mark.skipif(
+    not (_ACCURACY_JSONL.is_file() and _ACCURACY_MANIFEST.is_file()),
+    reason="dataset/test/accuracy is not on disk",
+)
+
+
+def test_batch_runner_rejects_method_mismatch(tmp_path):
+    """The method is owned by cfg (testset/CLI/Web): no silent override."""
+    from modelbench.domain.method import RunMethod
+
+    cfg = load_config()
+    cfg.selection.models = ["minicpm5-1b"]
+    assert cfg.method is RunMethod.PERFORMANCE
+    with pytest.raises(ValueError, match="disagrees"):
+        BatchRunner(cfg, None, tmp_path, batch_id="mismatch", method="accuracy")
+
+
+@requires_accuracy_data
+def test_testset_fingerprint_dispatches_by_method():
+    """batch.json inputs.testset follows the method (design §4.2)."""
+    from modelbench.application.batch import _testset_fingerprint
+    from modelbench.domain.method import RunMethod
+
+    cfg = load_config()
+    performance = _testset_fingerprint(cfg)
+    if _PERF_JSONL.is_file():
+        assert performance["path"] == "dataset/test/performance/testset.jsonl"
+        assert performance["sha256"] and performance["rows"] > 0
+    assert "decode_guard_version" in performance
+
+    accuracy = load_config()
+    accuracy.method = RunMethod.ACCURACY
+    fingerprint = _testset_fingerprint(accuracy)
+    assert fingerprint["method"] == "accuracy"
+    assert fingerprint["path"] == "dataset/test/accuracy/testset.jsonl"
+    assert fingerprint["rows"] == 2000
+    assert fingerprint["manifest_sha256"]
+    assert fingerprint["judge_contract_version"].startswith("judges-")

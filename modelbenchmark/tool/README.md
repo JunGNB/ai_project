@@ -14,15 +14,16 @@ tool/
 │   │   ├── raw_spec.json        # 50 个文件的 path/url/bytes/sha256
 │   │   ├── build.py             # 2,000 行 + manifest（不写 testset.yaml）
 │   │   └── {sampling,sources,prompts}.py
-│   └── performance/             # 性能集（8 × 1K/8K/32K × 10 = 240）
-│       ├── fetch.py             # 下载/校验 → dataset/raw/
-│       ├── raw_spec.json        # 18 个文件的 path/url/bytes/sha256
-│       ├── build.py             # 240 行 + manifest + testset.yaml
+│   └── performance/             # 性能集（8 场景 × 1K/8K/32K × 10 = 240）
+│       ├── fetch.py             # 下载/校验/派生 cl100k → dataset/raw/
+│       ├── derive_cl100k.py     # 由官方 tiktoken blob 确定性生成参考 tokenizer
+│       ├── build.py             # 240 行 + manifest + testset.yaml（cl100k 基线）
+│       ├── align.py             # 运行前按目标模型 tokenizer 重建并逐条校验（0 容差）
 │       └── {sampling,sources}.py
 ├── migrate/
 │   └── legacy_v2_to_v3.py       # 一次性：把 archive/legacy-v2 的 schema-2.x bundle 重序列化为 3.0
-├── system/                      # 离线判题工具（当前不接入 runner）
-│   ├── judges.py
+├── system/                      # 判题工具（精度 run 用 domain/judges；这里保留自检/试点/兼容转发）
+│   ├── judges.py                # 兼容转发 → src/modelbench/domain/judges/
 │   ├── validate_judges.py
 │   └── pilot.py
 └── download/                    # 旧数据层兼容下载入口（不是 dataset/raw 初始化路径）
@@ -36,12 +37,20 @@ $PY tool/dataset/performance/fetch.py
 $PY tool/dataset/performance/fetch.py --verify
 $PY tool/dataset/performance/build.py
 $PY tool/dataset/performance/build.py --check
+$PY tool/dataset/performance/align.py \\
+    --tokenizer /path/to/model/tokenizer.json --base-url http://127.0.0.1:8000 --model <model-id>
 ```
+
+`build.py` 用通用参考 tokenizer（cl100k_base）产出可审查的基线；**正式跑分前必须用 `align.py`
+按目标模型 tokenizer 重建同一设计**并逐条校验 prompt token == 1,024/8,192/32,768（容差 0），
+报告写 `dataset/.cache/performance/alignment-*.json`；runner 声明 `strict_input_tokens: true`，
+发送前复核，不等即 skip（不截断、不做 ±10% 误差带）。oMLX 有鉴权时，`align.py` 取 `--api-key`、
+`OMLX_API_KEY` 或 `modelbench` 配置中的 `server` key（与 runner 同源）。
 
 产物：`dataset/test/performance/{testset.jsonl,manifest.json,testset.yaml}`；
 `testset.jsonl` 与 `dataset/raw/` 不提交 git。场景 8 为 Global-MMLU `multilingual`（10 语种）。
 
-## 2. 精度集（隐藏离线资产）
+## 2. 精度集（`method=accuracy`）
 
 ```bash
 $PY tool/dataset/accuracy/fetch.py
@@ -50,15 +59,19 @@ $PY tool/dataset/accuracy/build.py
 $PY tool/dataset/accuracy/build.py --check
 ```
 
-产物：`dataset/test/accuracy/{testset.jsonl,manifest.json}`；**没有 testset.yaml**，
-`manifest.status=offline-asset`、`runner=not wired`、`hidden=true`，不会出现在 Web/CLI
-测试集列表，也不接入 run。`build.py --check` 会校验 `upstream_id` 全局唯一。
+产物：`dataset/test/accuracy/{testset.jsonl,manifest.json,testset.yaml}`；
+`manifest.status=wired`、`runner=accuracy`、`hidden=false`，测试集出现在 Web/CLI 列表并接入
+`./modelbench run --method accuracy`（独立 run_id，不与性能 run 混算）。`testset.yaml` 随仓库提交，
+`testset.jsonl` 与 `dataset/raw/` 不提交。`build.py --check` 校验行数/id/判题族/SHA-256 与
+`upstream_id` 唯一性。
 
-## 3. 判题工具（当前不接 runner）
+## 3. 判题工具（精度 run 的单一事实源）
 
-`judges.py` 实现 5 个确定性判题族（`mc_letter` / `ifeval` / `normalized_match` /
-`code_exec` / `tool_call`）；`validate_judges.py` 用 gold 答案做自检；`pilot.py` 做小样本
-模型试点。它们是离线工具，**没有接入性能 runner**，也不构成可引用的精度结果。
+`src/modelbench/domain/judges/` 实现 5 个确定性判题族（`mc_letter` / `ifeval` /
+`normalized_match` / `code_exec` / `tool_call`），由 `AccuracyOrchestrator` 在精度 run 中逐样本调用；
+`tool/system/judges.py` 仅保留兼容转发（构造自检脚本使用）。`validate_judges.py` 用 gold 答案做
+判题自检（1,750 正例 + negative controls）；`pilot.py` 做小样本模型试点。判题**无 LLM judge、
+无网络**；判题异常/依赖缺失落 `judge_error`（计 0 分且留在分母），不静默剔除。
 
 ## 4. 路径约定
 

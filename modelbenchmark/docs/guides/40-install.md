@@ -214,7 +214,14 @@ $env:HTTPS_PROXY = "http://127.0.0.1:7890"
 |---|---|---|
 | `dev` | `pytest`、`pytest-timeout` | 跑测试/门禁；`setup` 默认安装 |
 | `datasets` | `pyarrow`、`tokenizers`、`jinja2` | **仅数据集构建**（`tool/dataset`）需要；`pyarrow` 读 parquet，`tokenizers`+`jinja2` 用于无 oMLX.app 时的便携 tokenizer。日常 `validate`/`web`/`run` 不需要 |
-| `eval` | `nltk`、`langdetect`、`absl-py`、`immutabledict`、`jieba`、`rouge` | **仅精度判题/自检**（`tool/system`）需要：官方 IFEval checker 依赖前四个；LongBench 中文 QA 的 ROUGE 指标需要 `jieba` 与 `rouge`。构造/校验测试集本身不需要 |
+| `eval` | `nltk`、`langdetect`、`absl-py`、`immutabledict`、`jieba`、`rouge` | **精度判题与判题自检**（`src/modelbench/domain/judges/`、`tool/system`）需要：官方 IFEval checker 依赖 `nltk`/`langdetect`/`absl`/`immutabledict`；`normalized_match` 的中文 F1/ROUGE（`f1_zh`/`rouge_zh`）需要 `jieba`/`rouge`。**运行 `./modelbench run --method accuracy` 前必须安装**；性能 run / Web / 数据集构造不需要 |
+
+> `[eval]` 缺失不会让精度 run 直接失败，而是**显式降级**：run 启动检查测试集 manifest 声明的
+> 判题族依赖（`domain/judges/missing_dependencies`，只探测模块不 import），缺失时写
+> `run.json.outcome.warnings`（含缺失模块名与安装提示），相关样本 `status=judge_error`
+> （计 0 分且保留在分母，不静默给分），报告/Web 单列计数。口径见
+> [spec/22-accuracy-test-plan.md](../spec/22-accuracy-test-plan.md) §3.2。安装后重跑即可消除；
+> 不要用"跳过该场景"来规避。
 
 手动 venv 下追加安装：
 
@@ -311,7 +318,8 @@ clone 只包含源码、配置、测试与文档；数据与结果需在目标�
   拉取/校验脚本是 `tool/dataset/performance/fetch.py` 与
   `tool/dataset/accuracy/fetch.py`（断点续传 + SHA-256），只读校验用 `--verify`。
 - 测试集由构造器生成：`tool/dataset/performance/build.py`（240 条）与
-  `tool/dataset/accuracy/build.py`（2,000 行隐藏精度资产）；只读校验用各自的 `--check`。
+  `tool/dataset/accuracy/build.py`（2,000 条精度集；`testset.yaml` + `manifest.json` 是提交的
+  契约文件，`testset.jsonl` 为可重建派生数据）；只读校验用各自的 `--check`。
 - **Windows / 无 oMLX.app 的机器也能重建测试集**：安装 `.[dev,datasets]` 后，
   两个 `fetch.py` 会下载通用参考 tokenizer（**cl100k_base**，性能/精度两侧共用
   同一资产：官方 blob + `derive_cl100k.py` 确定性派生的 `tokenizer.json`，

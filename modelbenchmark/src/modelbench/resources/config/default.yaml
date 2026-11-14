@@ -5,6 +5,13 @@
 #
 # Model loading uses oMLX defaults.  Only MoE models may explicitly enable
 # ``moe_expert_offload_enabled`` in models.yaml (see docs/spec/21-test-plan.md).
+
+# Test method for a run: performance (speed/memory, no scoring) or accuracy
+# (deterministic per-sample judging).  A named test set may also declare its own
+# ``method``; CLI/Web ``--method`` must agree with it (see
+# docs/design/32-method-architecture.md §4.1).
+method: performance
+
 server:
   base_url: "http://127.0.0.1:8000"
   api_key: null
@@ -18,7 +25,7 @@ server:
   verify_ssl: true
   pid_file: null
 
-# Performance benchmark settings (the only test mode).
+# Performance benchmark settings (method=performance).
 perf:
   # Samples taken from EACH selected dataset, after dataset_params limits.
   # null / omitted = test every available sample.
@@ -28,16 +35,30 @@ perf:
   # N accepts N-0.5K..N+0.5K.  The filter only selects samples; cells are always
   # keyed by (scenario, dataset, context_length) from the sample metadata.
   context_windows: []
-  # Uniform generation length (OSL): default 50 (product requirement).  Hitting
-  # this cap is NOT data loss: the sample keeps finish_reason=length and TG TPS
-  # is computed over the actually generated token window (needs >= 16 tokens).
-  # CLI `--max-tokens` / Web "生成长度" input can override per run.
+  # Uniform generation length (OSL) fallback: 50.  A test set may declare its own
+  # length (`max_tokens` in testset.yaml; the performance set declares 50) and
+  # that declaration wins over this value; CLI `--max-tokens` / Web "生成长度"
+  # overrides both.  Hitting the cap is NOT data loss: the sample keeps
+  # finish_reason=length and TG TPS is computed over the actually generated
+  # token window (needs >= 16 tokens).
   max_tokens: 50
   # Append a fixed long-output instruction to every performance request so a
   # prompt ending in "Answer:" cannot finish in 1 token (which would make
   # TG TPS null).  This is a measurement-protocol suffix, recorded verbatim in
   # records.jsonl; disable only for diagnostics / historical comparisons.
   decode_guard: true
+
+# Accuracy benchmark sample selection (method=accuracy).  The run protocol is
+# fixed (temperature=0, top_p=1, cold cache, repeats=1, one retry) and is not
+# configurable here; see docs/spec/22-accuracy-test-plan.md §2.
+accuracy:
+  # Samples per scenario; null = all 250 (fixed 8x250 set, no per-model trimming).
+  samples_per_scenario: null
+  # Per-scenario sample-count override (Web/API selection; stratified largest
+  # remainder over meta.stratum, so a small smoke run stays representative).
+  samples_by_scenario: {}
+  # Explicit sample ids per scenario (highest priority; diagnostic selection).
+  sample_ids: {}
 
 run:
   output_dir: output

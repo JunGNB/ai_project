@@ -426,7 +426,10 @@ def run_entry(
         "batch_index": batch_index,
         "batch_models_total": batch_models_total,
         "method": str(run_json.get("method") or batch.get("method") or "performance"),
-        "mode": "performance",
+        # ``mode`` is the legacy name for the same fact (design 32 §2: the index
+        # distinguishes the two methods; accuracy runs must not look like
+        # performance ones).
+        "mode": str(run_json.get("method") or batch.get("method") or "performance"),
         "model": model_name,
         "model_id": str(model.get("id") or model_name),
         "model_slug": model_slug,

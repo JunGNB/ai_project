@@ -33,6 +33,13 @@ Three sheets, names and headers unchanged:
 3. ``详细数据``    one row per measured sample, annotated with its ISL band
    membership and relative ISL deviation
 
+``method=accuracy`` batches get a different workbook (design 32 §5.6): three
+sheets ``场景得分`` (one row per ``aggregates.json`` cell), ``逐样本判分`` (one
+row per ``samples.csv`` row — score/correct/format/judge_error/status/latency)
+and ``错误统计`` (counts by status/judge_error/format_failure per scenario and a
+per-model total).  ``write_batch_excel`` dispatches on ``batch.json.method``; the
+performance workbook above is byte-for-byte unchanged.
+
 Excel cells are limited to 32,767 characters.  The prompt bodies now live in the
 blob store in full, so the head/tail clipping in :func:`_clip` is *more* important
 than before, not less: it keeps the workbook writable without silently dropping
@@ -41,6 +48,7 @@ evidence (the marker records the original length).
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 import re
@@ -871,6 +879,376 @@ def _sheet_details(wb: Any, runs: List[Dict[str, Any]], store: PromptBlobStore) 
             cell.alignment = Alignment(vertical="top", wrap_text=False)
 
 
+# --------------------------------------------------------------------------- #
+# accuracy workbook (method=accuracy): 场景得分 / 逐样本判分 / 错误统计
+# --------------------------------------------------------------------------- #
+
+SHEET_ACCURACY_SCORES = "场景得分"
+SHEET_ACCURACY_SAMPLES = "逐样本判分"
+SHEET_ACCURACY_ERRORS = "错误统计"
+
+_ACCURACY_SCORE_HEADERS = [
+    "测试模型",
+    "模型ID",
+    "模型大小(GB)",
+    "场景",
+    "数据集",
+    "判题族",
+    "指标",
+    "样本数",
+    "有效数",
+    "ok数",
+    "错误数",
+    "超时数",
+    "判题失败数",
+    "格式失败数",
+    "判分分母",
+    "正确数",
+    "mean_score",
+    "accuracy",
+    "score_std",
+    "score_ci95_low",
+    "score_ci95_high",
+    "accuracy_ci95_low",
+    "accuracy_ci95_high",
+]
+
+#: One column per ``samples.csv`` field (``SAMPLES_CSV_FIELDS_ACCURACY``).
+_ACCURACY_SAMPLE_HEADERS = [
+    "测试模型",
+    "模型ID",
+    "场景",
+    "数据集",
+    "语言",
+    "样本ID",
+    "upstream_id",
+    "重复",
+    "阶段",
+    "状态",
+    "错误",
+    "判题族",
+    "指标",
+    "得分",
+    "正确",
+    "格式失败",
+    "判题错误",
+    "max_new_tokens",
+    "输出token",
+    "输入token",
+    "实际prompt token",
+    "TTFT(ms)",
+    "E2E(ms)",
+    "finish_reason",
+    "缓存模式",
+    "缓存已清理",
+    "缓存污染",
+    "prompt sha256",
+    "时间戳",
+]
+
+
+def _iter_accuracy_samples(run_dir: Optional[Path]) -> Iterator[Dict[str, Any]]:
+    """Yield the rows of an accuracy run's ``samples.csv`` (missing = empty)."""
+    if run_dir is None:
+        return
+    path = Path(run_dir) / layout.SAMPLES_CSV
+    if not path.is_file():
+        return
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            if isinstance(row, dict):
+                yield row
+
+
+def _csv_flag(value: Any) -> Optional[bool]:
+    """Parse a bool written by ``csv.DictWriter`` (``True``/``False``/empty)."""
+    text = str(value).strip().lower() if value is not None else ""
+    if not text:
+        return None
+    if text in ("true", "1", "yes"):
+        return True
+    if text in ("false", "0", "no"):
+        return False
+    return None
+
+
+def _csv_number(value: Any) -> Any:
+    """Numbers become numeric cells; empty strings stay blank (no fake 0)."""
+    if value is None or value == "":
+        return None
+    return _number(value)
+
+
+def _rate_percent(numerator: int, denominator: int) -> Optional[float]:
+    if not denominator:
+        return None
+    return round(100.0 * float(numerator) / float(denominator), 1)
+
+
+def _accuracy_cell_model(run: Dict[str, Any], cell: Dict[str, Any]) -> Any:
+    return cell.get("model") or _model_label(run)
+
+
+def _sheet_accuracy_scores(wb: Any, runs: List[Dict[str, Any]]) -> None:
+    """``场景得分``: one row per ``aggregates.json`` cell."""
+    ws = wb.create_sheet(SHEET_ACCURACY_SCORES)
+    _header(ws, list(_ACCURACY_SCORE_HEADERS))
+    row_count = 0
+    for run in runs:
+        aggregates = run.get("aggregates") or {}
+        cells = [
+            cell
+            for cell in aggregates.get("cells") or []
+            if isinstance(cell, dict)
+        ]
+        cells.sort(
+            key=lambda cell: (
+                str(cell.get("model") or ""),
+                str(cell.get("scenario") or ""),
+                str(cell.get("dataset") or ""),
+            )
+        )
+        for cell in cells:
+            ws.append(
+                [
+                    _accuracy_cell_model(run, cell),
+                    _model_id(run),
+                    _model_size_gb(run),
+                    cell.get("scenario"),
+                    cell.get("dataset"),
+                    cell.get("judge_family"),
+                    cell.get("metric"),
+                    cell.get("n_samples"),
+                    cell.get("n_valid"),
+                    cell.get("n_ok"),
+                    cell.get("n_error"),
+                    cell.get("n_timeout"),
+                    cell.get("n_judge_error"),
+                    cell.get("n_format_failure"),
+                    cell.get("n_scored"),
+                    cell.get("n_correct"),
+                    _number(cell.get("mean_score")),
+                    _number(cell.get("accuracy")),
+                    _number(cell.get("score_std")),
+                    _number(cell.get("score_ci95_low")),
+                    _number(cell.get("score_ci95_high")),
+                    _number(cell.get("accuracy_ci95_low")),
+                    _number(cell.get("accuracy_ci95_high")),
+                ]
+            )
+            row_count += 1
+    if row_count == 0:
+        ws.append(["无场景得分记录（aggregates.json 缺失或无 measured 判分）"])
+    _set_widths(
+        ws,
+        {
+            1: 24, 2: 24, 3: 12, 4: 18, 5: 16, 6: 16, 7: 14,
+            8: 9, 9: 9, 10: 8, 11: 9, 12: 9, 13: 11, 14: 11, 15: 10, 16: 8,
+            17: 12, 18: 10, 19: 10, 20: 14, 21: 14, 22: 15, 23: 15,
+        },
+    )
+
+
+def _sheet_accuracy_samples(wb: Any, runs: List[Dict[str, Any]]) -> None:
+    """``逐样本判分``: one row per ``samples.csv`` row, both models side by side."""
+    ws = wb.create_sheet(SHEET_ACCURACY_SAMPLES)
+    _header(ws, list(_ACCURACY_SAMPLE_HEADERS))
+    row_count = 0
+    for run in runs:
+        label = _model_label(run)
+        model_id = _model_id(run)
+        for row in _iter_accuracy_samples(run.get("path")):
+            ws.append(
+                [
+                    label,
+                    model_id,
+                    row.get("scenario"),
+                    row.get("dataset"),
+                    row.get("language"),
+                    row.get("sample_id"),
+                    row.get("upstream_id"),
+                    _csv_number(row.get("repeat")),
+                    row.get("phase"),
+                    row.get("status"),
+                    _clip(row.get("error"), 1000),
+                    row.get("judge_family"),
+                    row.get("judge_metric"),
+                    _csv_number(row.get("score")),
+                    _csv_flag(row.get("correct")),
+                    _csv_flag(row.get("format_failure")),
+                    _csv_flag(row.get("judge_error")),
+                    _csv_number(row.get("max_new_tokens")),
+                    _csv_number(row.get("completion_tokens")),
+                    _csv_number(row.get("input_context_tokens")),
+                    _csv_number(row.get("actual_prompt_tokens")),
+                    _csv_number(row.get("ttft_ms")),
+                    _csv_number(row.get("e2e_ms")),
+                    row.get("finish_reason"),
+                    row.get("cache_mode"),
+                    _csv_flag(row.get("cache_cleared")),
+                    _csv_flag(row.get("cache_polluted")),
+                    row.get("prompt_sha256"),
+                    row.get("timestamp"),
+                ]
+            )
+            row_count += 1
+    if row_count == 0:
+        ws.append(["无逐样本判分记录（samples.csv 缺失或为空）"])
+    _set_widths(
+        ws,
+        {
+            1: 24, 2: 24, 3: 18, 4: 16, 5: 8, 6: 30, 7: 34, 8: 7, 9: 9,
+            10: 10, 11: 40, 12: 16, 13: 14, 14: 8, 15: 8, 16: 9, 17: 9,
+            18: 13, 19: 10, 20: 12, 21: 14, 22: 10, 23: 10, 24: 14,
+            25: 10, 26: 11, 27: 10, 28: 68, 29: 26,
+        },
+    )
+
+
+def _accuracy_error_buckets(run: Dict[str, Any]) -> Dict[str, Dict[str, int]]:
+    """Per-scenario ``status``/``judge_error``/``format_failure`` counters.
+
+    ``samples.csv`` is the preferred source (one row per judged sample); when it
+    is missing (an interrupted run) the aggregates' per-cell counters are used
+    instead, so the sheet still accounts for every sample instead of showing an
+    empty error table.
+    """
+    buckets: Dict[str, Dict[str, int]] = {}
+    for row in _iter_accuracy_samples(run.get("path")):
+        scenario = str(row.get("scenario") or "-")
+        bucket = buckets.setdefault(
+            scenario,
+            {"n": 0, "ok": 0, "error": 0, "timeout": 0, "judge": 0, "fmt": 0},
+        )
+        bucket["n"] += 1
+        status = str(row.get("status") or "")
+        if status == "ok":
+            bucket["ok"] += 1
+        elif status == "error":
+            bucket["error"] += 1
+        elif status == "timeout":
+            bucket["timeout"] += 1
+        if _csv_flag(row.get("judge_error")):
+            bucket["judge"] += 1
+        if _csv_flag(row.get("format_failure")):
+            bucket["fmt"] += 1
+    if buckets:
+        return buckets
+    for cell in (run.get("aggregates") or {}).get("cells") or []:
+        if not isinstance(cell, dict):
+            continue
+        scenario = str(cell.get("scenario") or "-")
+        buckets[scenario] = {
+            "n": int(cell.get("n_samples") or 0),
+            "ok": int(cell.get("n_ok") or 0),
+            "error": int(cell.get("n_error") or 0),
+            "timeout": int(cell.get("n_timeout") or 0),
+            "judge": int(cell.get("n_judge_error") or 0),
+            "fmt": int(cell.get("n_format_failure") or 0),
+        }
+    return buckets
+
+
+def _sheet_accuracy_errors(wb: Any, runs: List[Dict[str, Any]]) -> None:
+    """``错误统计``: status/judge_error/format_failure per scenario and per model."""
+    ws = wb.create_sheet(SHEET_ACCURACY_ERRORS)
+    headers = [
+        "测试模型",
+        "场景",
+        "样本数",
+        "ok",
+        "错误",
+        "超时",
+        "判题失败",
+        "格式失败",
+        "判分失败率(%)",
+        "格式失败率(%)",
+        "备注",
+    ]
+    _header(ws, headers)
+    row_count = 0
+    for run in runs:
+        label = _model_label(run)
+        buckets = _accuracy_error_buckets(run)
+        totals = {"n": 0, "ok": 0, "error": 0, "timeout": 0, "judge": 0, "fmt": 0}
+        for scenario in sorted(buckets):
+            bucket = buckets[scenario]
+            for key in totals:
+                totals[key] += int(bucket.get(key) or 0)
+            notes: List[str] = []
+            format_rate = _rate_percent(bucket["fmt"], bucket["n"])
+            if format_rate is not None and format_rate > 20.0:
+                notes.append("格式不适配")
+            judge_rate = _rate_percent(bucket["judge"], bucket["n"])
+            if judge_rate is not None and judge_rate > 0:
+                notes.append("判题失败计0分并保留在分母")
+            ws.append(
+                [
+                    label,
+                    scenario,
+                    bucket["n"],
+                    bucket["ok"],
+                    bucket["error"],
+                    bucket["timeout"],
+                    bucket["judge"],
+                    bucket["fmt"],
+                    judge_rate,
+                    format_rate,
+                    "；".join(notes) or None,
+                ]
+            )
+            row_count += 1
+        if buckets:
+            ws.append(
+                [
+                    label,
+                    "（合计）",
+                    totals["n"],
+                    totals["ok"],
+                    totals["error"],
+                    totals["timeout"],
+                    totals["judge"],
+                    totals["fmt"],
+                    _rate_percent(totals["judge"], totals["n"]),
+                    _rate_percent(totals["fmt"], totals["n"]),
+                    None,
+                ]
+            )
+            row_count += 1
+    if row_count == 0:
+        ws.append(["无逐样本判分记录（samples.csv 缺失且 aggregates.json 无 cell）"])
+    _set_widths(
+        ws,
+        {
+            1: 24, 2: 20, 3: 9, 4: 8, 5: 8, 6: 8, 7: 10, 8: 10,
+            9: 14, 10: 14, 11: 34,
+        },
+    )
+
+
+def _render_accuracy_workbook(
+    batch: Dict[str, Any], runs: List[Dict[str, Any]]
+) -> Any:
+    """Accuracy workbook: 场景得分 / 逐样本判分 / 错误统计 (design 32 §5.6)."""
+    try:
+        from openpyxl import Workbook
+    except ImportError as exc:  # pragma: no cover - dependency missing
+        raise RuntimeError(
+            "openpyxl is required for Excel result analysis; "
+            "install it with `uv pip install openpyxl` or `pip install openpyxl`"
+        ) from exc
+    wb = Workbook()
+    wb.remove(wb.active)
+    _sheet_accuracy_scores(wb, runs)
+    _sheet_accuracy_samples(wb, runs)
+    _sheet_accuracy_errors(wb, runs)
+    wb.properties.title = (
+        f"Accuracy result analysis {batch.get('batch_id')} ({batch.get('method')})"
+    )
+    wb.properties.creator = "modelbench"
+    return wb
+
+
 def _sanitize_workbook(workbook: Any) -> None:
     """Belt-and-braces: strip illegal XML characters from every string cell."""
     from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
@@ -904,8 +1282,15 @@ def write_batch_excel(
     batch = _load_batch(batch_path, batch_meta)
     batch_id = str(batch.get("batch_id") or batch_path.stem)
     runs = _collect_runs(output_root, batch)
-    store = PromptBlobStore(output_root)
-    workbook = _render_workbook(batch, runs, store)
+    # Method dispatch (design 32 §5.6/§8): accuracy batches get the
+    # 场景得分/逐样本判分/错误统计 workbook; every other method keeps the
+    # performance sheets unchanged (legacy batches without ``method`` too).
+    method = str(batch.get("method") or "performance").strip().lower()
+    if method == "accuracy":
+        workbook = _render_accuracy_workbook(batch, runs)
+    else:
+        store = PromptBlobStore(output_root)
+        workbook = _render_workbook(batch, runs, store)
     _sanitize_workbook(workbook)
     directory = layout.exports_dir(output_root)
     directory.mkdir(parents=True, exist_ok=True)

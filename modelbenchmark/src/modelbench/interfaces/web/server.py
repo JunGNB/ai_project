@@ -50,7 +50,13 @@ from modelbench.adapters.storage import catalog as run_catalog
 from modelbench.adapters.storage import layout
 from modelbench.application.plan import apply_testset, dataset_plan
 from modelbench.domain.context_windows import describe_windows
-from .jobs import JobManager, build_config, plan_counts, read_log
+from .jobs import (
+    JobManager,
+    build_config,
+    plan_counts,
+    read_log,
+    testset_judge_families,
+)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 OUTPUT_DIR = PROJECT_ROOT / "output"
@@ -101,18 +107,27 @@ def _testset_tree() -> List[Dict[str, Any]]:
 
     Scenario rows include the dataset plan (``samples_total``/``cells_total``)
     so the console can estimate ``measured requests`` and ``test items`` without
-    loading the 25 MB performance JSONL (the adapter caches its index).
+    loading the 25 MB performance JSONL (the adapter caches its index).  Each
+    row also carries its ``method`` (performance/accuracy), and accuracy rows
+    expose the judge families declared by the test set data.
     """
     base = load_config()
     testsets: List[Dict[str, Any]] = []
     discovered = list(load_testsets(Path(base.datasets.testset_dir)).values())
-    # Present the default test set first; other directories keep alphabetical order.
-    discovered.sort(key=lambda ts: (ts.name != "performance", ts.name))
+    # Present the default (performance) test set first, then accuracy, then the
+    # remaining custom directories alphabetically (design §9.1).
+    method_rank = {"performance": 0, "accuracy": 1}
+    discovered.sort(key=lambda ts: (method_rank.get(ts.method.value, 2), ts.name))
     for ts in discovered:
         cfg = base.model_copy(deep=True)
         apply_testset(cfg, ts)
+        # WP-2's apply_testset sets cfg.method; keep the planning copy honest
+        # while the method dispatcher is still landing.
+        cfg.method = ts.method
         scenarios = []
         buckets: set = set()
+        samples_totals: List[int] = []
+        cells_totals: List[int] = []
         for name in ts.scenarios:
             spec = cfg.scenarios.get(name)
             if spec is None:
@@ -123,6 +138,13 @@ def _testset_tree() -> List[Dict[str, Any]]:
                     value = group.get("context_length")
                     if value:
                         buckets.add(int(value))
+                scenario_samples = sum(int(item["n"]) for item in groups)
+                scenario_cells = len(groups)
+                samples_totals.append(scenario_samples)
+                cells_totals.append(scenario_cells)
+            else:
+                scenario_samples = None
+                scenario_cells = None
             scenarios.append(
                 {
                     "name": name,
@@ -133,22 +155,41 @@ def _testset_tree() -> List[Dict[str, Any]]:
                         if groups
                         else []
                     ),
-                    "samples_total": (
-                        sum(int(item["n"]) for item in groups) if groups else None
-                    ),
-                    "cells_total": len(groups) if groups else None,
+                    "samples_total": scenario_samples,
+                    "cells_total": scenario_cells,
                 }
             )
+        samples_known = len(samples_totals) == len(scenarios)
+        if ts.method.value == "accuracy":
+            judge_info = testset_judge_families(cfg, ts)
+            judge_families = list(judge_info["families"])
+            # Accuracy has no context buckets / ISL filtering (one cell per
+            # scenario); `available` tells the UI whether testset.jsonl exists.
+            buckets = set()
+            available = bool(judge_info["available"] and samples_known)
+        else:
+            judge_families = []
+            available = samples_known
         testsets.append(
             {
                 "name": ts.name,
                 "title": ts.title or ts.name,
                 "description": ts.description or "",
+                "method": ts.method.value,
                 "directory": f"{_display_dir(base.datasets.testset_dir)}/{ts.name}",
                 # Declared context buckets present in the dataset (1K/8K/32K);
                 # the console only offers windows that actually exist.
                 "buckets": sorted(buckets),
+                # Declared generation length and strict input-token contract
+                # (testset.yaml); the console shows them so the run form and
+                # the planning view match what apply_testset() will use.
+                "max_tokens": ts.max_tokens,
+                "strict_input_tokens": bool(ts.strict_input_tokens),
                 "scenarios": scenarios,
+                "judge_families": judge_families,
+                "available": available,
+                "samples_total": sum(samples_totals) if samples_known else None,
+                "cells_total": sum(cells_totals) if samples_known else None,
             }
         )
     return testsets
@@ -309,6 +350,8 @@ _SAMPLE_INT_FIELDS = frozenset(
         "actual_prompt_tokens",
         "completion_tokens",
         "cached_tokens",
+        # Accuracy: per-row generation budget (judge.max_new_tokens).
+        "max_new_tokens",
     }
 )
 _SAMPLE_FLOAT_FIELDS = frozenset(
@@ -324,10 +367,21 @@ _SAMPLE_FLOAT_FIELDS = frozenset(
         "peak_rss_mb",
         "peak_cpu_pct",
         "mean_cpu_pct",
+        # Accuracy: normalized judge score (0/1 or F1).
+        "score",
     }
 )
 _SAMPLE_BOOL_FIELDS = frozenset(
-    {"length_capped", "cache_cleared", "cache_polluted", "truncated"}
+    {
+        "length_capped",
+        "cache_cleared",
+        "cache_polluted",
+        "truncated",
+        # Accuracy judge flags.
+        "correct",
+        "format_failure",
+        "judge_error",
+    }
 )
 _SAMPLE_SEARCH_FIELDS = ("sample_id", "dataset", "scenario", "model", "subtask")
 #: Sentinel distinguishing "no context_length filter" from "filter rows with None".
@@ -463,6 +517,7 @@ def _filter_samples(
     dataset: str = "",
     status: str = "",
     model: str = "",
+    language: str = "",
     query: str = "",
     context_length: Any = _UNSET,
 ) -> List[Dict[str, Any]]:
@@ -476,6 +531,8 @@ def _filter_samples(
         if status and row.get("status") != status:
             continue
         if model and row.get("model") != model:
+            continue
+        if language and row.get("language") != language:
             continue
         if context_length is not _UNSET and row.get("context_length") != context_length:
             continue
@@ -501,6 +558,7 @@ def _run_samples(run_id: str, query: Dict[str, str]) -> Dict[str, Any]:
         dataset=_query_text(query, "dataset"),
         status=_query_text(query, "status"),
         model=_query_text(query, "model"),
+        language=_query_text(query, "language"),
         query=_query_text(query, "q"),
         context_length=_context_length_filter(query.get("context_length")),
     )
@@ -523,6 +581,9 @@ def _sample_facets(run_dir: Path) -> Dict[str, List[str]]:
         "datasets": set(),
         "scenarios": set(),
         "statuses": set(),
+        # Accuracy-only facets; empty for performance runs (column absent).
+        "languages": set(),
+        "judge_families": set(),
     }
     for row in rows:
         for column, bucket in (
@@ -530,6 +591,8 @@ def _sample_facets(run_dir: Path) -> Dict[str, List[str]]:
             ("dataset", "datasets"),
             ("scenario", "scenarios"),
             ("status", "statuses"),
+            ("language", "languages"),
+            ("judge_family", "judge_families"),
         ):
             value = row.get(column)
             if value not in (None, ""):
@@ -648,6 +711,20 @@ def _model_size_gb(run_json: Dict[str, Any], batch: Dict[str, Any]) -> Optional[
     return None
 
 
+def _as_judge_dependencies(value: Any) -> Any:
+    """Preserve the persisted judge-dependency block shape.
+
+    The accuracy orchestrator persists ``{"used": [...], "missing": [...]}``;
+    older runs may carry a plain list.  The environment tab renders either, so
+    the summary must not flatten a mapping into its keys.
+    """
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return []
+
+
 def _synthesize_summary(
     run_json: Dict[str, Any],
     aggregates: Dict[str, Any],
@@ -669,6 +746,7 @@ def _synthesize_summary(
     )
     if context_windows:
         perf["context_windows"] = context_windows
+    method = str(run_json.get("method") or batch.get("method") or "performance")
 
     def metric(key: str) -> Any:
         value = outcome.get(key)
@@ -676,10 +754,42 @@ def _synthesize_summary(
             value = aggregates.get(key)
         return value
 
+    def count(key: str) -> int:
+        value = metric(key)
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
     return {
         "run_id": run_json.get("run_id"),
         "schema_version": run_json.get("schema_version"),
-        "mode": run_json.get("method") or "performance",
+        "mode": method,
+        # Explicit method (design §5.6/§9.2); ``mode`` stays for older clients.
+        "method": method,
+        # Accuracy run config (empty for performance runs).
+        "accuracy": dict(config.get("accuracy") or {}),
+        # Accuracy provenance: persisted by AccuracyRunWriter.finalize (report
+        # SHA/rows/judge deps) with the batch file as the legacy fallback.
+        "testset": dict(
+            config.get("testset")
+            or (config.get("inputs") or {}).get("testset")
+            or (batch.get("inputs") or {}).get("testset")
+            or {}
+        ),
+        "judge_dependencies": _as_judge_dependencies(
+            config.get("judge_dependencies")
+        ),
+        # Judge coverage counters surfaced by the 错误统计 tab (design §9.2).
+        "judge_counts": {
+            "n_judge_error": count("n_judge_error"),
+            "n_format_failure": count("n_format_failure"),
+            "n_correct": count("n_correct"),
+            "n_scored": count("n_scored"),
+            "n_measured": count("n_measured"),
+            "n_ok": count("n_ok"),
+            "n_selected": count("n_selected"),
+        },
         "batch": batch,
         "perf": perf,
         "run": dict(config.get("run") or {}),
@@ -841,10 +951,136 @@ def _model_catalog_view(
     return models, model_sync
 
 
+def _jsonable(value: Any) -> Any:
+    """Convert MethodProfile metadata (dataclass/pydantic/enum) to JSON types."""
+    import dataclasses
+    from enum import Enum
+
+    if isinstance(value, Enum):
+        return value.value
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {
+            field.name: _jsonable(getattr(value, field.name))
+            for field in dataclasses.fields(value)
+        }
+    if hasattr(value, "model_dump"):
+        try:
+            return _jsonable(value.model_dump())
+        except Exception:  # noqa: BLE001 - metadata is display-only
+            return str(value)
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, Path):
+        return str(value)
+    return value
+
+
+def _fallback_method_metadata() -> List[Dict[str, Any]]:
+    """UI metadata mirroring WP-2's ``MethodProfile`` (used until it lands)."""
+    return [
+        {
+            "name": "performance",
+            "title": "性能测试",
+            "description": "多快 / 占用多少内存：TTFT、TG TPS、峰值内存、输入上下文；不判分。",
+            "default_testset": "performance",
+            "needs_judges": False,
+            "config_block": "perf",
+            "params": [
+                {"name": "samples", "label": "每个场景样本数", "type": "int", "default": None},
+                {"name": "max_tokens", "label": "生成长度 max_tokens", "type": "int", "default": None},
+                {"name": "repeats", "label": "重复轮数", "type": "int", "default": 1},
+                {"name": "cache_mode", "label": "缓存模式", "type": "enum", "default": "cold"},
+                {"name": "warmup_per_model", "label": "模型级预热", "type": "bool", "default": True},
+                {"name": "thinking_mode", "label": "思考模式", "type": "enum", "default": "disabled"},
+                {"name": "context_windows", "label": "上下文档位", "type": "list", "default": []},
+            ],
+            "result_views": ["overall", "cells", "samples", "environment", "report"],
+        },
+        {
+            "name": "accuracy",
+            "title": "精度测试",
+            "description": "答得对不对：8 场景 × 250 = 2,000 样本，5 类确定性判题，无 LLM judge。",
+            "default_testset": "accuracy",
+            "needs_judges": True,
+            "config_block": "accuracy",
+            "params": [
+                {"name": "samples", "label": "每个场景样本数", "type": "int", "default": None},
+                {"name": "warmup_per_model", "label": "模型级预热", "type": "bool", "default": True},
+                {"name": "thinking_mode", "label": "思考模式", "type": "enum", "default": "disabled"},
+            ],
+            "result_views": [
+                "overall",
+                "cells",
+                "samples",
+                "errors",
+                "environment",
+                "report",
+            ],
+        },
+    ]
+
+
+def _declared_max_tokens(testsets: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The generation length a performance test set declares (``max_tokens``)."""
+
+    for testset in testsets:
+        if testset.get("method", "performance") != "performance":
+            continue
+        declared = testset.get("max_tokens")
+        if declared is not None:
+            return {"name": testset.get("name"), "max_tokens": int(declared)}
+    return None
+
+
+def _with_effective_defaults(
+    methods: List[Dict[str, Any]], testsets: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Make the exposed ``default`` the value a run will actually use.
+
+    The config default (50) only applies when no test set declares a length, so a
+    card/tooltip is simply wrong when it shows a value the run will not use.
+    """
+
+    declared = _declared_max_tokens(testsets)
+    if declared is None:
+        return methods
+    for method in methods:
+        if method.get("name") != "performance":
+            continue
+        for param in method.get("params") or []:
+            if param.get("name") != "max_tokens":
+                continue
+            param["default"] = declared["max_tokens"]
+            param["declared_by"] = declared["name"]
+            param["hint"] = (
+                f"留空 = 测试集声明（{declared['name']}: {declared['max_tokens']}）；"
+                "填写则覆盖生成长度，不影响输入对齐，触顶样本不丢弃"
+            )
+    return methods
+
+
+def _method_metadata(testsets: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+    """Serialized ``application.methods.method_metadata()`` (WP-2 contract)."""
+    try:
+        from modelbench.application.methods import method_metadata
+
+        methods = _jsonable(method_metadata())
+    except (ImportError, AttributeError):  # WP-2 not merged yet
+        methods = _fallback_method_metadata()
+    return _with_effective_defaults(methods, list(testsets or []))
+
+
 def _server_overview() -> Dict[str, Any]:
     cfg = load_config()
     live, server_error = _live_models()
     models, model_sync = _model_catalog_view(cfg, live, server_error)
+
+    testsets = _testset_tree()
+    accuracy_testset = next(
+        (testset for testset in testsets if testset.get("method") == "accuracy"), None
+    )
 
     index = _catalog()
     runs = [
@@ -882,12 +1118,40 @@ def _server_overview() -> Dict[str, Any]:
         "server": {"base_url": cfg.server.base_url, "error": server_error},
         "models": models,
         "model_sync": model_sync,
-        "testsets": _testset_tree(),
+        # Method registry metadata (performance/accuracy tabs, params, views).
+        # ``default`` reflects the selected test set's declaration (e.g. max_tokens 50).
+        "methods": _method_metadata(testsets),
+        "testsets": testsets,
         "perf": {
             "samples_per_dataset": cfg.perf.samples_per_dataset,
             "max_tokens": cfg.perf.max_tokens,
+            # Effective generation length of the performance run (test set wins).
+            "max_tokens_effective": (
+                (_declared_max_tokens(testsets) or {}).get("max_tokens")
+            ),
             "context_windows": list(cfg.perf.context_windows or []),
             "context_filter": describe_windows(cfg.perf.context_windows or []),
+        },
+        # Accuracy defaults: sample selection only; the protocol is fixed.
+        "accuracy": {
+            "samples_per_scenario": cfg.accuracy.samples_per_scenario,
+            "samples_label": (
+                "全部 250/场景"
+                if cfg.accuracy.samples_per_scenario is None
+                else f"{cfg.accuracy.samples_per_scenario}/场景"
+            ),
+            "judge_families": list(
+                (accuracy_testset or {}).get("judge_families") or []
+            ),
+            "available": bool((accuracy_testset or {}).get("available")),
+            "protocol": {
+                "temperature": 0,
+                "top_p": 1,
+                "cache_mode": "cold",
+                "repeats": 1,
+                "retries": 1,
+                "decode_guard": False,
+            },
         },
         "run_defaults": {
             "repeats": cfg.run.repeats,
@@ -905,7 +1169,12 @@ def _server_overview() -> Dict[str, Any]:
             "size": index_path.stat().st_size if index_path.is_file() else None,
             "generated_at": index.get("generated_at"),
         },
-        "defaults": {"testset": "performance", "cache_mode": "cold", "thinking_mode": "disabled"},
+        "defaults": {
+            "testset": "performance",
+            "method": "performance",
+            "cache_mode": "cold",
+            "thinking_mode": "disabled",
+        },
     }
 
 
@@ -1042,6 +1311,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        # The console is edited in place during development: never let a browser
+        # keep an old app.js/style.css that no longer matches the server payloads.
+        self.send_header("Cache-Control", "no-store, must-revalidate")
         self.end_headers()
         self.wfile.write(body)
 
@@ -1176,7 +1448,9 @@ class Handler(BaseHTTPRequestHandler):
                         "cells_total": counts["cells_total"],
                         "cells_known": counts.get("cells_known", False),
                         "samples_total": counts["samples_total"],
+                        "samples_known": counts.get("samples_known", True),
                         "repeats": counts["repeats"],
+                        "method": counts.get("method", "performance"),
                     }
                 )
             elif path == "/api/run":

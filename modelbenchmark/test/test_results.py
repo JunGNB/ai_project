@@ -9,6 +9,7 @@ files the product writes instead of hand-rolled JSON.
 
 from __future__ import annotations
 
+import csv
 import json
 import shutil
 from pathlib import Path
@@ -17,9 +18,11 @@ import pytest
 
 from modelbench.adapters.config.testsets import TestSet as TSet
 from modelbench.adapters.config.testsets import TestSetScenario as TScen
-from modelbench.adapters.storage import catalog, layout, tools
-from modelbench.adapters.storage.writer import RunWriter
+from modelbench.adapters.storage import accuracy_output, catalog, layout, tools
+from modelbench.adapters.storage.accuracy_output import SAMPLES_CSV_FIELDS_ACCURACY
+from modelbench.adapters.storage.writer import AccuracyRunWriter, RunWriter
 from modelbench.domain.models import (
+    CacheMode,
     CacheState,
     ChatMessage,
     PerfMetrics,
@@ -29,6 +32,7 @@ from modelbench.domain.models import (
     RequestSpec,
     RunManifest,
     SampleRecord,
+    Score,
     Usage,
 )
 
@@ -112,6 +116,10 @@ def _write_batch_file(
     batch_id: str,
     models: list,
     created_at: str = CREATED_AT,
+    *,
+    method: str = "performance",
+    testset: dict | None = None,
+    duration_s: float = 1.0,
 ) -> dict:
     """Write ``batches/<batch_id>.json`` exactly as the flat layout expects."""
     model_runs = [
@@ -119,7 +127,7 @@ def _write_batch_file(
             "model": item["model_id"],
             "model_id": item["model_id"],
             "model_slug": item["slug"],
-            "method": "performance",
+            "method": method,
             "run_id": item["run_id"],
             # Relative to output/; ``run_dir`` no longer exists in batch.json.
             "run_path": f"{layout.RUNS}/{item['run_id']}",
@@ -127,15 +135,22 @@ def _write_batch_file(
             "status": "ok",
             "n_records": item["n_records"],
             "n_samples": item["n_samples"],
-            "duration_s": 1.0,
+            "duration_s": duration_s,
         }
         for item in models
     ]
+    inputs_testset = testset or {
+        "path": "dataset/test/performance/testset.jsonl",
+        "sha256": "a" * 64,
+        "rows": 4,
+        "context_windows": [1024, 8192, 32768],
+        "decode_guard_version": 1,
+    }
     payload = {
         "schema_version": "3.0",
         "batch_id": batch_id,
         "source": "cli",
-        "method": "performance",
+        "method": method,
         "created_at": created_at,
         "finished_at": created_at,
         "models_selected": [item["model_id"] for item in models],
@@ -143,15 +158,7 @@ def _write_batch_file(
         "n_models_selected": len(models),
         "n_models_measured": len(models),
         "model_runs": model_runs,
-        "inputs": {
-            "testset": {
-                "path": "dataset/test/performance/testset.jsonl",
-                "sha256": "a" * 64,
-                "rows": 4,
-                "context_windows": [1024, 8192, 32768],
-                "decode_guard_version": 1,
-            }
-        },
+        "inputs": {"testset": inputs_testset},
         "config": {"perf": {"max_tokens": 16}, "run": {"repeats": 1}},
         "retention": {"pinned": False, "keep_until": None},
         "provenance": {"git_commit": None, "host": {}},
@@ -892,30 +899,61 @@ def test_cli_rebuild_all_and_pack(tmp_path, capsys):
 # --------------------------------------------------------------------------- #
 
 
+def _write_perf_jsonl(path, count: int = 3):
+    import json
+
+    rows = []
+    for index in range(count):
+        rows.append(
+            {
+                "id": f"perf-knowledge_qa-1k-{index:03d}",
+                "scenario": "knowledge_qa",
+                "bucket": "1k",
+                "dataset": "longbench_pro",
+                "tokens": 1024,
+                "messages": [{"role": "user", "content": f"question {index}?"}],
+                "tools": [],
+                "constructed": True,
+                "meta": {"lang": "en", "upstream_id": f"u{index}"},
+            }
+        )
+    path.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
 def test_scenario_samples_endpoint_uses_cache(monkeypatch, tmp_path):
     from modelbench.adapters.config.settings import load_config
     from modelbench.interfaces.web import server as web
 
+    path = _write_perf_jsonl(tmp_path / "perf.jsonl", 3)
     cfg = load_config()
     cfg.datasets.raw_dir = str(tmp_path / "raw")
     cfg.datasets.processed_dir = str(tmp_path / "processed")
-    cfg.scenarios["knowledge_qa"].dataset = "synthetic"
-    cfg.scenarios["knowledge_qa"].params = {"dataset_params": {"count": 3}}
+    cfg.scenarios["knowledge_qa"].dataset = "perf_jsonl"
+    cfg.scenarios["knowledge_qa"].params = {
+        "dataset_params": {"scenario": "knowledge_qa", "path": str(path)}
+    }
     testset = TSet(
-        name="synthetic_set",
+        name="perf_set",
         scenarios={"knowledge_qa": TScen()},
     )
     monkeypatch.setattr(web, "load_config", lambda: cfg)
-    monkeypatch.setattr(web, "load_testsets", lambda *args, **kwargs: {"synthetic_set": testset})
+    monkeypatch.setattr(web, "load_testsets", lambda *args, **kwargs: {"perf_set": testset})
     web._SCENARIO_SAMPLE_CACHE.clear()
-    first = web._scenario_samples("synthetic_set", "knowledge_qa", 0, 2)
+    first = web._scenario_samples("perf_set", "knowledge_qa", 0, 2)
     assert first["total"] == 3
     assert first["returned"] == 2
-    assert first["samples"][0]["sample_id"] == "synthetic-0000"
-    second = web._scenario_samples("synthetic_set", "knowledge_qa", 2, 10)
-    assert [sample["sample_id"] for sample in second["samples"]] == ["synthetic-0002"]
+    assert first["samples"][0]["sample_id"] == "perf-knowledge_qa-1k-000"
+    second = web._scenario_samples("perf_set", "knowledge_qa", 2, 10)
+    assert [sample["sample_id"] for sample in second["samples"]] == [
+        "perf-knowledge_qa-1k-002"
+    ]
     with pytest.raises(ValueError):
-        web._scenario_samples("synthetic_set", "missing", 0, 1)
+        web._scenario_samples("perf_set", "missing", 0, 1)
+    web._SCENARIO_SAMPLE_CACHE.clear()
 
 
 def test_open_in_file_manager_uses_platform_command(monkeypatch):
@@ -936,13 +974,17 @@ def test_sample_worker_preview_and_large_isolation(monkeypatch, tmp_path):
     from modelbench.interfaces.web import sample_worker
     from modelbench.interfaces.web import server as web
 
+    path = _write_perf_jsonl(tmp_path / "perf.jsonl", 2)
     preview = sample_worker.build_preview(
-        str(tmp_path / "raw"), str(tmp_path / "processed"), "synthetic", {"count": 2}
+        str(tmp_path / "raw"),
+        str(tmp_path / "processed"),
+        "perf_jsonl",
+        {"dataset_params": {"scenario": "knowledge_qa", "path": str(path)}},
     )
     assert preview["total"] == 2
     assert [row["sample_id"] for row in preview["samples"]] == [
-        "synthetic-0000",
-        "synthetic-0001",
+        "perf-knowledge_qa-1k-000",
+        "perf-knowledge_qa-1k-001",
     ]
 
     calls = []
@@ -1026,3 +1068,705 @@ def test_verify_detects_stale_aggregates(tmp_path):
     report = tools.verify_output(tmp_path)
     assert not report["ok"]
     assert any("ttft_ms" in issue and "recomputed" in issue for issue in report["issues"])
+
+
+def test_verify_counts_suppressed_gen_tps_invalid_without_tg_tps_value(tmp_path):
+    """TG TPS suppression has ``gen_tps=None`` + a reason; verify must count it.
+
+    The writer counts ``n_gen_tps_invalid`` from ``metrics.gen_tps_invalid``
+    (20-methodology §2), while verify used to count only records that still had a
+    ``gen_tps`` value — so every suppressed record produced a false
+    ``n_gen_tps_invalid declared != detected`` issue.
+    """
+    writer = RunWriter(
+        tmp_path,
+        batch_id=BATCH_ID,
+        method="performance",
+        model_slug="m1",
+        created_at=CREATED_AT,
+        model={"id": "m1", "alias": "m1", "model_slug": "m1"},
+    )
+    writer.initialize(
+        RunManifest(
+            run_id=writer.run_id,
+            batch_id=BATCH_ID,
+            method="performance",
+            model={"id": "m1", "alias": "m1", "model_slug": "m1"},
+            project_version="0.3.0",
+            created_at=CREATED_AT,
+            config={
+                "perf": {"max_tokens": 16, "samples_per_dataset": 1},
+                "run": {"repeats": 1, "cache_mode": "cold"},
+            },
+            env={"hardware": {}, "omlx": {}, "model_env": {}},
+        )
+    )
+    record = _record(
+        writer.run_id,
+        "m1",
+        "s1",
+        scenario="knowledge_qa",
+        dataset="mmlu",
+        context_length=1024,
+    )
+    # Exactly what a suppressed decode window records: no TG TPS/TPOT value,
+    # only the reason (kept for audit and counted as invalid).
+    record.metrics.gen_tps = None
+    record.metrics.tpot_ms = None
+    record.metrics.gen_tps_invalid = "decode_window_too_short"
+    writer.write_record(record)
+    _write_batch_file(
+        layout.batch_path(tmp_path, BATCH_ID),
+        BATCH_ID,
+        [
+            {
+                "model_id": "m1",
+                "slug": "m1",
+                "run_id": writer.run_id,
+                "n_records": 1,
+                "n_samples": 1,
+            }
+        ],
+    )
+    writer.finalize(
+        [record],
+        {"duration_s": 1.0, "n_selected": 1},
+        perf={"max_tokens": 16, "samples_per_dataset": 1},
+        run_config={"repeats": 1, "cache_mode": "cold"},
+    )
+    run_json = json.loads((writer.run_dir / "run.json").read_text(encoding="utf-8"))
+    assert run_json["outcome"]["n_gen_tps_invalid"] == 1
+
+    report = tools.verify_output(tmp_path)
+    assert report["ok"], report["issues"]
+    assert report["stats"]["gen_tps_invalid"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# accuracy bundles (method=accuracy): writer / rebuild / verify / Excel
+# --------------------------------------------------------------------------- #
+
+ACC_BATCH_ID = "20260101T000000Z-acc9"
+_ACCURACY_TESTSET = {
+    "path": "dataset/test/accuracy/testset.jsonl",
+    "sha256": "b" * 64,
+    "rows": 2000,
+    "method": "accuracy",
+}
+
+#: Deterministic small accuracy test set: two models x two scenarios.
+#: Columns: scenario, dataset, language, judge_family, metric, sample_id,
+#:          status, score, correct, judge_error, format_failure.
+_ACCURACY_SPECS = {
+    "m1": [
+        # knowledge_qa / mc_letter (0/1): 3 correct + 1 wrong + 1 judge_error
+        # + 1 transport error (excluded from the score denominator).
+        ("knowledge_qa", "global_mmlu", "en", "mc_letter", "accuracy", "k1", RecordStatus.OK, 1.0, True, False, False),
+        ("knowledge_qa", "global_mmlu", "en", "mc_letter", "accuracy", "k2", RecordStatus.OK, 1.0, True, False, False),
+        ("knowledge_qa", "global_mmlu", "en", "mc_letter", "accuracy", "k3", RecordStatus.OK, 1.0, True, False, False),
+        ("knowledge_qa", "global_mmlu", "en", "mc_letter", "accuracy", "k4", RecordStatus.OK, 0.0, False, False, False),
+        ("knowledge_qa", "global_mmlu", "en", "mc_letter", "accuracy", "k5", RecordStatus.JUDGE_ERROR, 0.0, False, True, False),
+        ("knowledge_qa", "global_mmlu", "en", "mc_letter", "accuracy", "k6", RecordStatus.ERROR, None, False, False, False),
+        # math_logic / F1: mean 0.625, one format failure, no binary accuracy.
+        ("math_logic", "gsm8k", "zh", "normalized_match", "f1", "g1", RecordStatus.OK, 0.5, False, False, True),
+        ("math_logic", "gsm8k", "zh", "normalized_match", "f1", "g2", RecordStatus.OK, 1.0, True, False, False),
+        ("math_logic", "gsm8k", "zh", "normalized_match", "f1", "g3", RecordStatus.OK, 0.0, False, False, False),
+        ("math_logic", "gsm8k", "zh", "normalized_match", "f1", "g4", RecordStatus.OK, 1.0, True, False, False),
+    ],
+    "m2": [
+        ("knowledge_qa", "global_mmlu", "en", "mc_letter", "accuracy", "k1", RecordStatus.OK, 1.0, True, False, False),
+        ("knowledge_qa", "global_mmlu", "en", "mc_letter", "accuracy", "k2", RecordStatus.OK, 1.0, True, False, False),
+        ("knowledge_qa", "global_mmlu", "en", "mc_letter", "accuracy", "k3", RecordStatus.OK, 0.0, False, False, False),
+        ("knowledge_qa", "global_mmlu", "en", "mc_letter", "accuracy", "k4", RecordStatus.OK, 0.0, False, False, False),
+        ("math_logic", "gsm8k", "zh", "normalized_match", "f1", "g1", RecordStatus.OK, 1.0, True, False, False),
+        ("math_logic", "gsm8k", "zh", "normalized_match", "f1", "g2", RecordStatus.OK, 1.0, True, False, False),
+        ("math_logic", "gsm8k", "zh", "normalized_match", "f1", "g3", RecordStatus.OK, 1.0, True, False, False),
+        ("math_logic", "gsm8k", "zh", "normalized_match", "f1", "g4", RecordStatus.OK, 0.0, False, False, False),
+    ],
+}
+
+
+def _accuracy_record(
+    run_id: str,
+    model_id: str,
+    sample_id: str,
+    *,
+    scenario: str,
+    dataset: str,
+    language: str = "en",
+    family: str = "mc_letter",
+    metric: str = "accuracy",
+    status: RecordStatus = RecordStatus.OK,
+    score: float | None = None,
+    correct: bool = False,
+    judge_error: bool = False,
+    format_failure: bool = False,
+) -> SampleRecord:
+    detail = {
+        "family": family,
+        "metric": metric,
+        "pass": bool(correct),
+        "pred": "B",
+        "gold": "B",
+        "reason": "judge_error" if judge_error else "letter_match",
+        "format_failure": bool(format_failure),
+        "judge_error": bool(judge_error),
+        "max_new_tokens": 1536,
+    }
+    score_obj = (
+        None
+        if score is None
+        else Score(correct=bool(correct), score=float(score), detail=detail)
+    )
+    return SampleRecord(
+        run_id=run_id,
+        model=model_id,
+        scenario=scenario,
+        dataset=dataset,
+        sample_id=sample_id,
+        repeat=0,
+        phase=Phase.MEASURED,
+        status=status,
+        request=RequestSpec(
+            model=model_id,
+            messages=[ChatMessage(role="user", content=f"question {sample_id}")],
+            max_tokens=1536,
+            temperature=0.0,
+            top_p=1.0,
+        ),
+        response=RawResponse(
+            text="B",
+            finish_reason="stop",
+            usage=Usage(prompt_tokens=100, completion_tokens=5),
+        ),
+        metrics=PerfMetrics(
+            input_context_tokens=120,
+            input_context_chars=200,
+            completion_tokens=5,
+            ttft_ms=50.0,
+            e2e_ms=500.0,
+            cached_tokens=0,
+        ),
+        score=score_obj,
+        cache=CacheState(
+            mode=CacheMode.COLD, cleared_before_request=True, cached_tokens=0
+        ),
+        sample_meta={
+            "language": language,
+            "upstream_id": f"{sample_id}|{language}",
+            "judge": {"family": family, "metric": metric},
+        },
+    )
+
+
+def _make_accuracy_records(run_id: str, model_id: str) -> list:
+    return [
+        _accuracy_record(
+            run_id,
+            model_id,
+            sample_id,
+            scenario=scenario,
+            dataset=dataset,
+            language=language,
+            family=family,
+            metric=metric,
+            status=status,
+            score=score,
+            correct=correct,
+            judge_error=judge_error,
+            format_failure=format_failure,
+        )
+        for (
+            scenario,
+            dataset,
+            language,
+            family,
+            metric,
+            sample_id,
+            status,
+            score,
+            correct,
+            judge_error,
+            format_failure,
+        ) in _ACCURACY_SPECS[model_id]
+    ]
+
+
+def _build_accuracy_batch(
+    root: Path,
+    *,
+    batch_id: str = ACC_BATCH_ID,
+    models: tuple = (("m1", "m1"), ("m2", "m2")),
+) -> dict:
+    """Write a complete accuracy batch with the real ``AccuracyRunWriter``."""
+    root = Path(root)
+    built = {}
+    for model_id, slug in models:
+        writer = AccuracyRunWriter(
+            root,
+            batch_id=batch_id,
+            model_slug=slug,
+            created_at=CREATED_AT,
+            model={"id": model_id, "alias": slug, "model_slug": slug},
+        )
+        manifest = RunManifest(
+            run_id=writer.run_id,
+            batch_id=batch_id,
+            method="accuracy",
+            model={"id": model_id, "alias": slug, "model_slug": slug},
+            project_version="0.4.0",
+            created_at=CREATED_AT,
+            config={
+                "method": "accuracy",
+                "accuracy": {"samples_per_scenario": 5},
+                "run": {
+                    "repeats": 1,
+                    "cache_mode": "cold",
+                    "thinking_mode": "disabled",
+                    "warmup_per_model": 1,
+                },
+                "testset": dict(_ACCURACY_TESTSET),
+            },
+            env={
+                "hardware": {
+                    "chip": "M4",
+                    "chip_name": "M4",
+                    "memory_gb": 24,
+                    "gpu_cores": 10,
+                    "os_version": "macOS",
+                },
+                "omlx": {"omlx_version": "1.0", "feature_flags": [], "models": {}},
+                "model_env": {},
+            },
+        )
+        writer.initialize(manifest)
+        writer.register_model_env(
+            {
+                "id": model_id,
+                "engine_type": "vlm",
+                "quantization": "oQ4",
+                "estimated_size": 5612040826,
+                "settings": {},
+            }
+        )
+        writer.log_path.write_text("run log line\n", encoding="utf-8")
+        records = _make_accuracy_records(writer.run_id, model_id)
+        for record in records:
+            writer.write_record(record)
+        built[slug] = {
+            "writer": writer,
+            "records": records,
+            "model_id": model_id,
+            "run_dir": writer.run_dir,
+        }
+    batch_file = layout.batch_path(root, batch_id)
+    _write_batch_file(
+        batch_file,
+        batch_id,
+        [
+            {
+                "model_id": item["model_id"],
+                "slug": slug,
+                "run_id": item["writer"].run_id,
+                "n_records": len(item["records"]),
+                "n_samples": len(item["records"]),
+            }
+            for slug, item in built.items()
+        ],
+        method="accuracy",
+        testset=dict(_ACCURACY_TESTSET),
+        duration_s=3.0,
+    )
+    for slug, item in built.items():
+        item["writer"].finalize(
+            item["records"],
+            {
+                "testset": dict(_ACCURACY_TESTSET),
+                # Real orchestrator shape (dict, not a list): the writer must
+                # persist it verbatim so report/rebuild/Web keep used+missing.
+                "judge_dependencies": {
+                    "used": ["mc_letter", "normalized_match"],
+                    "missing": ["not-a-real-package"],
+                },
+                "duration_s": 3.0,
+                "n_selected": len(item["records"]),
+            },
+            run_config={
+                "repeats": 1,
+                "cache_mode": "cold",
+                "thinking_mode": "disabled",
+            },
+            outcome={"duration_s": 3.0},
+        )
+    return {
+        "root": root,
+        "batch_id": batch_id,
+        "batch_file": batch_file,
+        **built,
+    }
+
+
+def test_accuracy_writer_bundle_shape_and_aggregates(tmp_path):
+    """AccuracyRunWriter must produce the §5.4/§5.5 shapes and exact counts."""
+    built = _build_accuracy_batch(tmp_path)
+    run_dir = built["m1"]["run_dir"]
+
+    run_json = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert run_json["method"] == "accuracy"
+    # config blocks survive the finalize merge (method is never dropped).
+    assert run_json["config"]["method"] == "accuracy"
+    assert run_json["config"]["accuracy"]["samples_per_scenario"] == 5
+    assert run_json["config"]["run"]["repeats"] == 1
+    # Dict-shaped judge dependencies survive finalize verbatim (they used to be
+    # flattened into ["used", "missing"] by list(dict)).
+    assert run_json["config"]["judge_dependencies"] == {
+        "used": ["mc_letter", "normalized_match"],
+        "missing": ["not-a-real-package"],
+    }
+    assert run_json["config"]["testset"]["sha256"] == _ACCURACY_TESTSET["sha256"]
+    outcome = run_json["outcome"]
+    assert outcome["n_measured"] == 10  # error/timeout included
+    assert outcome["n_ok"] == 8
+    assert outcome["n_selected"] == 10
+    assert outcome["n_samples"] == 10
+    assert outcome["n_cells"] == 2
+    assert outcome["n_scored"] == 9  # judge_error stays in the denominator
+    assert outcome["n_correct"] == 5
+    assert outcome["n_judge_error"] == 1
+    assert outcome["n_format_failure"] == 1
+    assert outcome["n_scenarios_scored"] == 2
+    assert outcome["status"] == "partial" and outcome["cancelled"] is False
+    # Performance-only counters (ISL band / TG TPS validity) do not apply here.
+    for field in ("n_gen_tps_invalid", "n_isl_in_band", "n_isl_out_of_band"):
+        assert field not in outcome
+
+    # The shared helper reports the same counters (writer and rebuild path).
+    assert accuracy_output.accuracy_outcome(built["m1"]["records"]) == {
+        "n_scored": 9,
+        "n_correct": 5,
+        "n_judge_error": 1,
+        "n_format_failure": 1,
+        "n_scenarios_scored": 2,
+    }
+
+    aggregates = json.loads((run_dir / "aggregates.json").read_text(encoding="utf-8"))
+    assert aggregates["schema_version"] == "3.0"
+    assert aggregates["method"] == "accuracy"
+    assert aggregates["run_id"] == built["m1"]["writer"].run_id
+    assert aggregates["n_records"] == 10
+    assert aggregates["n_samples"] == 10
+    assert aggregates["n_cells"] == 2
+    cells = {
+        (cell["model"], cell["scenario"], cell["dataset"]): cell
+        for cell in aggregates["cells"]
+    }
+    knowledge = cells[("m1", "knowledge_qa", "global_mmlu")]
+    assert knowledge["n_samples"] == 6
+    assert knowledge["n_valid"] == 5
+    assert knowledge["n_ok"] == 4
+    assert knowledge["n_error"] == 1
+    assert knowledge["n_timeout"] == 0
+    assert knowledge["n_judge_error"] == 1
+    assert knowledge["n_scored"] == 5
+    assert knowledge["n_correct"] == 3
+    assert knowledge["mean_score"] == pytest.approx(0.6)
+    assert knowledge["accuracy"] == pytest.approx(0.6)
+    assert knowledge["judge_family"] == "mc_letter"
+    assert knowledge["metric"] == "accuracy"
+    assert knowledge["by_language"]["en"]["n_samples"] == 6
+
+    math_cell = cells[("m1", "math_logic", "gsm8k")]
+    assert math_cell["n_samples"] == 4
+    assert math_cell["n_valid"] == 4
+    assert math_cell["mean_score"] == pytest.approx(0.625)
+    assert math_cell["accuracy"] is None  # F1 slice has no binary accuracy
+    assert math_cell["n_format_failure"] == 1
+    assert math_cell["judge_family"] == "normalized_match"
+    assert math_cell["metric"] == "f1"
+
+    overall = aggregates["overall"][0]
+    assert overall["model"] == "m1"
+    assert overall["macro_score"] == pytest.approx((0.6 + 0.625) / 2)
+    assert overall["micro_score"] == pytest.approx(5.5 / 9)
+    assert overall["n_scenarios_scored"] == 2
+    assert overall["n_scored"] == 9
+    assert overall["n_correct"] == 5
+    assert overall["by_language"]["en"]["n_samples"] == 6
+    assert overall["by_language"]["zh"]["n_samples"] == 4
+    assert overall["judge_families"] == ["mc_letter", "normalized_match"]
+
+    # samples.csv: frozen accuracy column order, one row per measured record.
+    text = (run_dir / "samples.csv").read_text(encoding="utf-8")
+    lines = text.splitlines()
+    assert lines[0] == ",".join(SAMPLES_CSV_FIELDS_ACCURACY)
+    assert len(lines) == 1 + 10
+    rows = list(csv.DictReader(lines))
+    judge_rows = [row for row in rows if row["judge_error"] == "True"]
+    assert len(judge_rows) == 1
+    assert float(judge_rows[0]["score"]) == 0.0
+    assert judge_rows[0]["judge_family"] == "mc_letter"
+    error_rows = [row for row in rows if row["status"] == "error"]
+    assert len(error_rows) == 1 and error_rows[0]["score"] == ""
+    assert {row["language"] for row in rows} == {"en", "zh"}
+
+    report = (run_dir / "report.md").read_text(encoding="utf-8")
+    assert "精度测试摘要" in report
+    assert "cold" in report and "temperature=0" in report
+    assert "decode guard" in report
+    assert "b" * 64 in report  # testset SHA
+    assert "macro_score" in report
+    assert "语言剖面" in report
+    # Judge dependency provenance keeps the used/missing mapping in the report.
+    assert "used=['mc_letter', 'normalized_match']" in report
+    assert "not-a-real-package" in report
+
+    index = catalog.load_index(tmp_path)
+    by_id = {entry["run_id"]: entry for entry in index["runs"]}
+    m1_entry = by_id[built["m1"]["writer"].run_id]
+    assert m1_entry["method"] == "accuracy"
+    assert m1_entry["mode"] == "accuracy"
+    assert m1_entry["n_samples"] == 10
+    assert m1_entry["n_records"] == 10
+    assert m1_entry["n_cells"] == 2
+    assert m1_entry["datasets"] == ["global_mmlu", "gsm8k"]
+    m2_entry = by_id[built["m2"]["writer"].run_id]
+    assert m2_entry["n_samples"] == 8
+    assert m2_entry["datasets"] == ["global_mmlu", "gsm8k"]
+
+
+def test_accuracy_rebuild_and_verify_roundtrip(tmp_path):
+    built = _build_accuracy_batch(tmp_path)
+    report = tools.verify_output(tmp_path)
+    assert report["ok"], report["issues"]
+
+    run_dir = built["m1"]["run_dir"]
+    original = json.loads((run_dir / "aggregates.json").read_text(encoding="utf-8"))
+    samples_before = (run_dir / "samples.csv").read_text(encoding="utf-8")
+    for name in ("samples.csv", "aggregates.json", "report.md", "MANIFEST.json"):
+        (run_dir / name).unlink()
+    assert not tools.verify_output(tmp_path)["ok"]
+
+    result = tools.rebuild_run(tmp_path, run_dir)
+    assert result["n_records"] == 10
+    assert result["n_samples"] == 10
+    assert result["n_cells"] == 2
+    rebuilt = json.loads((run_dir / "aggregates.json").read_text(encoding="utf-8"))
+    for key in (
+        "schema_version",
+        "method",
+        "run_id",
+        "n_records",
+        "n_samples",
+        "n_cells",
+        "overall",
+        "cells",
+    ):
+        assert rebuilt[key] == original[key], key
+    assert (run_dir / "samples.csv").read_text(encoding="utf-8") == samples_before
+    rebuilt_report = (run_dir / "report.md").read_text(encoding="utf-8")
+    assert "精度测试摘要" in rebuilt_report
+    assert "b" * 64 in rebuilt_report  # testset SHA survives rebuild
+    assert tools.verify_output(tmp_path)["ok"]
+
+    # A stale derived mean is caught by the accuracy recomputation (AC-A5).
+    payload = json.loads((run_dir / "aggregates.json").read_text(encoding="utf-8"))
+    payload["cells"][0]["mean_score"] = 0.999
+    (run_dir / "aggregates.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+    stale = tools.verify_output(tmp_path)
+    assert not stale["ok"]
+    assert any(
+        "mean_score" in issue and "recomputed" in issue for issue in stale["issues"]
+    )
+
+    # samples.csv row count is part of the accuracy contract.
+    tools.rebuild_run(tmp_path, run_dir)
+    assert tools.verify_output(tmp_path)["ok"]
+    lines = (run_dir / "samples.csv").read_text(encoding="utf-8").splitlines()
+    (run_dir / "samples.csv").write_text(
+        "\n".join(lines[:-1]) + "\n", encoding="utf-8"
+    )
+    row_report = tools.verify_output(tmp_path)
+    assert not row_report["ok"]
+    assert any("samples.csv has" in issue for issue in row_report["issues"])
+
+
+def test_accuracy_rebuild_recovers_testset_provenance_from_batch(tmp_path):
+    """Rebuild must reproduce report provenance persisted at bundle level.
+
+    The live writer stores the testset fingerprint it received via ``extra`` in
+    ``run.json.config``; a legacy/fixture accuracy bundle that only carries it in
+    ``batches/<id>.json.inputs.testset`` must still rebuild a report with the
+    same SHA/rows/judge dependencies instead of silently rendering ``-``.
+    """
+    built = _build_accuracy_batch(tmp_path, models=(("m1", "m1"),))
+    run_dir = built["m1"]["run_dir"]
+    run_path = run_dir / "run.json"
+    run_json = json.loads(run_path.read_text(encoding="utf-8"))
+    # Live writer persisted the fingerprint so rebuild works from the bundle.
+    assert run_json["config"]["testset"]["sha256"] == _ACCURACY_TESTSET["sha256"]
+    # Simulate an older bundle that only has the batch-level copy.
+    run_json["config"].pop("testset")
+    run_path.write_text(json.dumps(run_json, ensure_ascii=False, indent=2), encoding="utf-8")
+    (run_dir / "report.md").unlink()
+
+    tools.rebuild_run(tmp_path, run_dir)
+    report = (run_dir / "report.md").read_text(encoding="utf-8")
+    assert _ACCURACY_TESTSET["sha256"] in report
+    assert "行数：2000" in report
+    assert tools.verify_output(tmp_path)["ok"]
+
+
+def test_verify_flags_accuracy_ok_record_without_score(tmp_path):
+    built = _build_accuracy_batch(tmp_path, models=(("m1", "m1"),))
+    run_dir = built["m1"]["run_dir"]
+    path = run_dir / "records.jsonl"
+    lines = path.read_text(encoding="utf-8").splitlines()
+    payload = json.loads(lines[0])
+    payload["score"] = None
+    lines[0] = json.dumps(payload, ensure_ascii=False)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    report = tools.verify_output(tmp_path)
+    assert not report["ok"]
+    assert any(
+        "neither a score nor a judge_error" in issue for issue in report["issues"]
+    )
+
+
+def test_accuracy_batch_excel_has_three_sheets(tmp_path):
+    from openpyxl import load_workbook
+
+    from modelbench.adapters.storage.excel_report import write_batch_excel
+
+    built = _build_accuracy_batch(tmp_path)
+    workbook_path = write_batch_excel(tmp_path, built["batch_file"])
+    assert workbook_path == tmp_path / layout.EXPORTS / f"{ACC_BATCH_ID}.xlsx"
+    assert workbook_path.is_file()
+
+    workbook = load_workbook(workbook_path)
+    assert workbook.sheetnames == ["场景得分", "逐样本判分", "错误统计"]
+
+    scores = workbook["场景得分"]
+    assert [cell.value for cell in scores[1]][:5] == [
+        "测试模型",
+        "模型ID",
+        "模型大小(GB)",
+        "场景",
+        "数据集",
+    ]
+    assert scores.max_row == 1 + 4  # 2 models x 2 scenario cells
+
+    samples = workbook["逐样本判分"]
+    headers = [cell.value for cell in samples[1]]
+    for required in ("得分", "正确", "格式失败", "判题错误", "状态", "TTFT(ms)", "E2E(ms)"):
+        assert required in headers
+    assert samples.max_row == 1 + 18  # 10 + 8 measured rows, both models
+
+    errors = workbook["错误统计"]
+    error_headers = [cell.value for cell in errors[1]]
+    for required in ("样本数", "ok", "错误", "超时", "判题失败", "格式失败"):
+        assert required in error_headers
+    assert errors.max_row >= 1 + 3  # per-model scenario rows + a total row
+
+
+def test_unknown_run_method_is_rejected_not_treated_as_performance(tmp_path):
+    built = _build_batch(tmp_path)
+    run_dir = built["m1"]["writer"].run_dir
+    path = run_dir / "run.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["method"] = "sorcery"
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    report = tools.verify_output(tmp_path)
+    assert not report["ok"]
+    assert any(
+        "unsupported run.json method" in issue and "sorcery" in issue
+        for issue in report["issues"]
+    )
+    with pytest.raises(ValueError, match="unsupported run method"):
+        tools.rebuild_run(tmp_path, run_dir)
+
+
+def test_accuracy_empty_run_finalizes_and_verifies(tmp_path):
+    """An accuracy run with no measured records still writes a valid bundle."""
+    writer = AccuracyRunWriter(
+        tmp_path,
+        batch_id=ACC_BATCH_ID,
+        model_slug="empty",
+        created_at=CREATED_AT,
+        model={"id": "empty", "alias": "empty", "model_slug": "empty"},
+    )
+    writer.initialize(
+        RunManifest(
+            run_id=writer.run_id,
+            batch_id=ACC_BATCH_ID,
+            method="accuracy",
+            model={"id": "empty", "alias": "empty", "model_slug": "empty"},
+            created_at=CREATED_AT,
+            config={
+                "method": "accuracy",
+                "accuracy": {"samples_per_scenario": None},
+                "run": {"repeats": 1, "cache_mode": "cold"},
+                "testset": dict(_ACCURACY_TESTSET),
+            },
+            env={"hardware": {}, "omlx": {}, "model_env": {}},
+        )
+    )
+    summary = writer.finalize([], {"duration_s": 0.1}, outcome={"duration_s": 0.1})
+    assert summary["n_records"] == 0
+    assert summary["n_samples"] == 0
+    assert summary["n_cells"] == 0
+    assert (writer.run_dir / "samples.csv").read_text(encoding="utf-8").strip() == (
+        ",".join(SAMPLES_CSV_FIELDS_ACCURACY)
+    )
+    aggregates = json.loads(
+        (writer.run_dir / "aggregates.json").read_text(encoding="utf-8")
+    )
+    assert aggregates["cells"] == [] and aggregates["overall"] == []
+    assert aggregates["n_samples"] == 0
+    run_json = json.loads((writer.run_dir / "run.json").read_text(encoding="utf-8"))
+    assert run_json["outcome"]["n_scored"] == 0
+    assert run_json["outcome"]["n_scenarios_scored"] == 0
+
+    _write_batch_file(
+        layout.batch_path(tmp_path, ACC_BATCH_ID),
+        ACC_BATCH_ID,
+        [
+            {
+                "model_id": "empty",
+                "slug": "empty",
+                "run_id": writer.run_id,
+                "n_records": 0,
+                "n_samples": 0,
+            }
+        ],
+        method="accuracy",
+        testset=dict(_ACCURACY_TESTSET),
+    )
+    report = tools.verify_output(tmp_path)
+    assert report["ok"], report["issues"]
+    # The empty run can be rebuilt from its (absent) records.jsonl too.
+    assert tools.rebuild_run(tmp_path, writer.run_dir)["n_records"] == 0
+
+
+def test_accuracy_excel_tolerates_missing_samples_csv(tmp_path):
+    """A run without ``samples.csv`` must not break the workbook (warn, not fail)."""
+    from openpyxl import load_workbook
+
+    from modelbench.adapters.storage.excel_report import write_batch_excel
+
+    built = _build_accuracy_batch(tmp_path)
+    (built["m2"]["run_dir"] / layout.SAMPLES_CSV).unlink()
+    workbook = load_workbook(write_batch_excel(tmp_path, built["batch_file"]))
+    assert workbook.sheetnames == ["场景得分", "逐样本判分", "错误统计"]
+    # Only m1 rows remain on the per-sample sheet; the error sheet falls back to
+    # m2's aggregates so no model silently disappears.
+    assert workbook["逐样本判分"].max_row == 1 + 10
+    error_models = {
+        row[0].value
+        for row in workbook["错误统计"].iter_rows(min_row=2, max_col=1)
+        if row[0].value
+    }
+    assert error_models == {"m1", "m2"}

@@ -14,6 +14,14 @@ and the chat template + decode guard add protocol tokens.  The product decision
   exposes both in-band and out-of-band counts;
 * the model-window check uses the tokenized actual count, not the declared
   bucket value.  32K has no special target: 32,768 stays the bucket target.
+
+A performance test set may opt into **strict input-token alignment**
+(``strict_input_tokens: true``): the dataset guarantees that the target model's
+tokenizer counts exactly the bucket target at run time, so the runner requires
+``actual == target``.  The +/-10% helpers above stay untouched for every other
+use (historical sets, reporting, documentation); strict mode uses
+:func:`exact_bounds`, i.e. ``low == high == target`` (again no 32K special
+case: the target stays 32,768).
 """
 
 from __future__ import annotations
@@ -27,6 +35,7 @@ TOLERANCE_RATIO = 0.10
 __all__ = [
     "BUCKET_TARGETS",
     "TOLERANCE_RATIO",
+    "exact_bounds",
     "tolerance_bounds",
     "tolerance_for_bucket",
     "within_tolerance",
@@ -45,16 +54,38 @@ def tolerance_bounds(target: int) -> Tuple[int, int]:
     return max(0, low), max(0, high)
 
 
+def exact_bounds(target: int) -> Tuple[int, int]:
+    """Return the strict ``(target, target)`` bounds (no +/-10% band).
+
+    Used by ``perf.strict_input_tokens`` test sets: the sample is only measured
+    when the target tokenizer's count is exactly the bucket target, so the
+    tolerance band degenerates to a single point.  ``target`` is never special
+    cased: 32K stays 32,768.
+    """
+    target = int(target)
+    return target, target
+
+
 def tolerance_for_bucket(
-    bucket: Optional[str], declared_tokens: Optional[int] = None
+    bucket: Optional[str],
+    declared_tokens: Optional[int] = None,
+    strict: bool = False,
 ) -> Optional[Tuple[int, int]]:
-    """Resolve tolerance bounds from a bucket name (or a declared token count)."""
+    """Resolve tolerance bounds from a bucket name (or a declared token count).
+
+    ``strict=True`` returns :func:`exact_bounds` for the same resolved target
+    (the strict input-token contract); the historical +/-10% behaviour is
+    unchanged when ``strict`` is false.
+    """
     key = str(bucket or "").strip().lower()
+    target: Optional[int] = None
     if key in BUCKET_TARGETS:
-        return tolerance_bounds(BUCKET_TARGETS[key])
-    if declared_tokens is not None and int(declared_tokens) > 0:
-        return tolerance_bounds(int(declared_tokens))
-    return None
+        target = BUCKET_TARGETS[key]
+    elif declared_tokens is not None and int(declared_tokens) > 0:
+        target = int(declared_tokens)
+    if target is None:
+        return None
+    return exact_bounds(target) if strict else tolerance_bounds(target)
 
 
 def within_tolerance(actual: int, bounds: Optional[Tuple[int, int]]) -> bool:

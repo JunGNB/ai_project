@@ -5,6 +5,84 @@
 口径：仅记"变了什么、为什么"；详细证据在 `docs/records/`，规范以 `docs/` 为准。
 历史（0.3.0 之前）的任务级明细见 `harness/tasks/` 任务板与 `docs/archive/`。
 
+## 2026-11-12（精度首轮全量结果审计）
+
+### Fixed
+
+- **`mc_letter` 判题优先级 bug**：旧实现先检查 refusal 正则（如 "not enough information"/
+  "无法确定"）再解析明确答案，导致回答结尾写了 "The answer is B." / "答案是 C" 的样本被记为
+  `format_failure`。现改为"明确答案优先，refusal 仅在没有答案承诺时生效"；新增回归测试。
+  首轮 1500 条 mc_letter 中 3 条受影响（2 条由错变对，1 条由 format_failure 变为正常错），
+  宏平均影响约 +0.05pp；**旧 bundle 仍为旧判题结果，正式引用前应重跑/重判**。
+- **模型级 thinking 关闭策略**：打包的 mlx_vlm 0.7.10 在 MiniCPM-V-4.6 的
+  `enable_thinking=false` 分支里丢掉了模板默认的空 `<think></think>` 块（只追加
+  `<|im_start|>assistant\n`），使这个默认非思考模型开始开放 reasoning、耗尽
+  `max_new_tokens`（首轮 215 条 content 为空/224 条格式失败）。新增
+  `ModelSpec.thinking_disable`（`explicit_false` / `omit`），4.6 设为 `omit`；实际策略写入
+  `request.context_meta.thinking_control`。修复后 8 样本真实冒烟 content 非空、
+  `format_failure=0`；需重跑 4.6 全量后再引用分数。
+
+### Analysis
+
+- 首轮 3 个全量精度 run（MiniCPM-V-4.6 / V-4.7-1B / gemma-4-E4B-it-oQ4，各 2,000 条）审计：
+  数据完整、testset SHA 一致；发现 MiniCPM-V-4.6 的 215 条 content 为空/224 条格式失败
+  （reasoning 占满 `max_new_tokens`，`enable_thinking=false` 未生效），条件宏平均
+  0.551→0.620；详见 [records/2026-11-12-accuracy-run-review.md](docs/records/2026-11-12-accuracy-run-review.md)。
+- 当前 3 个 run 是不同模型，**不是同模型 bf16/量化配对**，不能据此计算量化损失；可用
+  `gemma-4-E4B-it` 与 `gemma-4-E4B-it-oQ4` 在同一 testset 上补跑配对。
+
+## 2026-11-11（精度测试方法 method=accuracy，WP-1…WP-6）
+
+### Added
+
+- **双测试方法**：新增 `method=accuracy`（8 场景 × 250 = 2,000 条固定样本，5 类确定性判题），
+  与既有 `method=performance` 共用测量内核、双锁与 `output/` 布局；`run_id` 方法段
+  （`__accuracy__`）、`run.json.method`、`index.json` 的 `method`/`mode` 标识方法。
+- CLI `run --method performance|accuracy`、`analyze --method auto|performance|accuracy` 与
+  `--noise-baseline-pp`；Web 首屏方法卡片、按方法过滤测试集、精度参数面板与结果标签页
+  （场景得分/语言与数据集/逐样本判分/错误统计）。
+- 判题单一事实源 `src/modelbench/domain/judges/`（5 族；`tool/system/judges.py` 保留为转发）；
+  精度聚合/CI/配对统计 `src/modelbench/domain/accuracy_metrics.py`；精度产物投影
+  `src/modelbench/adapters/storage/accuracy_output.py`（live writer 与 `rebuild` 共用）。
+- 精度测试集接入：`dataset/test/accuracy/testset.yaml`（`method: accuracy`）+
+  `manifest.json` `status=wired`/`runner=accuracy`/`hidden=false`；`testset.jsonl` 仍 gitignored。
+- 文档：新增 [docs/spec/22-accuracy-test-plan.md](docs/spec/22-accuracy-test-plan.md)、
+  [docs/design/32-method-architecture.md](docs/design/32-method-architecture.md)、
+  [docs/records/2026-11-11-accuracy-method.md](docs/records/2026-11-11-accuracy-method.md)；
+  同步 docs/README、spec/12、spec/13、spec/20、spec/21、design/30、design/31、guides/40、
+  guides/41、process/50、dataset/README、AGENTS、README、harness/prompts/verifier.md；
+  `make docs-write` 重生成 `docs/design/33-project-structure.md`。
+
+### Changed
+
+- 性能口径不变（`score` 仍恒 null、AC-1…AC-11 不变）；`samples.csv`/`aggregates.json`/
+  `report.md` **按方法两套形状**（性能 36 列/按档位；精度 29 列判分表/按场景），
+  `run.json.outcome` 精度侧追加判分计数并移除性能专用计数。
+- `verify`/`rebuild`/Excel/Web/分析按 `run.json.method` 分派；旧 run 无 `method` 回退
+  `performance`。
+
+### Fixed
+
+- **perf `verify` 的 `n_gen_tps_invalid` 复算口径**（T-077，预存缺陷）：TG TPS 被抑制时
+  记录是 `gen_tps=null` + `metrics.gen_tps_invalid=<reason>`，旧 verify 只在 `gen_tps`
+  非空时计无效，导致每个被抑制样本都报 `declared != detected`（真实 `output/` 历史 run
+  报 11 != 0）。现以 reason 为权威计数标记，历史 `output/` 复验 0 issue（11 条被正确计数）。
+
+### Validation
+
+- `harness.docs_contract`、`docs_links`、`pytest test/test_docs_contract.py`、
+  `test/test_web_console.py`、`test/test_entrypoints.py` 通过；精度链路测试
+  `test_accuracy_run.py`/`test_accuracy_metrics.py`/`test_accuracy_adapter.py`/
+  `test_accuracy_dataset.py`/`test_accuracy_analysis.py`/`test_judges.py`。
+- 完整 `harness.gate` 与独立 V&V 由 T-075/T-076 门禁报告给出。
+- **真实 oMLX 精度冒烟（T-078）**：MiniCPM5-1B 与 MiniCPM-V-4.7-1B 各跑
+  `--method accuracy --samples 1`（8 场景 × 1 = 8 样本），cold/temp0/无 guard/逐行
+  max_new_tokens 全部成立，`verify` 0 issue、`rebuild` 后 report 逐字节一致、
+  `analyze --paired --method accuracy` 输出 Δ/McNemar/Holm，批次 Excel 三页签。
+- **clean-env 判题依赖（T-078）**：屏蔽 `[eval]` 可选依赖后 `validate --offline` 明确
+  warning（列出 absl/nltk/langdetect/immutabledict/jieba/rouge），ifeval/中文 F1 返回
+  `judge_error`（不静默给分）；完整 pip 干净安装因网络超时未验证（见 T-078 note）。
+
 ## 2026-11-10（双口径聚合 + exports 自动生成，T-067/T-068）
 
 ### 平均值双口径（T-067）

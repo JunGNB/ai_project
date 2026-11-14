@@ -15,6 +15,7 @@ adapters/
   datasets/
     __init__.py
     _download.py
+    accuracy_jsonl.py
     base.py
     bfcl.py
     custom.py
@@ -27,7 +28,6 @@ adapters/
     mmmlu.py
     perf_jsonl.py
     registry.py
-    synthetic.py
   host/
     __init__.py
     filelock.py
@@ -42,6 +42,7 @@ adapters/
     environment.py
   storage/
     __init__.py
+    accuracy_output.py
     blobstore.py
     catalog.py
     excel_report.py
@@ -50,13 +51,16 @@ adapters/
     writer.py
 application/
   __init__.py
+  accuracy.py
   batch.py
   benchmark.py
   locking.py
+  methods.py
   plan.py
   ports.py
 domain/
   __init__.py
+  accuracy_metrics.py
   context_tolerance.py
   context_windows.py
   evaluators/
@@ -68,6 +72,15 @@ domain/
     math.py
     mc.py
     search.py
+  judges/
+    __init__.py
+    base.py
+    code.py
+    instruction.py
+    match.py
+    mc.py
+    tool.py
+  method.py
   metrics.py
   models.py
   scenarios/
@@ -82,7 +95,6 @@ domain/
     math.py
     multilingual.py
     padding.py
-    perf.py
     registry.py
     search.py
     speculative.py

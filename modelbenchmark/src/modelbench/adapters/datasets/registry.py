@@ -17,6 +17,12 @@ _REGISTRY: Dict[str, tuple[str, str]] = {
     # Primary runtime source: the pre-constructed performance test set under
     # dataset/test/performance/ (one scenario slice per configured scenario).
     "perf_jsonl": ("modelbench.adapters.datasets.perf_jsonl", "PerfJSONLAdapter"),
+    # Accuracy method: the pre-constructed 8x250 test set under
+    # dataset/test/accuracy/ (one scenario slice per configured scenario).
+    "accuracy_jsonl": (
+        "modelbench.adapters.datasets.accuracy_jsonl",
+        "AccuracyJSONLAdapter",
+    ),
     "longbench_v2": ("modelbench.adapters.datasets.longbench_v2", "LongBenchV2Adapter"),
     "mmlu": ("modelbench.adapters.datasets.mmlu", "MMLUAdapter"),
     "gsm8k": ("modelbench.adapters.datasets.gsm8k", "GSM8KAdapter"),
@@ -25,7 +31,6 @@ _REGISTRY: Dict[str, tuple[str, str]] = {
     "mmmlu": ("modelbench.adapters.datasets.mmmlu", "MMMLUAdapter"),
     "hotpotqa": ("modelbench.adapters.datasets.hotpotqa", "HotpotQAAdapter"),
     "bfcl": ("modelbench.adapters.datasets.bfcl", "BFCLAdapter"),
-    "synthetic": ("modelbench.adapters.datasets.synthetic", "SyntheticThroughputAdapter"),
     "custom": ("modelbench.adapters.datasets.custom", "CustomJSONLAdapter"),
 }
 

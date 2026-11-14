@@ -18,7 +18,6 @@ batches that predate this behavior).
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import time
@@ -29,16 +28,13 @@ from typing import Any, Callable, Dict, List, Optional
 from modelbench import __version__
 from modelbench.adapters.config.settings import ProjectConfig
 from modelbench.adapters.storage import layout
-from modelbench.adapters.storage.blobstore import DECODE_GUARD_VERSION
-from modelbench.adapters.storage.writer import RunWriter, sanitize_name
-from modelbench.application.benchmark import Orchestrator
+from modelbench.adapters.storage.writer import sanitize_name
 from modelbench.application.locking import RunLock
+from modelbench.application.methods import get_method
+from modelbench.domain.method import RunMethod
 
-#: Test method label used in directory names and the catalog.
-DEFAULT_METHOD = "performance"
-
-#: Repository root, used to keep persisted paths relative.
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+#: Historical default method (kept as a public constant for callers/tests).
+DEFAULT_METHOD = RunMethod.PERFORMANCE.value
 
 
 def _iso_now() -> str:
@@ -65,46 +61,16 @@ def _normalize_batch_id(raw: str) -> tuple[str, str]:
     return text, "cli"
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _testset_fingerprint(cfg: ProjectConfig) -> Dict[str, Any]:
-    """Locate and fingerprint the performance test set the run consumes.
+    """Fingerprint the test set the configured method consumes.
 
-    The bundle must be able to prove *which* rows it measured; previously the
-    recorded path did not even exist and there was no digest at all, which is why
-    the prompt bodies had to be duplicated into every bundle.
+    Dispatched through the method registry: performance records the historical
+    ``path/sha256/rows/context_windows/decode_guard_version`` block; accuracy
+    adds the manifest SHA and ``judge_contract_version`` so two runs can only be
+    compared when the rows and the judge contract are identical (AC-A8),
+    (design §4.2).
     """
-    testset_dir = Path(str(getattr(cfg.datasets, "testset_dir", "dataset/test")))
-    candidate = testset_dir / DEFAULT_METHOD / "testset.jsonl"
-    # Store the path relative to the project root when possible: batch.json must
-    # stay valid when the whole output/ tree (or the repo) is moved.  A test set
-    # outside the repo cannot be expressed portably, and an absolute path would
-    # make the batch machine-specific, so only the digest is kept in that case.
-    try:
-        display_path = candidate.resolve().relative_to(_PROJECT_ROOT).as_posix()
-    except (ValueError, OSError):
-        display_path = None
-    info: Dict[str, Any] = {
-        "path": display_path,
-        "sha256": None,
-        "rows": None,
-        "context_windows": list(getattr(cfg.perf, "context_windows", None) or []),
-        "decode_guard_version": DECODE_GUARD_VERSION,
-    }
-    try:
-        if candidate.is_file():
-            info["sha256"] = _sha256_file(candidate)
-            with candidate.open("rb") as handle:
-                info["rows"] = sum(1 for _ in handle)
-    except OSError:
-        pass
-    return info
+    return get_method(RunMethod.parse(cfg.method)).testset_fingerprint(cfg)
 
 
 def _model_size_gb_from_run(run_dir: Path) -> Optional[float]:
@@ -123,7 +89,12 @@ def _model_size_gb_from_run(run_dir: Path) -> Optional[float]:
 
 
 class BatchRunner:
-    """Run ``cfg.selected_models()`` sequentially, one run per model."""
+    """Run ``cfg.selected_models()`` sequentially, one run per model.
+
+    The method is owned by ``cfg.method`` (the test set / CLI / Web decide it);
+    the registry supplies the writer, orchestrator, plan and test-set
+    fingerprint, so this class stays a composition root (design §4.2).
+    """
 
     def __init__(
         self,
@@ -132,11 +103,11 @@ class BatchRunner:
         output_root: Path,
         *,
         batch_id: Optional[str] = None,
-        method: str = DEFAULT_METHOD,
+        method: Optional[str] = None,
         progress_cb: Optional[Callable[[str, Dict[str, Any]], None]] = None,
         cancel_event: Any = None,
         overwrite: bool = False,
-        orchestrator_cls: Any = Orchestrator,
+        orchestrator_cls: Any = None,
     ):
         self.cfg = cfg
         self.client = client
@@ -147,10 +118,21 @@ class BatchRunner:
             else datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         )
         self.batch_prefix, self.source = _normalize_batch_id(raw_id)
-        self.method = sanitize_name(method) or DEFAULT_METHOD
+        configured = RunMethod.parse(cfg.method)
+        if method is not None:
+            requested = RunMethod.parse(method)
+            if requested is not configured:
+                raise ValueError(
+                    f"BatchRunner method={requested.value!r} disagrees with "
+                    f"cfg.method={configured.value!r}; the test set/CLI/Web owns "
+                    "the method (design §4.1)"
+                )
+        self.method = configured.value
+        self.profile = get_method(configured)
         self.progress_cb = progress_cb
         self.cancel_event = cancel_event
         self.overwrite = overwrite
+        #: Test/CLI injection point; None -> the method registry's orchestrator.
         self.orchestrator_cls = orchestrator_cls
 
     # ------------------------------------------------------------------ #
@@ -232,7 +214,7 @@ class BatchRunner:
                 "model_id": model.id,
                 "run_id": run_id,
             }
-            writer = RunWriter(
+            writer = self.profile.make_writer(
                 self.output_root,
                 batch_id=self.batch_prefix,
                 method=self.method,
@@ -264,7 +246,14 @@ class BatchRunner:
                 },
             )
             try:
-                orchestrator = self.orchestrator_cls(
+                # Composition root: the registry owns the orchestrator class; an
+                # explicit injection (tests/CLI) still wins.
+                make_orchestrator = (
+                    self.orchestrator_cls
+                    if self.orchestrator_cls is not None
+                    else self.profile.make_orchestrator
+                )
+                orchestrator = make_orchestrator(
                     model_cfg,
                     self.client,
                     writer,
@@ -345,13 +334,20 @@ class BatchRunner:
             "model_runs": model_runs,
             "inputs": {"testset": _testset_fingerprint(self.cfg)},
             "config": {
-                "perf": self.cfg.perf.model_dump(mode="json"),
+                # Method-specific block: ``perf`` for performance, ``accuracy``
+                # for the judged method (same keys otherwise, design §5.6).
+                self.profile.config_block: (
+                    self.cfg.accuracy.model_dump(mode="json")
+                    if self.profile.config_block == "accuracy"
+                    else self.cfg.perf.model_dump(mode="json")
+                ),
                 "run": {
                     "repeats": self.cfg.run.repeats,
                     "warmup_requests": self.cfg.run.warmup_requests,
                     "warmup_per_model": self.cfg.run.warmup_per_model,
                     "cache_mode": self.cfg.run.cache_mode.value,
                     "thinking_mode": self.cfg.run.thinking_mode,
+                    "max_retries": self.cfg.run.max_retries,
                 },
                 "scenarios": list(self.cfg.selected_scenarios()),
             },

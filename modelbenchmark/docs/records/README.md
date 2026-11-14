@@ -22,3 +22,9 @@
   为索引）。其中的**长期结论**（文档规范、口径、目录规划）已并入 `docs/`；`reports/`
   中的过程记录可随时归档/删除，不算证据。
 - 迁移记录（schema 2.x → 3.0）见 [31-output-contract.md](../design/31-output-contract.md) §10。
+- 双方法（performance/accuracy）落地记录：
+  [2026-11-11-accuracy-method.md](2026-11-11-accuracy-method.md)（WP-1…5 实现 + WP-6 文档同步，
+  含设计决策、测试/门禁证据与未验证风险）。
+- 精度首轮全量结果审计：
+  [2026-11-12-accuracy-run-review.md](2026-11-12-accuracy-run-review.md)（3 模型 × 2000；
+  判题误判审计、格式/协议问题、数据集与 bf16-vs-量化目的匹配度）。

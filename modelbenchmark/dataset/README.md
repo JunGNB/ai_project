@@ -5,8 +5,8 @@
 
 | 测试集 | 产物 | 规模 | 状态 |
 |---|---|---|---|
-| 性能 `performance` | `dataset/test/performance/{testset.jsonl,manifest.json,testset.yaml}` | 240 = 8 场景 × 1K/8K/32K × 10，24 cells | 默认参与 run |
-| 精度 `accuracy` | `dataset/test/accuracy/{testset.jsonl,manifest.json}` | 2,000 = 8 场景 × 250 | **隐藏离线资产**（`status=offline-asset`、runner 未接入、无 `testset.yaml`） |
+| 性能 `performance` | `dataset/test/performance/{testset.jsonl,manifest.json,testset.yaml}` | 240 = 8 场景 × 1K/8K/32K × 10，24 cells | 默认参与 run（`method=performance`） |
+| 精度 `accuracy` | `dataset/test/accuracy/{testset.jsonl,manifest.json,testset.yaml}` | 2,000 = 8 场景 × 250 | **已接入**（`manifest.status=wired` / `runner=accuracy` / `hidden=false`；`method=accuracy` 独立 run） |
 
 ## 1. 目录
 
@@ -21,7 +21,8 @@ dataset/
     │   └── testset.yaml         # 测试集定义（提交）
     └── accuracy/
         ├── testset.jsonl        # 2,000 行（派生、gitignored、可重建）
-        └── manifest.json        # 抽样/统计/数据源 SHA-256（精度集保持隐藏）
+        ├── manifest.json        # 抽样/统计/数据源 SHA-256（status=wired / runner=accuracy）
+        └── testset.yaml         # 精度方法测试集定义（提交；method: accuracy + 8 场景）
 ```
 
 `dataset/raw/` 与 `dataset/test/**/testset.jsonl` 不提交 git；新 clone 先按 §2 下载 raw，
@@ -44,10 +45,12 @@ $PY tool/dataset/accuracy/fetch.py --verify
 ## 3. 重建测试集
 
 ```bash
-$PY tool/dataset/performance/build.py            # 240 行 + manifest + testset.yaml
-$PY tool/dataset/performance/build.py --check    # 行数/target/三档/边界/SHA 复算
-$PY tool/dataset/accuracy/build.py               # 2,000 行 + manifest（不写 testset.yaml）
-$PY tool/dataset/accuracy/build.py --check       # 行数/字段/upstream_id 唯一/SHA
+$PY tool/dataset/performance/build.py            # 240 行 + manifest + testset.yaml（cl100k 基线）
+$PY tool/dataset/performance/build.py --check    # 行数/target/三档/token 等值/SHA/yaml 契约复算
+$PY tool/dataset/performance/align.py --tokenizer <model>/tokenizer.json \\
+    --base-url http://127.0.0.1:8000 --model <id>  # 跑分前按目标模型重建，逐条校验 0 容差
+$PY tool/dataset/accuracy/build.py               # 2,000 行 + manifest + 抽样报告（testset.yaml 为提交文件）
+$PY tool/dataset/accuracy/build.py --check       # 行数/字段/upstream_id 唯一/SHA + manifest wired 状态 + testset.yaml 契约
 ```
 
 同一份 `dataset/raw/` 重跑得到逐字节相同的结果（固定 seed=42、无时间戳）；manifest
@@ -57,8 +60,13 @@ $PY tool/dataset/accuracy/build.py --check       # 行数/字段/upstream_id 唯
 
 - **性能 run 不判分**：`score` 恒为 null；逐请求冷缓存；按 `(model, context_length)` 分档报告，
   1K/8K/32K 不跨档合并。
-- **精度集保持隐藏**：没有 `testset.yaml`，不会出现在 Web/CLI 测试集列表；manifest 的
-  `status=offline-asset`、`runner=not wired`，不得引用任何“精度分数”。
+- **精度集已接入**：`testset.yaml` 声明 `method: accuracy`，CLI/Web 测试集列表可见；
+  manifest 的 `status=wired` / `runner=accuracy` / `hidden=false`；判题族 5 类（确定性、无
+  LLM/网络），运行协议固定 cold/`temperature=0`/无 decode guard/`repeats=1`。判题依赖
+  `.[eval]`（`nltk`/`langdetect`/`absl-py`/`immutabledict`/`jieba`/`rouge`），缺失时显式告警并记
+  `judge_error`（不静默给分）。口径见 [docs/spec/22-accuracy-test-plan.md](../docs/spec/22-accuracy-test-plan.md)。
+- **不混算**：精度分数不与性能指标合并；两次精度 run 只有同一 testset SHA + 同一 judge 契约
+  版本才可配对比较（[docs/spec/13-testset-portability.md](../docs/spec/13-testset-portability.md) §4.2）。
 - **不可横比**：性能默认 OSL=50、模型级 warmup 1 次、per-cell warmup 0、`repeats=1`、
   逐请求冷缓存，与 vLLM / oMLX 官方 benchmark 口径不同。
 - **设计文档**：[docs/spec/11-performance-testset.md](../docs/spec/11-performance-testset.md)、
@@ -69,12 +77,12 @@ $PY tool/dataset/accuracy/build.py --check       # 行数/字段/upstream_id 唯
 ```
 dataset/raw/<dataset>/...                    上游原始文件（只读、gitignored）
         │  tool/dataset/performance/build.py  （token 计数 + 构造 + 质量断言）
-        │  tool/dataset/accuracy/build.py     （2,000 行精度资产，隐藏）
+        │  tool/dataset/accuracy/build.py     （2,000 行精度集 + manifest）
         ▼
 dataset/test/performance/{testset.jsonl, manifest.json, testset.yaml}
-dataset/test/accuracy/{testset.jsonl, manifest.json}
+dataset/test/accuracy/{testset.jsonl, manifest.json, testset.yaml}
         ▼
-运行时：src/modelbench/adapters/datasets/perf_jsonl.py（性能）
+运行时：src/modelbench/adapters/datasets/perf_jsonl.py（性能）、accuracy_jsonl.py（精度）
 ```
 
 两侧合并许可表（**以两份 manifest 的 `provenance`/`datasets` 字段为准**，表内为人工核对副本）：
@@ -101,5 +109,6 @@ dataset/test/accuracy/{testset.jsonl, manifest.json}
 ```bash
 ./modelbench validate --offline
 $PY -m pytest test/test_perf_dataset.py test/test_perf.py
+$PY -m pytest test/test_accuracy_dataset.py test/test_accuracy_adapter.py   # 精度集契约/读取
 $PY -m harness.gate
 ```

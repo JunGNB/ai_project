@@ -6,7 +6,10 @@ Four operations back the ``modelbench rebuild|verify|gc|pack`` subcommands:
     Recompute a run's **derived** files (``samples.csv``, ``aggregates.json``,
     ``report.md``, ``MANIFEST.json``) from the authoritative ``records.jsonl``.
     Deleting the derived files must never lose information: this is the
-    recovery path promised by the layout design (acceptance §11.7).
+    recovery path promised by the layout design (acceptance §11.7).  Dispatch
+    is by ``run.json.method``: ``accuracy`` recomputes the accuracy projections
+    through :mod:`modelbench.adapters.storage.accuracy_output`; an unknown
+    method raises ``ValueError`` instead of being guessed.
 
 ``verify_output``
     Reconcile the bundle against itself and the prompt pool (design §8.3):
@@ -19,6 +22,14 @@ Four operations back the ``modelbench rebuild|verify|gc|pack`` subcommands:
        and ``n_selected == n_measured + len(skipped)``;
     3. every ``request.prompt_sha256`` resolves in ``blobs/prompts`` and every
        ``MANIFEST.json`` file entry matches the bytes on disk.
+
+    ``method=accuracy`` runs are verified on their own contract instead (AC-A2/
+    A5/A6): judge coverage (every ``ok`` record has a ``score`` or a
+    ``judge_error`` flag), outcome judge counters, aggregates recomputed from
+    records with exact counts and a 1e-6 float tolerance, and the
+    ``samples.csv`` row count/columns.  Performance-only measurements
+    (``gen_tps`` validity, ISL band) intentionally do not apply (spec 22 §9).
+    Unknown methods are reported as an issue instead of being recomputed.
 
 ``gc_blobs``
     Mark-and-sweep of the prompt pool.  Reference roots are ``runs/`` **and**
@@ -36,16 +47,19 @@ Four operations back the ``modelbench rebuild|verify|gc|pack`` subcommands:
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import os
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Sequence, Set
+from typing import Any, Dict, List, Optional, Sequence, Set
 
 from modelbench.adapters.storage import catalog, layout
+from modelbench.adapters.storage import accuracy_output
 from modelbench.adapters.storage.blobstore import PromptBlobStore
+from modelbench.domain.accuracy_metrics import aggregate_accuracy
 from modelbench.domain.context_tolerance import TOLERANCE_RATIO
 from modelbench.domain.metrics import (
     MAX_PLAUSIBLE_TPS,
@@ -93,6 +107,22 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _run_method(output_root: Path, run_dir: Path, run_json: Dict[str, Any]) -> str:
+    """Run method string for dispatch (``performance`` when unlabelled).
+
+    Older runs have no ``run.json.method`` (design 32 §10: parse
+    ``run.json.method or batch.method or "performance"``); the batch file is the
+    fallback so an accuracy run can never be silently rebuilt/verified with the
+    performance calibre.
+    """
+    method = str(run_json.get("method") or "").strip().lower()
+    if method:
+        return method
+    batch_file = catalog.batch_file_for_run(Path(output_root), Path(run_dir))
+    batch = catalog.load_batch(batch_file) if batch_file is not None else None
+    return str((batch or {}).get("method") or "performance").strip().lower()
+
+
 # --------------------------------------------------------------------------- #
 # rebuild
 # --------------------------------------------------------------------------- #
@@ -121,6 +151,20 @@ def rebuild_run(output_root: Path, run_dir: Path) -> Dict[str, Any]:
             str((run_json.get("model") or {}).get("model_slug") or run_dir.name),
         )
     )
+
+    # Rebuild dispatches on the run's own method (design 32 §8): the derived
+    # files are method-shaped, so an unknown method must never be recomputed
+    # with the performance calibre.
+    method = _run_method(output_root, run_dir, run_json)
+    if method == "accuracy":
+        return _rebuild_accuracy_run(
+            output_root, run_dir, run_json, run_id, records
+        )
+    if method != "performance":
+        raise ValueError(
+            f"unsupported run method {method!r} (expected 'performance' or "
+            f"'accuracy'): {run_dir}"
+        )
 
     cells = aggregate_records(records)
     overall = aggregate_overall(records)
@@ -178,6 +222,84 @@ def rebuild_run(output_root: Path, run_dir: Path) -> Dict[str, Any]:
         "n_cells": len(cells),
         "n_blobs": manifest["blob_refs"]["prompts"],
         "duration_s": report_summary["duration_s"],
+        "bytes_total": manifest["totals"]["bytes"],
+    }
+
+
+def _rebuild_accuracy_run(
+    output_root: Path,
+    run_dir: Path,
+    run_json: Dict[str, Any],
+    run_id: str,
+    records: Sequence[SampleRecord],
+) -> Dict[str, Any]:
+    """Recompute an accuracy run's derived files (same projections as the writer).
+
+    Uses exactly the functions :class:`AccuracyRunWriter` uses, so a rebuilt
+    bundle is semantically identical (only ``generated_at``/timestamps differ,
+    AC-A5).  ``run.json`` and ``records.jsonl`` are read only.
+    """
+    projections = accuracy_output.write_accuracy_aggregates(
+        run_dir, records, run_id=run_id
+    )
+    accuracy_output.write_accuracy_samples_csv(
+        run_dir / layout.SAMPLES_CSV, records, samples=projections["samples"]
+    )
+    config = run_json.get("config") or {}
+    outcome = run_json.get("outcome") or {}
+    env = run_json.get("env") or {}
+    # ``run.json.config.testset`` is persisted by AccuracyRunWriter.finalize;
+    # older accuracy bundles only have the batch-level copy, and ``rebuild`` must
+    # still reproduce the report provenance (design/31 §7.3).
+    batch_file = catalog.batch_file_for_run(Path(output_root), Path(run_dir))
+    batch = catalog.load_batch(batch_file) if batch_file is not None else None
+    batch_testset = ((batch or {}).get("inputs") or {}).get("testset")
+    testset = (
+        config.get("testset")
+        or (config.get("inputs") or {}).get("testset")
+        or batch_testset
+        or {}
+    )
+    summary = {
+        "accuracy": config.get("accuracy") or {},
+        "run": config.get("run") or {},
+        "perf": config.get("perf") or {},
+        "testset": testset if isinstance(testset, dict) else {},
+        "warnings": outcome.get("warnings") or [],
+        "judge_dependencies": config.get("judge_dependencies") or [],
+        "skipped": outcome.get("skipped") or [],
+        "n_records": projections["n_records"],
+        "n_samples": projections["n_samples"],
+        "n_cells": projections["n_cells"],
+        "duration_s": outcome.get("duration_s", run_json.get("duration_s")),
+    }
+    (run_dir / layout.REPORT_MD).write_text(
+        accuracy_output.render_accuracy_report(
+            run_id=run_id,
+            cells=projections["cells"],
+            overall=projections["overall"],
+            samples=projections["samples"],
+            summary=summary,
+            hardware=env.get("hardware") or {},
+            omlx=env.get("omlx") or {},
+        ),
+        encoding="utf-8",
+    )
+    manifest = _write_manifest(run_dir, output_root, run_id)
+    return {
+        "run_id": run_id,
+        "run_dir": str(run_dir),
+        "run_json": str(run_dir / layout.RUN_JSON),
+        "manifest_json": str(run_dir / layout.MANIFEST_JSON),
+        "records_jsonl": str(run_dir / layout.RECORDS),
+        "samples_csv": str(run_dir / layout.SAMPLES_CSV),
+        "aggregates_json": str(run_dir / layout.AGGREGATES_JSON),
+        "report_md": str(run_dir / layout.REPORT_MD),
+        "n_records": projections["n_records"],
+        "n_samples": projections["n_samples"],
+        "n_cells": projections["n_cells"],
+        "n_blobs": manifest["blob_refs"]["prompts"],
+        "duration_s": summary["duration_s"],
         "bytes_total": manifest["totals"]["bytes"],
     }
 
@@ -533,6 +655,21 @@ def _verify_run(
     records = list(catalog.iter_records(run_dir))
     stats["records"] += len(records)
 
+    # Method dispatch (design 32 §8): an accuracy run has its own count/score
+    # contract and must never be verified with the performance calibre (which
+    # would report bogus gen_tps/ISL issues); unknown methods fail loudly.
+    method = _run_method(output_root, run_dir, run_json)
+    if method == "accuracy":
+        issues.extend(_verify_accuracy_run(run_dir, run_rel, run_json, records, stats))
+        issues.extend(_verify_run_assets(run_dir, run_rel, store, stats))
+        return issues
+    if method != "performance":
+        issues.append(
+            f"{run_rel}: unsupported run.json method {method!r} "
+            "(verify knows 'performance' and 'accuracy' only)"
+        )
+        return issues
+
     measured_ok = sum(
         1
         for record in records
@@ -607,7 +744,18 @@ def _verify_run(
             continue
         metrics = record.get("metrics") or {}
         actual_tps = metrics.get("gen_tps")
-        record_invalid = False
+        invalid_reason = metrics.get("gen_tps_invalid")
+        # A suppressed TG TPS keeps ``gen_tps=None`` and only records the reason
+        # (20-methodology §2); counting only "gen_tps present" records therefore
+        # missed every suppression and disagreed with the writer's
+        # ``n_gen_tps_invalid`` (the old perf verify false positive).  The
+        # reason itself is the authoritative invalid marker.
+        record_invalid = bool(invalid_reason)
+        if invalid_reason and actual_tps is not None:
+            issues.append(
+                f"{run_rel}: gen_tps_invalid={invalid_reason!r} "
+                f"but gen_tps is present for {record.get('sample_id')}"
+            )
         if actual_tps is not None:
             try:
                 value = float(actual_tps)
@@ -621,12 +769,6 @@ def _verify_run(
                 record_invalid = True
                 stats.setdefault("legacy_gen_tps_invalid", 0)
                 stats["legacy_gen_tps_invalid"] += 1
-            if metrics.get("gen_tps_invalid"):
-                record_invalid = True
-                issues.append(
-                    f"{run_rel}: gen_tps_invalid={metrics.get('gen_tps_invalid')!r} "
-                    f"but gen_tps is present for {record.get('sample_id')}"
-                )
         if record_invalid:
             invalid_tps += 1
         request_payload = record.get("request") or {}
@@ -640,15 +782,25 @@ def _verify_run(
             else metrics_payload.get("input_context_tokens")
         )
         target = record.get("context_length") or tolerance.get("target")
-        if actual is not None and target:
+        strict_aligned = bool(
+            (request_payload.get("context_meta") or {}).get(
+                "strict_input_tokens"
+            )
+        )
+        if strict_aligned:
+            # Strict input alignment has no ±10% band: every measured sample
+            # already equals its bucket target and the writer reports 0/0 by
+            # design, so neither counter is incremented here either.
+            pass
+        elif actual is not None and target:
             in_band = abs(int(actual) - int(target)) <= TOLERANCE_RATIO * int(target)
+            if in_band:
+                isl_in += 1
+            else:
+                isl_out += 1
         else:
             # Legacy records without any actual/target evidence are kept.
-            in_band = True
-        if in_band:
             isl_in += 1
-        else:
-            isl_out += 1
     stats["gen_tps_invalid"] += invalid_tps
     stats["isl_out_of_tolerance"] += isl_out
     stats.setdefault("isl_in_band", 0)
@@ -672,6 +824,19 @@ def _verify_run(
             f"{invalid_tps} detected"
         )
 
+    # --- 3) prompt pool + MANIFEST digests (method-agnostic) ------------- #
+    issues.extend(_verify_run_assets(run_dir, run_rel, store, stats))
+    return issues
+
+
+def _verify_run_assets(
+    run_dir: Path,
+    run_rel: str,
+    store: PromptBlobStore,
+    stats: Dict[str, int],
+) -> List[str]:
+    """Prompt-pool resolution + ``MANIFEST.json`` digest checks (both methods)."""
+    issues: List[str] = []
     # --- 3a) prompt pool resolution ------------------------------------- #
     shas = catalog.prompt_sha256s(run_dir)
     missing = store.missing(shas)
@@ -711,6 +876,402 @@ def _verify_run(
             issues.append(f"{run_rel}: MANIFEST sha256 mismatch for {name}")
     if not declared:
         issues.append(f"{run_rel}: MANIFEST.json declares no files")
+    return issues
+
+
+# --------------------------------------------------------------------------- #
+# verify: accuracy calibre (method=accuracy)
+# --------------------------------------------------------------------------- #
+
+#: Exact integer counters of an accuracy slice (``AccuracySlice``).
+_ACC_COUNT_FIELDS = (
+    "n_samples",
+    "n_valid",
+    "n_ok",
+    "n_error",
+    "n_timeout",
+    "n_judge_error",
+    "n_format_failure",
+    "n_missing_score",
+    "n_scored",
+    "n_correct",
+)
+#: Float fields (means/CIs) — compared with a 1e-6 tolerance.
+_ACC_FLOAT_FIELDS = (
+    "mean_score",
+    "accuracy",
+    "score_std",
+    "score_ci95_low",
+    "score_ci95_high",
+    "accuracy_ci95_low",
+    "accuracy_ci95_high",
+)
+#: Extra overall-only counters/floats (macro calibre).
+_ACC_OVERALL_COUNT_FIELDS = ("n_scenarios_scored",)
+_ACC_OVERALL_FLOAT_FIELDS = ("macro_score", "micro_score", "macro_accuracy")
+
+_FLOAT_TOLERANCE = 1e-6
+
+
+def _has_judgment(record: Dict[str, Any]) -> bool:
+    """True when an ``ok`` record carries a score or an explicit judge failure."""
+    score = record.get("score")
+    if isinstance(score, dict):
+        if score.get("score") is not None:
+            return True
+        detail = score.get("detail") or {}
+        if isinstance(detail, dict) and detail.get("judge_error"):
+            return True
+    return False
+
+
+def _compare_accuracy_slice(
+    run_rel: str, where: str, declared: Any, expected: Dict[str, Any]
+) -> List[str]:
+    """Compare one stored :class:`AccuracySlice` with its recomputation."""
+    issues: List[str] = []
+    if not isinstance(declared, dict):
+        issues.append(f"{run_rel}: {where}: missing/invalid accuracy slice")
+        return issues
+    for field in _ACC_COUNT_FIELDS:
+        actual = declared.get(field)
+        wanted = expected.get(field)
+        if actual is None and wanted is None:
+            continue
+        try:
+            equal = actual is not None and wanted is not None and int(actual) == int(wanted)
+        except (TypeError, ValueError):
+            equal = False
+        if not equal:
+            issues.append(
+                f"{run_rel}: {where}: {field} {actual!r} != recomputed {wanted!r}"
+            )
+    for field in _ACC_FLOAT_FIELDS:
+        actual = declared.get(field)
+        wanted = expected.get(field)
+        if actual is None and wanted is None:
+            continue
+        if actual is None or wanted is None:
+            issues.append(
+                f"{run_rel}: {where}: {field} {actual!r} != recomputed {wanted!r}"
+            )
+            continue
+        try:
+            if abs(float(actual) - float(wanted)) > _FLOAT_TOLERANCE:
+                issues.append(
+                    f"{run_rel}: {where}: {field} {actual!r} != recomputed {wanted!r}"
+                )
+        except (TypeError, ValueError):
+            issues.append(
+                f"{run_rel}: {where}: non-numeric {field} {actual!r} "
+                f"!= recomputed {wanted!r}"
+            )
+    return issues
+
+
+def _compare_accuracy_aggregates(
+    run_rel: str,
+    declared: Dict[str, Any],
+    cells: Sequence[Any],
+    overall: Sequence[Any],
+    *,
+    n_records: int,
+    n_samples: int,
+) -> List[str]:
+    """Check that the accuracy aggregates are recomputable from ``records.jsonl``.
+
+    Counts must match exactly; means/CIs are compared with a 1e-6 tolerance
+    (AC-A5).  Cells are keyed by ``(model, scenario, dataset)``, overall rows by
+    ``model`` (design 32 §5.4).
+    """
+    issues: List[str] = []
+    declared_method = str(declared.get("method") or "")
+    if declared_method and declared_method != accuracy_output.ACCURACY_METHOD:
+        issues.append(
+            f"{run_rel}: aggregates.json method {declared_method!r} != "
+            f"{accuracy_output.ACCURACY_METHOD!r}"
+        )
+    for field, expected_count in (
+        ("n_records", n_records),
+        ("n_samples", n_samples),
+        ("n_cells", len(cells)),
+    ):
+        actual = declared.get(field)
+        try:
+            equal = actual is not None and int(actual) == int(expected_count)
+        except (TypeError, ValueError):
+            equal = False
+        if not equal:
+            issues.append(
+                f"{run_rel}: aggregates.{field} {actual!r} != recomputed "
+                f"{expected_count}"
+            )
+
+    def key_cell(item: Dict[str, Any]) -> tuple:
+        return (item.get("model"), item.get("scenario"), item.get("dataset"))
+
+    declared_cells = {
+        key_cell(item): item
+        for item in declared.get("cells") or []
+        if isinstance(item, dict)
+    }
+    expected_cells = {
+        key_cell(cell.model_dump(mode="json")): cell.model_dump(mode="json")
+        for cell in cells
+    }
+    for key, wanted in expected_cells.items():
+        where = f"cells[{key}]"
+        actual = declared_cells.get(key)
+        if actual is None:
+            issues.append(f"{run_rel}: {where}: missing from aggregates.json")
+            continue
+        issues.extend(_compare_accuracy_slice(run_rel, where, actual, wanted))
+        declared_lang = actual.get("by_language") or {}
+        wanted_lang = wanted.get("by_language") or {}
+        for language, slice_ in wanted_lang.items():
+            issues.extend(
+                _compare_accuracy_slice(
+                    run_rel,
+                    f"{where}.by_language[{language}]",
+                    declared_lang.get(language),
+                    slice_,
+                )
+            )
+        for language in set(declared_lang) - set(wanted_lang):
+            issues.append(
+                f"{run_rel}: {where}.by_language[{language}]: not recomputable "
+                "from records"
+            )
+    for key in declared_cells.keys() - expected_cells.keys():
+        issues.append(f"{run_rel}: cells[{key}]: not recomputable from records")
+
+    declared_overall = {
+        str(item.get("model")): item
+        for item in declared.get("overall") or []
+        if isinstance(item, dict)
+    }
+    expected_overall = {
+        str(entry.model): entry.model_dump(mode="json") for entry in overall
+    }
+    for model, wanted in expected_overall.items():
+        where = f"overall[{model}]"
+        actual = declared_overall.get(model)
+        if actual is None:
+            issues.append(f"{run_rel}: {where}: missing from aggregates.json")
+            continue
+        issues.extend(_compare_accuracy_slice(run_rel, where, actual, wanted))
+        for field in _ACC_OVERALL_COUNT_FIELDS:
+            try:
+                equal = int(actual.get(field)) == int(wanted.get(field))
+            except (TypeError, ValueError):
+                equal = actual.get(field) == wanted.get(field)
+            if not equal:
+                issues.append(
+                    f"{run_rel}: {where}: {field} {actual.get(field)!r} != "
+                    f"recomputed {wanted.get(field)!r}"
+                )
+        for field in _ACC_OVERALL_FLOAT_FIELDS:
+            actual_value = actual.get(field)
+            wanted_value = wanted.get(field)
+            if actual_value is None and wanted_value is None:
+                continue
+            try:
+                equal = (
+                    actual_value is not None
+                    and wanted_value is not None
+                    and abs(float(actual_value) - float(wanted_value)) <= _FLOAT_TOLERANCE
+                )
+            except (TypeError, ValueError):
+                equal = False
+            if not equal:
+                issues.append(
+                    f"{run_rel}: {where}: {field} {actual_value!r} != "
+                    f"recomputed {wanted_value!r}"
+                )
+        declared_scores = actual.get("scenario_scores") or {}
+        wanted_scores = wanted.get("scenario_scores") or {}
+        for scenario, value in wanted_scores.items():
+            try:
+                equal = (
+                    scenario in declared_scores
+                    and abs(float(declared_scores[scenario]) - float(value))
+                    <= _FLOAT_TOLERANCE
+                )
+            except (TypeError, ValueError):
+                equal = False
+            if not equal:
+                issues.append(
+                    f"{run_rel}: {where}.scenario_scores[{scenario}] "
+                    f"{declared_scores.get(scenario)!r} != recomputed {value!r}"
+                )
+        for scenario in set(declared_scores) - set(wanted_scores):
+            issues.append(
+                f"{run_rel}: {where}.scenario_scores[{scenario}]: not "
+                "recomputable from records"
+            )
+        declared_families = actual.get("judge_families")
+        if declared_families is not None and list(declared_families) != list(
+            wanted.get("judge_families") or []
+        ):
+            issues.append(
+                f"{run_rel}: {where}: judge_families {declared_families!r} != "
+                f"recomputed {wanted.get('judge_families')!r}"
+            )
+        declared_lang = actual.get("by_language") or {}
+        wanted_lang = wanted.get("by_language") or {}
+        for language, slice_ in wanted_lang.items():
+            issues.extend(
+                _compare_accuracy_slice(
+                    run_rel,
+                    f"{where}.by_language[{language}]",
+                    declared_lang.get(language),
+                    slice_,
+                )
+            )
+        for language in set(declared_lang) - set(wanted_lang):
+            issues.append(
+                f"{run_rel}: {where}.by_language[{language}]: not recomputable "
+                "from records"
+            )
+    for model in declared_overall.keys() - expected_overall.keys():
+        issues.append(
+            f"{run_rel}: overall[{model}]: not recomputable from records"
+        )
+    return issues
+
+
+def _verify_accuracy_run(
+    run_dir: Path,
+    run_rel: str,
+    run_json: Dict[str, Any],
+    records: Sequence[Dict[str, Any]],
+    stats: Dict[str, int],
+) -> List[str]:
+    """Verify an ``method=accuracy`` run (AC-A2/A5/A6/A7).
+
+    Checks the judge coverage, the outcome counters, the recomputable
+    aggregates and the ``samples.csv`` row count/columns.  Performance-only
+    checks (``gen_tps`` validity, ISL band) deliberately do **not** apply
+    (design 32 §8, spec 22 §9).
+    """
+    issues: List[str] = []
+    measured = [r for r in records if r.get("phase") == "measured"]
+    ok_rows = [r for r in measured if r.get("status") == "ok"]
+    stats["measured_ok"] += len(ok_rows)
+
+    # --- 1) judge coverage (AC-A2): every ok record must be judged -------- #
+    unjudged = [
+        str(record.get("sample_id") or "?")
+        for record in ok_rows
+        if not _has_judgment(record)
+    ]
+    if unjudged:
+        issues.append(
+            f"{run_rel}: {len(unjudged)} measured+ok record(s) carry neither a "
+            f"score nor a judge_error flag (first: {', '.join(unjudged[:3])})"
+        )
+
+    # --- 2) recompute cells/overall from records (AC-A5/A6) --------------- #
+    cells: Sequence[Any] = ()
+    overall: Sequence[Any] = ()
+    recompute_error: Optional[str] = None
+    try:
+        cells, overall = aggregate_accuracy(records)
+    except Exception as exc:  # noqa: BLE001 - report, do not crash verify
+        recompute_error = f"{type(exc).__name__}: {exc}"
+        issues.append(f"{run_rel}: cannot recompute accuracy aggregates: {recompute_error}")
+    n_samples = len(
+        {
+            (
+                str(record.get("model") or ""),
+                str(record.get("scenario") or ""),
+                str(record.get("sample_id") or ""),
+            )
+            for record in measured
+        }
+    )
+    aggregates = catalog.read_json(run_dir / layout.AGGREGATES_JSON)
+    if aggregates is None:
+        issues.append(f"{run_rel}: aggregates.json missing or unreadable")
+    elif recompute_error is None:
+        issues.extend(
+            _compare_accuracy_aggregates(
+                run_rel,
+                aggregates,
+                cells,
+                overall,
+                n_records=len(records),
+                n_samples=n_samples,
+            )
+        )
+
+    # --- 3) outcome counters (AC-A1/A2) ---------------------------------- #
+    outcome = run_json.get("outcome") or {}
+    if not outcome:
+        issues.append(f"{run_rel}: run.json has no outcome block")
+        return issues
+    skipped = list(outcome.get("skipped") or [])
+    expected: Dict[str, Any] = {
+        "n_measured": len(measured),
+        "n_ok": len(ok_rows),
+        "n_records": len(records),
+        "n_samples": n_samples,
+    }
+    if recompute_error is None:
+        expected.update(
+            {
+                "n_cells": len(cells),
+                "n_scored": sum(int(cell.n_scored) for cell in cells),
+                "n_correct": sum(int(cell.n_correct) for cell in cells),
+                "n_judge_error": sum(int(cell.n_judge_error) for cell in cells),
+                "n_format_failure": sum(int(cell.n_format_failure) for cell in cells),
+                "n_scenarios_scored": len(
+                    {cell.scenario for cell in cells if int(cell.n_scored) > 0}
+                ),
+            }
+        )
+    for field, wanted in expected.items():
+        declared = outcome.get(field)
+        if declared is None:
+            continue
+        try:
+            equal = int(declared) == int(wanted)
+        except (TypeError, ValueError):
+            equal = False
+        if not equal:
+            issues.append(
+                f"{run_rel}: outcome.{field}={declared!r} != recomputed {wanted}"
+            )
+    n_selected = outcome.get("n_selected")
+    if n_selected is not None and int(n_selected) != len(measured) + len(skipped):
+        issues.append(
+            f"{run_rel}: outcome.n_selected={n_selected} != "
+            f"n_measured({len(measured)}) + skipped({len(skipped)})"
+        )
+
+    # --- 4) samples.csv row count and frozen columns --------------------- #
+    samples_path = run_dir / layout.SAMPLES_CSV
+    if not samples_path.is_file():
+        issues.append(f"{run_rel}: samples.csv missing")
+    else:
+        try:
+            with samples_path.open("r", encoding="utf-8", newline="") as handle:
+                reader = csv.DictReader(handle)
+                header = tuple(reader.fieldnames or ())
+                rows = sum(1 for _ in reader)
+        except OSError as exc:
+            issues.append(f"{run_rel}: samples.csv unreadable: {exc}")
+        else:
+            if header != accuracy_output.SAMPLES_CSV_FIELDS_ACCURACY:
+                issues.append(
+                    f"{run_rel}: samples.csv columns {header!r} != frozen accuracy "
+                    "column order"
+                )
+            if rows != len(measured):
+                issues.append(
+                    f"{run_rel}: samples.csv has {rows} row(s) != "
+                    f"{len(measured)} measured records"
+                )
     return issues
 
 

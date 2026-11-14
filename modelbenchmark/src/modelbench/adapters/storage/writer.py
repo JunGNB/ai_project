@@ -30,6 +30,12 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from modelbench.adapters.storage import layout
+from modelbench.adapters.storage.accuracy_output import (
+    accuracy_outcome,
+    render_accuracy_report,
+    write_accuracy_aggregates,
+    write_accuracy_samples_csv,
+)
 from modelbench.adapters.storage.blobstore import PromptBlobStore, prompt_chars
 from modelbench.domain.context_windows import describe_windows
 from modelbench.domain.metrics import (
@@ -420,6 +426,9 @@ class RunWriter:
             "duration_s": merged_outcome.get("duration_s"),
             "n_isl_in_band": sum(entry.n_isl_in_band for entry in overall),
             "n_isl_out_of_band": sum(entry.n_isl_out_of_band for entry in overall),
+            "strict_input_tokens": bool(
+                (merged_config.get("perf") or {}).get("strict_input_tokens")
+            ),
         }
         (self.run_dir / layout.REPORT_MD).write_text(
             self._render_report(overall, cells, samples, report_summary),
@@ -456,6 +465,9 @@ class RunWriter:
         measured = [r for r in records if r.phase.value == "measured"]
         ok_measured = [r for r in measured if r.status.value == "ok"]
         errored = [r for r in records if r.status.value in ("error", "timeout")]
+        # Strict input alignment: the ±10% band counters are not applicable
+        # (aggregates already report 0/0); keep run.json consistent with them.
+        strict_run = bool(extra.get("strict_input_tokens"))
         base = dict(self._manifest.outcome if self._manifest else {}) or {}
         skipped = list(extra.get("skipped") or base.get("skipped") or [])
         cancelled = bool(extra.get("cancelled", base.get("cancelled", False)))
@@ -504,10 +516,15 @@ class RunWriter:
                 "n_gen_tps_invalid": sum(
                     1 for r in ok_measured if r.metrics.gen_tps_invalid
                 ),
-                "n_isl_in_band": sum(1 for r in ok_measured if isl_band(r)),
-                "n_isl_out_of_band": sum(
-                    1 for r in ok_measured if not isl_band(r)
-                ),
+                # Strict input alignment has no ±10% band: report 0/0 so no
+                # misleading "in-band ratio" is surfaced (every measured sample
+                # is already exactly at its bucket target).
+                "n_isl_in_band": 0
+                if strict_run
+                else sum(1 for r in ok_measured if isl_band(r)),
+                "n_isl_out_of_band": 0
+                if strict_run
+                else sum(1 for r in ok_measured if not isl_band(r)),
                 "skipped": skipped,
                 "warnings": list(extra.get("warnings") or base.get("warnings") or []),
                 "duration_s": extra.get("duration_s", base.get("duration_s")),
@@ -628,12 +645,20 @@ class RunWriter:
             f"{perf.get('samples_per_dataset') if perf.get('samples_per_dataset') is not None else '全部'}"
             f"；生成长度：{perf.get('max_tokens')}；重复：{run_cfg.get('repeats')}"
         )
+        strict = bool(summary.get("strict_input_tokens"))
         guard = perf.get("decode_guard")
-        lines.append(
-            f"- 解码窗口保障（decode guard）：{'开启' if guard else '关闭' if guard is False else '未知'}"
-            "（性能模式追加固定长输出指令，使每个样本都能测 TG TPS；响应不判分，"
-            "指令原文见 `output/blobs/prompts/` 中该记录 `request.prompt_sha256` 指向的 blob）"
-        )
+        if strict:
+            lines.append(
+                "- 解码窗口保障（decode guard）：关闭（strict 集不追加长输出指令，"
+                "以保持 prompt token 严格等于档位目标；长回答由任务块与 max_tokens 保证；"
+                "响应不判分）"
+            )
+        else:
+            lines.append(
+                f"- 解码窗口保障（decode guard）：{'开启' if guard else '关闭' if guard is False else '未知'}"
+                "（性能模式追加固定长输出指令，使每个样本都能测 TG TPS；响应不判分，"
+                "指令原文见 `output/blobs/prompts/` 中该记录 `request.prompt_sha256` 指向的 blob）"
+            )
         lines.append(
             f"- 上下文筛选：{describe_windows(perf.get('context_windows') or [])}；"
             f"模型级预热（丢弃）：{run_cfg.get('warmup_per_model', 0)} 次/模型；"
@@ -645,7 +670,13 @@ class RunWriter:
             f"测试单元（cell）：{summary.get('n_cells')}"
         )
         lines.append(f"- 耗时：{summary.get('duration_s', '-')}s")
-        if summary.get("n_isl_out_of_band"):
+        if summary.get("strict_input_tokens"):
+            lines.append(
+                "- **ISL 口径**：严格等值（每个 measured 样本的 prompt token 数"
+                " == bucket 目标；不启用 ±10% 带，n_isl_in_band/n_isl_out_of_band "
+                "均为 0；未对齐样本见 outcome.skipped）"
+            )
+        elif summary.get("n_isl_out_of_band"):
             lines.append(
                 f"- **ISL 带宽**：入带 {summary.get('n_isl_in_band', 0)} 个、"
                 f"出带 {summary.get('n_isl_out_of_band', 0)} 个"
@@ -691,13 +722,21 @@ class RunWriter:
         lines.append("")
 
         lines.append("## 整体结果（按上下文档位分别平均）\n")
-        lines.append(
-            "> 1K/8K/32K 的 TTFT/预填充相差一个数量级，因此**不跨档位合并**；"
-            "每行是一个模型的一个档位。TG TPS 后括号为参与统计的样本数/有效样本数"
-            "（`completion_tokens < 16` 的样本不参与）。默认列为**全样本口径**"
-            "（含 ISL 出带样本）；带「（±10%过滤）」的列只统计 actual 在 target "
-            "±10% 带内的样本（跨 run 比较口径）。\n"
-        )
+        if strict:
+            lines.append(
+                "> 1K/8K/32K 的 TTFT/预填充相差一个数量级，因此**不跨档位合并**；"
+                "每行是一个模型的一个档位。TG TPS 后括号为参与统计的样本数/有效样本数"
+                "（`completion_tokens < 16` 的样本不参与）。本集严格对齐（prompt token "
+                "== 档位目标），为**单口径**，不设 ±10% 过滤列。\n"
+            )
+        else:
+            lines.append(
+                "> 1K/8K/32K 的 TTFT/预填充相差一个数量级，因此**不跨档位合并**；"
+                "每行是一个模型的一个档位。TG TPS 后括号为参与统计的样本数/有效样本数"
+                "（`completion_tokens < 16` 的样本不参与）。默认列为**全样本口径**"
+                "（含 ISL 出带样本）；带「（±10%过滤）」的列只统计 actual 在 target "
+                "±10% 带内的样本（跨 run 比较口径）。\n"
+            )
         header = [
             "模型",
             "档位",
@@ -707,15 +746,16 @@ class RunWriter:
             "错误",
             "触顶(max_tokens)",
             "TG无效",
-            "ISL入带",
-            "ISL出带",
         ]
+        if not strict:
+            header += ["ISL入带", "ISL出带"]
         header += [label for _, label in _REPORT_METRICS]
-        header += [
-            label + _FILTERED_LABEL
-            for metric, label in _REPORT_METRICS
-            if metric in _REPORT_METRICS_FILTERED
-        ]
+        if not strict:
+            header += [
+                label + _FILTERED_LABEL
+                for metric, label in _REPORT_METRICS
+                if metric in _REPORT_METRICS_FILTERED
+            ]
         header += ["峰值内存全局最大(GB)", "状态"]
         lines.append("| " + " | ".join(header) + " |")
         lines.append("|" + "---|" * len(header))
@@ -729,9 +769,9 @@ class RunWriter:
                 str(entry.n_error),
                 str(entry.n_length_capped),
                 str(entry.n_gen_tps_invalid),
-                str(entry.n_isl_in_band),
-                str(entry.n_isl_out_of_band),
             ]
+            if not strict:
+                row += [str(entry.n_isl_in_band), str(entry.n_isl_out_of_band)]
             for metric, _ in _REPORT_METRICS:
                 dist = entry.perf_all.get(metric)
                 value = _num(dist.mean if dist else None)
@@ -742,16 +782,17 @@ class RunWriter:
                 ):
                     value = f"{value} ({dist.n}/{entry.n_valid})"
                 row.append(value)
-            for metric in _REPORT_METRICS_FILTERED:
-                dist = entry.perf.get(metric)
-                value = _num(dist.mean if dist else None)
-                if (
-                    metric == "gen_tps"
-                    and dist is not None
-                    and dist.n < entry.n_isl_in_band
-                ):
-                    value = f"{value} ({dist.n}/{entry.n_isl_in_band})"
-                row.append(value)
+            if not strict:
+                for metric in _REPORT_METRICS_FILTERED:
+                    dist = entry.perf.get(metric)
+                    value = _num(dist.mean if dist else None)
+                    if (
+                        metric == "gen_tps"
+                        and dist is not None
+                        and dist.n < entry.n_isl_in_band
+                    ):
+                        value = f"{value} ({dist.n}/{entry.n_isl_in_band})"
+                    row.append(value)
             row.append(_num(entry.peak_memory_gb_max))
             status = "unstable" if entry.unstable else "ok"
             if entry.insufficient_samples:
@@ -769,16 +810,13 @@ class RunWriter:
             "有效/样本",
             "触顶",
             "TG无效",
-            "ISL入带",
-            "ISL出带",
-            "TTFT(ms)",
-            "TG TPS",
-            "TTFT(ms)（±10%过滤）",
-            "TG TPS（±10%过滤）",
-            "峰值内存(GB)",
-            "输入token",
-            "状态",
         ]
+        if not strict:
+            header += ["ISL入带", "ISL出带"]
+        header += ["TTFT(ms)", "TG TPS"]
+        if not strict:
+            header += ["TTFT(ms)（±10%过滤）", "TG TPS（±10%过滤）"]
+        header += ["峰值内存(GB)", "输入token", "状态"]
         lines.append("| " + " | ".join(header) + " |")
         lines.append("|" + "---|" * len(header))
         for cell in cells:
@@ -795,44 +833,46 @@ class RunWriter:
                     return f"{value} ({dist.n}/{denominator})"
                 return value
 
-            lines.append(
-                "| {model} | {scenario} | {dataset} | {bucket} | {valid}/{total} | {capped} | {tginvalid} | {isl_in} | {isl_out} | {ttft} | {tps} | {f_ttft} | {f_tps} | {rss} | {ctx} | {status} |".format(
-                    model=cell.model,
-                    scenario=cell.scenario,
-                    dataset=cell.dataset,
-                    bucket=_bucket_label(cell.context_length),
-                    valid=cell.n_valid,
-                    total=cell.n_samples * max(cell.n_repeats, 1),
-                    capped=cell.n_length_capped,
-                    tginvalid=cell.n_gen_tps_invalid,
-                    isl_in=cell.n_isl_in_band,
-                    isl_out=cell.n_isl_out_of_band,
-                    ttft=_num(ttft.mean if ttft else None),
-                    tps=_tps_value(tps, cell.n_valid),
-                    f_ttft=_num(f_ttft.mean if f_ttft else None),
-                    f_tps=_tps_value(f_tps, cell.n_isl_in_band),
-                    rss=_num(rss.max if rss else None),
-                    ctx=_num(ctx.mean if ctx else None),
-                    status=(
-                        "insufficient_samples"
-                        if cell.insufficient_samples
-                        else "ok"
-                    ),
-                )
-            )
+            row = [
+                cell.model,
+                cell.scenario,
+                cell.dataset,
+                _bucket_label(cell.context_length),
+                f"{cell.n_valid}/{cell.n_samples * max(cell.n_repeats, 1)}",
+                str(cell.n_length_capped),
+                str(cell.n_gen_tps_invalid),
+            ]
+            if not strict:
+                row += [str(cell.n_isl_in_band), str(cell.n_isl_out_of_band)]
+            row += [
+                _num(ttft.mean if ttft else None),
+                _tps_value(tps, cell.n_valid),
+            ]
+            if not strict:
+                row += [
+                    _num(f_ttft.mean if f_ttft else None),
+                    _tps_value(f_tps, cell.n_isl_in_band),
+                ]
+            row += [
+                _num(rss.max if rss else None),
+                _num(ctx.mean if ctx else None),
+                "insufficient_samples" if cell.insufficient_samples else "ok",
+            ]
+            lines.append("| " + " | ".join(row) + " |")
         lines.append("")
 
-        lines.append(
-            "> 双口径：默认列（TTFT/TG TPS/TPOT/E2E/内存/输入token）为**全样本口径**"
-            "（所有 measured+ok 样本，含 ISL 出带）；带「（±10%过滤）」的列只统计 "
-            "actual 在 target ±10% 带内的入带样本，是跨 run/跨系统比较口径"
-            "（`insufficient_samples` 标记也针对该口径）。\n"
-        )
+        if not strict:
+            lines.append(
+                "> 双口径：默认列（TTFT/TG TPS/TPOT/E2E/内存/输入token）为**全样本口径**"
+                "（所有 measured+ok 样本，含 ISL 出带）；带「（±10%过滤）」的列只统计 "
+                "actual 在 target ±10% 带内的入带样本，是跨 run/跨系统比较口径"
+                "（`insufficient_samples` 标记也针对该口径）。\n"
+            )
         if any(getattr(cell, "insufficient_samples", False) for cell in cells):
             lines.append(
-                "> `insufficient_samples`：入带样本 <8（默认每 cell 10 条）。"
-                "`--samples <8` 的冒烟 run 必然触发，不代表数据异常；"
-                "正式结论需要每 cell ≥8 条 actual 在 target ±10% 内的样本。\n"
+                "> `insufficient_samples`：%s <8（默认每 cell 10 条）。"
+                "`--samples <8` 的冒烟 run 必然触发，不代表数据异常。\n"
+                % ("有效样本" if strict else "入带样本")
             )
         lines.append("## 逐样本结果\n")
         header = [
@@ -875,9 +915,15 @@ class RunWriter:
         lines.append("")
         lines.append("> 指标说明：TTFT 为客户端首 token 延迟；TG TPS 为解码窗口内 token/s")
         lines.append(
-            "> （`completion_tokens < 16` 时为 null）。性能模式默认开启 decode guard，"
-            "在原始样本后追加长输出指令，避免以 `Answer:` 结尾的样本 1 token 结束；"
-            "若仍为 null，括号里的 n/有效数给出真实覆盖，不做插补。"
+            "> （`completion_tokens < 16` 时为 null）。"
+            + (
+                "strict 集不开启 decode guard（保持 prompt token 精确对齐），"
+                "长回答由任务块与 max_tokens 保证；"
+                if strict
+                else "性能模式默认开启 decode guard，在原始样本后追加长输出指令，"
+                "避免以 `Answer:` 结尾的样本 1 token 结束；"
+            )
+            + "若仍为 null，括号里的 n/有效数给出真实覆盖，不做插补。"
         )
         lines.append(
             "> 输出触顶（`finish_reason=length`，达到 `perf.max_tokens`）**不是丢弃**："
@@ -904,6 +950,228 @@ class RunWriter:
             "可用 `./modelbench rebuild` 从 records 重建本目录的派生文件。"
         )
         return "\n".join(lines) + "\n"
+
+
+def _judge_dependency_block(value: Any) -> Any:
+    """Preserve the judge-dependency evidence shape (dict or legacy list).
+
+    The accuracy orchestrator persists ``{"used": [...], "missing": [...]}``
+    (optionally ``probe_error``); older callers may pass a plain list.  Never
+    flatten a mapping with ``list()``: that would silently destroy the
+    provenance the report and Web environment tab read (design/32 §5.6).
+    """
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return []
+
+
+class AccuracyRunWriter(RunWriter):
+    """Run writer for ``method=accuracy`` (design 32 §5.4–§5.6).
+
+    Only :meth:`finalize` differs from :class:`RunWriter`; records, prompt blob
+    dedup, close, ``_write_manifest`` and ``_update_catalog`` are inherited
+    unchanged so the accuracy path reuses the same evidence machinery.  The
+    derived files are the accuracy projections from
+    :mod:`modelbench.adapters.storage.accuracy_output` (the same functions
+    ``rebuild`` uses), the outcome keeps the perf-compatible block and adds the
+    accuracy counters, and ``report.md`` is the accuracy report.
+
+    Construction is the parent's signature with ``method`` defaulting to
+    ``accuracy``; the batch/run identity (``run_id.__<method>__``) therefore
+    stays method-correct even when a caller does not pass ``method``.
+    """
+
+    #: Method tag used by the dispatch layer and by ``__repr__`` consumers.
+    method_name = "accuracy"
+
+    def __init__(
+        self,
+        output_root: Path,
+        run_id: Optional[str] = None,
+        overwrite: bool = False,
+        batch: Optional[Dict[str, Any]] = None,
+        *,
+        batch_id: Optional[str] = None,
+        method: str = "accuracy",
+        model_slug: Optional[str] = None,
+        created_at: Optional[str] = None,
+        model: Optional[Dict[str, Any]] = None,
+    ):
+        super().__init__(
+            output_root,
+            run_id=run_id,
+            overwrite=overwrite,
+            batch=batch,
+            batch_id=batch_id,
+            # Accept ``RunMethod.ACCURACY`` as well as ``"accuracy"``: the
+            # parent sanitises a bare ``str(method)`` and an enum would leak
+            # ``RunMethod.ACCURACY`` into the run_id method segment.
+            method=getattr(method, "value", method) or "accuracy",
+            model_slug=model_slug,
+            created_at=created_at,
+            model=model,
+        )
+
+    def finalize(
+        self,
+        records: List[SampleRecord],
+        extra: Optional[Dict[str, Any]] = None,
+        perf: Optional[Dict[str, Any]] = None,
+        run_config: Optional[Dict[str, Any]] = None,
+        omlx: Optional[Dict[str, Any]] = None,
+        outcome: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Write the accuracy bundle: aggregates/samples/report/MANIFEST.
+
+        ``run_config`` is the ``run.json.config.run`` block (repeats/cache_mode/
+        thinking_mode/warmup).  Sample-selection config and the testset
+        fingerprint are read from the existing ``run.json.config`` (written at
+        ``initialize``) so the report can carry the testset SHA; ``extra`` may
+        override ``testset``/``judge_dependencies``/``accuracy_config`` for
+        callers that have them in hand.
+        """
+        self.close()
+        if omlx is not None:
+            self._omlx = omlx
+        extra = dict(extra or {})
+
+        projections = write_accuracy_aggregates(
+            self.run_dir, records, run_id=self.run_id
+        )
+        cells = projections["cells"]
+        overall = projections["overall"]
+        samples = projections["samples"]
+        write_accuracy_samples_csv(
+            self.run_dir / layout.SAMPLES_CSV, records, samples=samples
+        )
+
+        merged_outcome = self._finalize_outcome(records, samples, extra, outcome)
+        merged_outcome.update(accuracy_outcome(records, extra))
+        # Performance-only counters (TG TPS validity / ISL band) do not apply to
+        # accuracy (spec 22 §9); drop them instead of writing misleading values
+        # derived from the perf rule that "records without a target stay in band".
+        for field in ("n_gen_tps_invalid", "n_isl_in_band", "n_isl_out_of_band"):
+            merged_outcome.pop(field, None)
+        # Counts come from the accuracy projections so they can never drift from
+        # aggregates.json (``_finalize_outcome``'s context-bucket count is the
+        # perf definition; for accuracy cells are (model, scenario, dataset)).
+        merged_outcome.update(
+            {
+                "n_records": projections["n_records"],
+                "n_samples": projections["n_samples"],
+                "n_cells": projections["n_cells"],
+            }
+        )
+
+        merged_config = dict((self._manifest.config if self._manifest else {}) or {})
+        if perf:
+            merged_config["perf"] = perf
+        if run_config:
+            merged_config["run"] = run_config
+        if extra.get("accuracy_config") is not None:
+            merged_config["accuracy"] = dict(extra["accuracy_config"] or {})
+        # Method is part of the run metadata contract: keep it in the config
+        # block when present and never drop it while merging perf/run/accuracy.
+        merged_config["method"] = str(merged_config.get("method") or self.method)
+        # Persist the report provenance into ``run.json`` so ``rebuild`` can
+        # reproduce report.md byte-semantically from the bundle alone (design/31
+        # §7.3).  Without this, the testset SHA / judge dependencies only lived in
+        # the live writer's ``extra`` and disappeared after a rebuild.
+        testset_block = self._testset_block(merged_config, extra)
+        if testset_block:
+            merged_config["testset"] = dict(testset_block)
+        judge_dependencies = _judge_dependency_block(
+            extra.get("judge_dependencies")
+            or merged_config.get("judge_dependencies")
+            or []
+        )
+        if judge_dependencies:
+            merged_config["judge_dependencies"] = judge_dependencies
+        if self._manifest is not None:
+            self._manifest.outcome = merged_outcome
+            self._manifest.config = merged_config
+            if self._hardware:
+                env = dict(self._manifest.env or {})
+                env.setdefault("hardware", self._hardware)
+                env["omlx"] = self._omlx or env.get("omlx") or {}
+                self._manifest.env = env
+            self.write_run_json()
+
+        report_summary = {
+            "accuracy": merged_config.get("accuracy") or {},
+            "run": merged_config.get("run") or {},
+            "perf": merged_config.get("perf") or {},
+            "testset": merged_config.get("testset") or testset_block,
+            "warnings": list(merged_outcome.get("warnings") or []),
+            "judge_dependencies": judge_dependencies,
+            "skipped": list(merged_outcome.get("skipped") or []),
+            "n_records": projections["n_records"],
+            "n_samples": projections["n_samples"],
+            "n_cells": projections["n_cells"],
+            "duration_s": merged_outcome.get("duration_s"),
+        }
+        (self.run_dir / layout.REPORT_MD).write_text(
+            render_accuracy_report(
+                run_id=self.run_id,
+                cells=cells,
+                overall=overall,
+                samples=samples,
+                summary=report_summary,
+                hardware=self._hardware,
+                omlx=self._omlx,
+            ),
+            encoding="utf-8",
+        )
+        manifest = self._write_manifest()
+        self._update_catalog()
+        result: Dict[str, Any] = {
+            "run_id": self.run_id,
+            "run_dir": str(self.run_dir),
+            "run_json": str(self.run_dir / layout.RUN_JSON),
+            "manifest_json": str(self.run_dir / layout.MANIFEST_JSON),
+            "records_jsonl": str(self._records_path),
+            "samples_csv": str(self.run_dir / layout.SAMPLES_CSV),
+            "aggregates_json": str(self.run_dir / layout.AGGREGATES_JSON),
+            "report_md": str(self.run_dir / layout.REPORT_MD),
+            "n_records": projections["n_records"],
+            "n_samples": projections["n_samples"],
+            "n_cells": projections["n_cells"],
+            "n_blobs": manifest["blob_refs"]["prompts"],
+            "duration_s": merged_outcome.get("duration_s"),
+            "bytes_total": manifest["totals"]["bytes"],
+        }
+        result.update({key: value for key, value in extra.items() if key not in result})
+        return result
+
+    def _testset_block(
+        self, config: Dict[str, Any], extra: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Best-effort testset fingerprint for the report (sha/rows/path).
+
+        The authoritative copy is ``batch.json.inputs.testset``; a run written
+        by the accuracy orchestrator also keeps it in ``run.json.config`` (or
+        passes it via ``extra``).  Missing information renders as "-" instead of
+        a fabricated digest.
+        """
+        inputs = extra.get("inputs")
+        candidates = [
+            extra.get("testset"),
+            (inputs or {}).get("testset") if isinstance(inputs, dict) else None,
+            config.get("testset"),
+            (config.get("inputs") or {}).get("testset")
+            if isinstance(config.get("inputs"), dict)
+            else None,
+            (self.batch.get("inputs") or {}).get("testset")
+            if isinstance(self.batch.get("inputs"), dict)
+            else None,
+            self.batch.get("testset"),
+        ]
+        for candidate in candidates:
+            if isinstance(candidate, dict) and candidate:
+                return dict(candidate)
+        return {}
 
 
 def _iter_record_prompt_shas(records_path: Path) -> Iterable[str]:

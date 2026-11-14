@@ -28,6 +28,7 @@ import yaml
 from pydantic import BaseModel, Field, field_validator
 
 from modelbench.domain.context_windows import normalize_windows
+from modelbench.domain.method import RunMethod
 from modelbench.domain.models import CacheMode
 
 from modelbench.paths import PROJECT_ROOT, RESOURCES
@@ -62,7 +63,7 @@ class ServerConfig(BaseModel):
 
 
 class PerfConfig(BaseModel):
-    """The performance benchmark plan (the only test mode)."""
+    """The performance benchmark plan (method=performance)."""
 
     #: Samples taken from each selected dataset; ``None`` = every available sample.
     samples_per_dataset: Optional[int] = None
@@ -84,6 +85,12 @@ class PerfConfig(BaseModel):
     #: content: it is recorded verbatim in ``records.jsonl`` and can be turned
     #: off for diagnostics or historical comparisons.
     decode_guard: bool = True
+    #: Strict input-token contract (set by a test set that declares
+    #: ``strict_input_tokens: true``).  When true, a pre-built sample is only
+    #: measured if the target model's tokenizer counts exactly the bucket target;
+    #: mismatches are recorded in ``outcome.skipped`` instead of being measured,
+    #: and ``context_meta.isl_tolerance`` uses exact bounds (low == high == target).
+    strict_input_tokens: bool = False
 
     @field_validator("samples_per_dataset")
     @classmethod
@@ -133,6 +140,62 @@ class PerfConfig(BaseModel):
         if scenario in self.samples_by_scenario:
             return self.samples_by_scenario[scenario]
         return self.samples_per_dataset
+
+    def sample_ids_for(self, scenario: str) -> List[str]:
+        return list(self.sample_ids.get(scenario) or [])
+
+
+class AccuracyConfig(BaseModel):
+    """The accuracy benchmark plan (method=accuracy).
+
+    The run protocol itself is fixed by the accuracy test plan (temperature=0,
+    top_p=1, cold cache, repeats=1, max_retries=1) and is *not* exposed here; this
+    block only controls which samples are selected.
+    """
+
+    #: Samples per scenario; ``None`` = all 250 (fixed sample set, no trimming).
+    samples_per_scenario: Optional[int] = None
+    #: Per-scenario sample-count override (Web/API selection; stratified).
+    samples_by_scenario: Dict[str, int] = Field(default_factory=dict)
+    #: Explicit sample ids per scenario (Web/API selection; highest priority).
+    sample_ids: Dict[str, List[str]] = Field(default_factory=dict)
+
+    @field_validator("samples_per_scenario")
+    @classmethod
+    def _positive_samples(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and int(v) < 1:
+            raise ValueError("accuracy.samples_per_scenario must be >= 1 (or null for all)")
+        return None if v is None else int(v)
+
+    @field_validator("samples_by_scenario")
+    @classmethod
+    def _positive_scenario_samples(cls, v: Dict[str, int]) -> Dict[str, int]:
+        out: Dict[str, int] = {}
+        for key, value in (v or {}).items():
+            if value is None:
+                continue
+            if int(value) < 1:
+                raise ValueError(
+                    f"accuracy.samples_by_scenario['{key}'] must be >= 1 (or omitted)"
+                )
+            out[str(key)] = int(value)
+        return out
+
+    @field_validator("sample_ids")
+    @classmethod
+    def _sample_ids(cls, v: Dict[str, List[str]]) -> Dict[str, List[str]]:
+        out: Dict[str, List[str]] = {}
+        for key, values in (v or {}).items():
+            ids = [str(item) for item in (values or []) if str(item).strip()]
+            if ids:
+                out[str(key)] = list(dict.fromkeys(ids))
+        return out
+
+    def samples_for(self, scenario: str) -> Optional[int]:
+        """Per-scenario sample count, falling back to the global setting."""
+        if scenario in self.samples_by_scenario:
+            return self.samples_by_scenario[scenario]
+        return self.samples_per_scenario
 
     def sample_ids_for(self, scenario: str) -> List[str]:
         return list(self.sample_ids.get(scenario) or [])
@@ -236,6 +299,17 @@ class ModelSpec(BaseModel):
     notes: Optional[str] = None
     enabled: bool = True
     load: ModelLoadConfig = Field(default_factory=ModelLoadConfig)
+    #: How ``thinking_mode=disabled`` is expressed for this model.
+    #: ``explicit_false`` sends ``chat_template_kwargs.enable_thinking=false``
+    #: (the normal protocol).  ``omit`` sends no chat-template kwargs at all;
+    #: needed for models whose runtime processor has a broken explicit-false
+    #: path (MiniCPM-V-4.6 in bundled mlx_vlm 0.7.10: ``enable_thinking=False``
+    #: renders ``<|im_start|>assistant\n`` without the closed empty
+    #: ``<think></think>`` block, so the model starts open-ended reasoning;
+    #: omitting the key uses the model template's default no-think prompt).
+    #: The effective choice is recorded per request as
+    #: ``request.context_meta.thinking_control``.
+    thinking_disable: Literal["explicit_false", "omit"] = "explicit_false"
 
     @property
     def label(self) -> str:
@@ -260,9 +334,12 @@ class SelectionSpec(BaseModel):
 class ProjectConfig(BaseModel):
     """Fully resolved configuration for one run."""
 
+    #: Test method for this run; ``performance`` keeps the historical behaviour.
+    method: RunMethod = RunMethod.PERFORMANCE
     server: ServerConfig = Field(default_factory=ServerConfig)
     run: RunConfig = Field(default_factory=RunConfig)
     perf: PerfConfig = Field(default_factory=PerfConfig)
+    accuracy: AccuracyConfig = Field(default_factory=AccuracyConfig)
     datasets: DatasetPaths = Field(default_factory=DatasetPaths)
     models: List[ModelSpec] = Field(default_factory=list)
     scenarios: Dict[str, ScenarioSpec] = Field(default_factory=dict)
@@ -649,9 +726,11 @@ def load_config(
     }
 
     cfg = ProjectConfig(
+        method=RunMethod.parse(merged.get("method")),
         server=ServerConfig(**(merged.get("server") or {})),
         run=RunConfig(**(merged.get("run") or {})),
         perf=PerfConfig(**(merged.get("perf") or {})),
+        accuracy=AccuracyConfig(**(merged.get("accuracy") or {})),
         datasets=DatasetPaths(**(merged.get("datasets") or {})),
         models=models,
         scenarios=scenarios,

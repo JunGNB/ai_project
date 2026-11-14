@@ -78,13 +78,57 @@ def test_overview_exposes_perf_defaults_without_strategies(monkeypatch):
     assert overview["run_defaults"]["warmup_requests"] == 0
     assert overview["run_defaults"]["warmup_per_model"] == 1
     assert overview["models"]
-    assert [ts["name"] for ts in overview["testsets"]] == ["performance"]
-    performance = overview["testsets"][0]
+    # Method registry metadata drives the Web method cards (design §9.1).
+    assert [method["name"] for method in overview["methods"]] == [
+        "performance",
+        "accuracy",
+    ]
+    # The declared generation length is what a run actually uses; the UI must show
+    # that value rather than the config fallback (both happen to be 50 today).
+    perf_method = next(m for m in overview["methods"] if m["name"] == "performance")
+    max_tokens_param = next(p for p in perf_method["params"] if p["name"] == "max_tokens")
+    assert max_tokens_param["default"] == 50
+    assert max_tokens_param["declared_by"] == "performance"
+    assert overview["perf"]["max_tokens_effective"] == 50
+    assert overview["methods"][0]["default_testset"] == "performance"
+    assert overview["methods"][1]["default_testset"] == "accuracy"
+    assert overview["methods"][1]["needs_judges"] is True
+    # Performance stays first (default), accuracy second.
+    assert [ts["name"] for ts in overview["testsets"]] == [
+        "performance",
+        "accuracy",
+    ]
+    performance = next(ts for ts in overview["testsets"] if ts["name"] == "performance")
+    assert performance["method"] == "performance"
     assert performance["directory"].startswith("dataset/test/")
     assert len(performance["scenarios"]) == 8
     # Only declared context buckets are offered as filters (no 4K/16K traps).
     assert performance["buckets"] == [1024, 8192, 32768]
+    # The console mirrors the declared generation length / strict contract so
+    # the run form (placeholder + strict hint) matches apply_testset().
+    assert performance["max_tokens"] == 50
+    assert performance["strict_input_tokens"] is True
+    accuracy = next(ts for ts in overview["testsets"] if ts["name"] == "accuracy")
+    assert accuracy["method"] == "accuracy"
+    assert len(accuracy["scenarios"]) == 8
+    # Accuracy has no context buckets (one cell per scenario).
+    assert accuracy["buckets"] == []
     assert overview["defaults"]["testset"] == "performance"
+    assert overview["accuracy"]["protocol"]["cache_mode"] == "cold"
+    assert overview["accuracy"]["protocol"]["repeats"] == 1
+    assert overview["accuracy"]["protocol"]["decode_guard"] is False
+    if accuracy["available"]:
+        assert set(accuracy["judge_families"]) == {
+            "mc_letter",
+            "ifeval",
+            "normalized_match",
+            "code_exec",
+            "tool_call",
+        }
+        assert accuracy["samples_total"] == 2000
+        assert accuracy["cells_total"] == 8
+    else:  # dataset/test/accuracy/testset.jsonl is a gitignored offline asset
+        assert accuracy["judge_families"] == []
     # Each scenario exposes its dataset plan (sample/cell totals) so the
     # console can show "240 measured / 24 test items" before starting.
     for scenario in performance["scenarios"]:
@@ -250,7 +294,7 @@ def test_estimate_endpoint_is_exact_for_ui_controls():
         ) as resp:
             overview = json.loads(resp.read().decode())
         knowledge = overview["testsets"][0]["scenarios"][0]
-        assert any("longbench_v2" in d for d in knowledge["datasets"])
+        assert any("longbench_pro" in d for d in knowledge["datasets"])
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -294,6 +338,33 @@ def test_web_warmup_is_a_switch_not_a_per_cell_number():
     assert "payload.warmup_requests" not in js
 
 
+def test_web_accuracy_method_cards_and_environment_provenance():
+    """The console must present the two methods distinctly and show accuracy
+    provenance (protocol/testset/judge deps) in the environment tab."""
+    static = Path(__file__).resolve().parents[1] / "src/modelbench/interfaces/web/static"
+    html = (static / "index.html").read_text(encoding="utf-8")
+    js = (static / "app.js").read_text(encoding="utf-8")
+
+    # Method cards + method-specific parameter panels.
+    assert 'data-method="performance"' in html and 'data-method="accuracy"' in html
+    assert 'id="perf-params"' in html and 'id="accuracy-params"' in html
+    assert 'id="accuracy-samples"' in html
+    # Accuracy-only result tabs and renderers.
+    assert 'data-tab="errors"' in html and 'id="tab-errors"' in html
+    for renderer in (
+        "renderAccuracyOverall",
+        "renderAccuracyCells",
+        "renderAccuracyEstimate",
+        "renderErrors",
+        "switchMethod",
+    ):
+        assert renderer in js
+    # Environment tab is method-aware: accuracy must not display perf calibres.
+    assert "精度参数与协议" in js
+    assert "精度溯源（判题）" in js
+    assert "const isAccuracy =" in js
+
+
 def test_build_config_warmup_switch_controls_model_warmup():
     import pytest
 
@@ -307,6 +378,289 @@ def test_build_config_warmup_switch_controls_model_warmup():
     assert off.run.warmup_requests == 0
     with pytest.raises(ValueError, match="warmup_per_model"):
         build_config({"models": ["minicpm5-1b"], "warmup_per_model": -1})
+
+
+# --------------------------------------------------------------------------- #
+# WP-4: dual-method configuration / planning / presentation
+# --------------------------------------------------------------------------- #
+
+
+def test_build_config_accuracy_method_maps_to_accuracy_block():
+    from modelbench.interfaces.web.jobs import build_config
+
+    cfg = build_config({"models": ["minicpm5-1b"], "method": "accuracy"})
+    assert cfg.method.value == "accuracy"
+    # Fixed protocol from docs/spec/22 §2 (enforced by the method profile).
+    assert cfg.run.cache_mode.value == "cold"
+    assert cfg.run.repeats == 1
+    assert cfg.run.max_retries == 1
+    assert cfg.accuracy.samples_per_scenario is None
+    assert cfg.selection.scenarios  # the accuracy test set selected the 8 scenarios
+
+    five = build_config(
+        {"models": ["minicpm5-1b"], "method": "accuracy", "samples": 5}
+    )
+    assert five.accuracy.samples_per_scenario == 5
+    # Performance keeps its own block (no accidental cross-write).
+    assert five.perf.samples_per_dataset is None
+
+    selected = build_config(
+        {
+            "models": ["minicpm5-1b"],
+            "method": "accuracy",
+            "scenario_samples": {"knowledge_qa": 3},
+            "sample_ids": {"coding": ["a", "b"]},
+            "thinking_mode": "disabled",
+            "warmup_per_model": 0,
+        }
+    )
+    assert selected.accuracy.samples_for("knowledge_qa") == 3
+    assert selected.accuracy.sample_ids_for("coding") == ["a", "b"]
+    assert selected.run.warmup_per_model == 0
+
+
+def test_build_config_accuracy_rejects_performance_only_parameters():
+    import pytest
+
+    from modelbench.interfaces.web.jobs import build_config
+
+    for bad in (
+        {"max_tokens": 50},
+        {"context_windows": [1024]},
+        {"repeats": 2},
+        {"cache_mode": "warm"},
+        {"cache_mode": "none"},
+    ):
+        with pytest.raises(ValueError):
+            build_config({"models": ["minicpm5-1b"], "method": "accuracy", **bad})
+    # Cold cache / repeats=1 are accepted (already the fixed protocol).
+    ok = build_config(
+        {"models": ["minicpm5-1b"], "method": "accuracy", "cache_mode": "cold", "repeats": 1}
+    )
+    assert ok.run.cache_mode.value == "cold" and ok.run.repeats == 1
+
+
+def test_build_config_method_conflicts_and_unknown_method():
+    import pytest
+
+    from modelbench.interfaces.web.jobs import build_config
+
+    with pytest.raises(ValueError, match="unknown method"):
+        build_config({"models": ["minicpm5-1b"], "method": "turbo"})
+    with pytest.raises(ValueError, match="conflicts"):
+        build_config(
+            {"models": ["minicpm5-1b"], "method": "accuracy", "testset": "performance"}
+        )
+
+
+def test_plan_counts_accuracy_uses_scenario_rows(monkeypatch):
+    from modelbench.interfaces.web import jobs
+
+    cfg = jobs.build_config({"models": ["minicpm5-1b"], "method": "accuracy"})
+    calls = []
+
+    def fake_dataset_plan(cfg_arg, spec, extra=None):
+        calls.append((spec.dataset, extra))
+        count = int((extra or {}).get("samples") or 250)
+        return [
+            {
+                "scenario": spec.params["dataset_params"]["scenario"],
+                "dataset": "accuracy_jsonl",
+                "n": count,
+            }
+        ]
+
+    monkeypatch.setattr(jobs, "dataset_plan", fake_dataset_plan)
+    counts = jobs.plan_counts(cfg)
+    assert counts["method"] == "accuracy"
+    assert counts["samples_known"] is True
+    assert counts["cells_known"] is True
+    # 8 scenarios x 250 samples; accuracy has exactly one cell per scenario.
+    assert counts["samples_total"] == 2000
+    assert counts["cells_total"] == 8
+    assert len(calls) == 8
+
+    cfg.accuracy.samples_per_scenario = 5
+    five = jobs.plan_counts(cfg)
+    assert five["samples_total"] == 40
+    assert five["cells_total"] == 8
+    assert all((extra or {}).get("samples") == 5 for _, extra in calls[8:])
+
+
+def test_plan_counts_accuracy_unknown_when_dataset_plan_is_unavailable(monkeypatch):
+    from modelbench.interfaces.web import jobs
+
+    cfg = jobs.build_config({"models": ["minicpm5-1b"], "method": "accuracy"})
+    monkeypatch.setattr(jobs, "dataset_plan", lambda *args, **kwargs: None)
+    counts = jobs.plan_counts(cfg)
+    assert counts["method"] == "accuracy"
+    assert counts["samples_total"] is None
+    assert counts["samples_known"] is False
+    assert counts["cells_total"] is None
+
+
+def test_web_page_has_method_cards_and_accuracy_views():
+    root = Path(__file__).resolve().parents[1] / "src/modelbench/interfaces/web/static"
+    html = (root / "index.html").read_text(encoding="utf-8")
+    js = (root / "app.js").read_text(encoding="utf-8")
+    assert 'data-method="performance"' in html
+    assert 'data-method="accuracy"' in html
+    assert 'id="perf-params"' in html and 'id="accuracy-params"' in html
+    assert 'id="accuracy-samples"' in html
+    assert "留空 = 每场景全部 250" in html
+    # Accuracy panel must explain the fixed protocol and the 5 deterministic judges.
+    assert "temperature=0" in html and "无 decode guard" in html and "repeats=1" in html
+    assert "无 LLM judge" in html
+    # Accuracy result tabs / table headers (design §9.2).
+    assert 'data-tab="errors"' in html and 'id="tab-errors"' in html
+    for header in ("判题错误", "95%CI", "宏平均", "判题族", "max_new_tokens"):
+        assert header in html
+    assert "renderAccuracyOverall" in js and "renderAccuracyCells" in js
+    assert "renderErrors" in js
+    assert "switchMethod" in js and "state.method" in js
+
+
+def test_synthesize_summary_passes_accuracy_shape_and_judge_counts():
+    run_json = {
+        "run_id": "20261111T000000Z-aaaa__accuracy__m1",
+        "schema_version": "3.0",
+        "method": "accuracy",
+        "config": {
+            "accuracy": {"samples_per_scenario": 5},
+            "perf": {},
+            "run": {"repeats": 1, "cache_mode": "cold", "thinking_mode": "disabled"},
+            "testset": {
+                "path": "dataset/test/accuracy/testset.jsonl",
+                "sha256": "b" * 64,
+                "rows": 2000,
+                "method": "accuracy",
+            },
+            "judge_dependencies": {"used": ["mc_letter"], "missing": []},
+        },
+        "outcome": {
+            "n_records": 2,
+            "n_samples": 2,
+            "n_cells": 1,
+            "n_scored": 2,
+            "n_correct": 1,
+            "n_judge_error": 1,
+            "n_format_failure": 0,
+            "skipped": [],
+            "warnings": ["judge dependency missing"],
+        },
+    }
+    overall = [
+        {
+            "model": "m1",
+            "method": "accuracy",
+            "n_samples": 2,
+            "n_valid": 2,
+            "n_scored": 2,
+            "n_correct": 1,
+            "n_judge_error": 1,
+            "n_format_failure": 0,
+            "macro_score": 0.5,
+            "micro_score": 0.5,
+            "score_ci95_low": 0.1,
+            "score_ci95_high": 0.9,
+            "judge_families": ["mc_letter"],
+        }
+    ]
+    cells = [
+        {
+            "model": "m1",
+            "scenario": "knowledge_qa",
+            "dataset": "global_mmlu",
+            "n_samples": 2,
+            "n_valid": 2,
+            "mean_score": 0.5,
+            "judge_family": "mc_letter",
+            "metric": "accuracy",
+            "n_judge_error": 1,
+        }
+    ]
+    summary = web._synthesize_summary(
+        run_json, {"overall": overall, "cells": cells}, {"method": "accuracy"}
+    )
+    assert summary["mode"] == "accuracy"
+    assert summary["method"] == "accuracy"
+    assert summary["accuracy"] == {"samples_per_scenario": 5}
+    assert summary["judge_counts"] == {
+        "n_judge_error": 1,
+        "n_format_failure": 0,
+        "n_correct": 1,
+        "n_scored": 2,
+        "n_measured": 0,
+        "n_ok": 0,
+        "n_selected": 0,
+    }
+    # Accuracy provenance reaches the environment tab (report SHA/rows + judge
+    # dependency probe), not just aggregate rows.
+    assert summary["testset"]["sha256"] == "b" * 64
+    assert summary["testset"]["rows"] == 2000
+    assert summary["judge_dependencies"] == {"used": ["mc_letter"], "missing": []}
+    # Empty perf config must not raise (accuracy bundles have no perf block).
+    assert summary["perf"] == {}
+    assert summary["overall"] == overall
+    assert summary["cells"] == cells
+    assert summary["warnings"] == ["judge dependency missing"]
+
+
+def test_sample_value_typing_for_accuracy_columns():
+    assert web._sample_value("max_new_tokens", "1536") == 1536
+    assert web._sample_value("score", "0.5") == pytest.approx(0.5)
+    assert web._sample_value("correct", "true") is True
+    assert web._sample_value("correct", "false") is False
+    assert web._sample_value("format_failure", "1") is True
+    assert web._sample_value("judge_error", "0") is False
+    assert web._sample_value("language", "zh") == "zh"
+
+
+def test_sample_facets_and_language_filter_for_accuracy_csv(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    fields = [
+        "model",
+        "scenario",
+        "dataset",
+        "status",
+        "language",
+        "judge_family",
+        "sample_id",
+    ]
+    with (run_dir / "samples.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerow(
+            {
+                "model": "m1",
+                "scenario": "knowledge_qa",
+                "dataset": "global_mmlu",
+                "status": "ok",
+                "language": "en",
+                "judge_family": "mc_letter",
+                "sample_id": "knowledge_qa:global_mmlu:1|en",
+            }
+        )
+        writer.writerow(
+            {
+                "model": "m1",
+                "scenario": "math_logic",
+                "dataset": "cmath",
+                "status": "judge_error",
+                "language": "zh",
+                "judge_family": "normalized_match",
+                "sample_id": "math_logic:cmath:1|zh",
+            }
+        )
+    facets = web._sample_facets(run_dir)
+    assert facets["languages"] == ["en", "zh"]
+    assert facets["judge_families"] == ["mc_letter", "normalized_match"]
+    rows = web._read_samples_csv(run_dir)
+    assert [row["sample_id"] for row in web._filter_samples(rows, language="zh")] == [
+        "math_logic:cmath:1|zh"
+    ]
+    assert web._filter_samples(rows, language="en")[0]["judge_family"] == "mc_letter"
 
 
 # --------------------------------------------------------------------------- #
@@ -804,6 +1158,21 @@ def _get(port: int, path: str):
             return resp.status, resp.read().decode()
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode()
+
+
+def test_run_detail_surfaces_strict_input_tokens(output_tree):
+    """Strict runs must be visible to the console (it hides the ±10% columns)."""
+    run_json = output_tree / "runs" / RUN_ID / "run.json"
+    payload = json.loads(run_json.read_text(encoding="utf-8"))
+    payload["config"]["perf"]["strict_input_tokens"] = True
+    payload["config"]["perf"]["decode_guard"] = False
+    run_json.write_text(json.dumps(payload), encoding="utf-8")
+    web._CATALOG_CACHE.update({"at": 0.0, "data": None})
+
+    detail = web._run_detail(RUN_ID)
+    summary = detail["summary"]
+    assert summary["perf"]["strict_input_tokens"] is True
+    assert summary["perf"]["decode_guard"] is False
 
 
 def test_run_detail_synthesizes_old_summary_view(output_tree):

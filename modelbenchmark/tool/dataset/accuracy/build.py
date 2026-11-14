@@ -9,10 +9,10 @@ Outputs:
     dataset/test/accuracy/manifest.json    sampling / provenance / SHA-256 (no timestamps)
     reports/dataset-build/accuracy/selection_report.md    generated sampling report (intermediate)
 
-The accuracy set is intentionally **hidden from the run/testset selector**: it has
-no ``testset.yaml`` and the manifest declares ``status=offline-asset`` /
-``runner=not wired``.  It is a data asset only until accuracy evaluation is
-separately designed and wired.
+The accuracy set is a **wired test method**: the manifest declares
+``status=wired`` / ``runner=accuracy`` / ``hidden=false`` and
+``dataset/test/accuracy/testset.yaml`` exposes the eight scenario slices to the
+CLI/Web test-set selector (see ``docs/design/32-method-architecture.md``).
 
     python tool/dataset/accuracy/build.py
     python tool/dataset/accuracy/build.py --check   # verify existing outputs
@@ -148,7 +148,7 @@ UPSTREAM_ID_FORMAT = {
 }
 
 #: Differences from the upstream/reference protocols that matter when reading
-#: the scores (the set is data-only; nothing is scored by the runner yet).
+#: the scores (the set is scored by ``domain/judges.py``).
 DEVIATIONS = [
     "Global-MMLU is scored generatively from option letters, not with likelihood-based scoring.",
     "Global-MMLU pairing drops a sample_id when en/zh answer letters disagree, drops every subject whose en/zh mismatch rate is above ALIGNMENT_MAX_SUBJECT_MISMATCH_RATE (upstream high_school_world_history zh/ko row misalignment), and drops known upstream translation errors (abstract_algebra/test/1); the excluded subjects/counts are recorded under sampling.alignment_excluded.",
@@ -162,7 +162,7 @@ DEVIATIONS = [
     "Instruction following uses IFEval; the performance set's reference pool uses the same IFEval source but is never scored.",
     "Coding uses HumanEval + MBPP (not LiveCodeBench); both are easier sets chosen for 1B-class models.",
     "Every row carries judge.max_new_tokens (knowledge/multilingual 1536, instruction 1024, math 512, coding 768, general_agent 256, search 32, long_context the official task maxlen).",
-    "Accuracy is a hidden offline data asset: no evaluator is wired into the run and no score may be quoted from it.",
+    "Accuracy is a first-class test method: every response is scored by a deterministic judge and accuracy scores are never mixed into performance aggregates.",
 ]
 
 
@@ -983,10 +983,10 @@ def build_outputs() -> Dict[str, Any]:
     manifest = {
         "schema_version": "accuracy/v1",
         "name": "accuracy",
-        "description": "8 scenarios x 250 rows, small-model accuracy set (bf16 vs quantized); hidden offline data asset",
-        "status": "offline-asset",
-        "runner": "not wired",
-        "hidden": True,
+        "description": "8 scenarios x 250 rows, wired accuracy test set (bf16 vs quantized); deterministic judging",
+        "status": "wired",
+        "runner": "accuracy",
+        "hidden": False,
         "rows": len(combined),
         "per_scenario": PER_SCENARIO,
         "seed": SEED,
@@ -1198,10 +1198,31 @@ def check_outputs() -> int:
     upstream_ids = [r["upstream_id"] for r in rows]
     if len(set(upstream_ids)) != len(upstream_ids):
         problems.append("duplicate upstream_id values (must be globally unique)")
-    if manifest.get("status") != "offline-asset" or manifest.get("runner") != "not wired":
-        problems.append("accuracy manifest must stay status=offline-asset / runner=not wired")
-    if (TEST_DIR_ACC / "testset.yaml").is_file():
-        problems.append("accuracy must stay hidden: remove testset.yaml")
+    if (
+        manifest.get("status") != "wired"
+        or manifest.get("runner") != "accuracy"
+        or manifest.get("hidden") is not False
+    ):
+        problems.append(
+            "accuracy manifest must be status=wired / runner=accuracy / hidden=false"
+        )
+    yaml_path = TEST_DIR_ACC / "testset.yaml"
+    if not yaml_path.is_file():
+        problems.append("accuracy wired testset requires dataset/test/accuracy/testset.yaml")
+    else:
+        try:
+            import yaml  # noqa: PLC0415
+
+            doc = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+            declared = set((doc.get("scenarios") or {}).keys())
+            if doc.get("method") != "accuracy" or declared != set(SCENARIOS):
+                problems.append(
+                    "accuracy testset.yaml must declare method=accuracy and all "
+                    f"{len(SCENARIOS)} scenarios (found method={doc.get('method')!r}, "
+                    f"scenarios={len(declared)})"
+                )
+        except Exception as exc:  # noqa: BLE001 - surface a checked YAML problem
+            problems.append(f"accuracy testset.yaml invalid: {type(exc).__name__}: {exc}")
     by_scenario = Counter(r["scenario"] for r in rows)
     for scenario in SCENARIOS:
         if by_scenario[scenario] != PER_SCENARIO:

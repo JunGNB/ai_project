@@ -42,6 +42,7 @@ from modelbench.domain.models import (
     RunManifest,
     Sample,
     SampleRecord,
+    Score,
     ToolCall,
     Usage,
 )
@@ -106,8 +107,61 @@ MODEL_WARMUP_MAX_TOKENS = 8
 DECODE_GUARD_TOKEN_RESERVE = 64
 
 
+def thinking_control(
+    cfg: ProjectConfig, model_id: str
+) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Resolve how to express ``thinking_mode`` for one model.
+
+    Returns ``(chat_template_kwargs, control_label)``.  The label is recorded in
+    ``request.context_meta.thinking_control`` so a bundle proves which control
+    was actually sent.
+
+    Why this is model-specific: the runtime processor can implement its own
+    ``apply_chat_template`` special case.  Bundled mlx_vlm 0.7.10 does this for
+    MiniCPM-V-4.6: with ``enable_thinking=False`` it renders the messages with
+    ``add_generation_prompt=False`` and appends only ``<|im_start|>assistant\n``,
+    omitting the closed empty ``<think>\n\n</think>\n\n`` block that the model
+    template emits by default.  The model then starts open-ended reasoning and
+    consumes the whole ``max_new_tokens`` budget (2026-11 accuracy run: 215
+    empty-content responses).  Omitting the kwargs uses the template default
+    (closed empty think) and does not think, so 4.6's
+    ``ModelSpec.thinking_disable`` is ``omit``.  Other models (e.g.
+    MiniCPM5-1B) default to thinking and need the explicit ``false`` value.
+    """
+    mode = str(getattr(cfg.run, "thinking_mode", "disabled") or "disabled")
+    if mode == "auto":
+        return None, "auto"
+    if mode == "enabled":
+        return {"enable_thinking": True}, "enabled"
+    spec = next(
+        (
+            model
+            for model in getattr(cfg, "models", [])
+            if model.id == model_id or (model.alias or "") == model_id
+        ),
+        None,
+    )
+    strategy = str(
+        getattr(spec, "thinking_disable", "explicit_false") or "explicit_false"
+    )
+    if strategy == "omit":
+        return None, "disabled:omit"
+    return {"enable_thinking": False}, "disabled:explicit_false"
+
+
 class RunCancelled(RuntimeError):
     """Raised when the caller requests a cooperative stop."""
+
+
+class SampleSkipped(Exception):
+    """A selected sample is not eligible for measurement.
+
+    Raised while building a request when the sample cannot be measured for a
+    protocol reason (currently: ``perf.strict_input_tokens`` alignment failed or
+    the target tokenizer is unavailable).  The measured loop records the message
+    in ``run.json.outcome.skipped`` and continues with the next sample; it never
+    aborts the cell or the run.
+    """
 
 
 @dataclass
@@ -125,6 +179,10 @@ class RunStats:
 
 
 class Orchestrator:
+    #: Test method this orchestrator implements (``performance`` here).  The
+    #: accuracy subclass overrides it; it is used for logs and ``run.json``.
+    method_name: str = "performance"
+
     def __init__(
         self,
         cfg: ProjectConfig,
@@ -140,6 +198,7 @@ class Orchestrator:
         self.progress_cb = progress_cb
         self.cancel_event = cancel_event
         self._tokenize_warning_issued = False
+        self._strict_guard_note_issued = False
         self.controller = CacheController(
             client,
             mode=cfg.run.cache_mode,
@@ -308,6 +367,33 @@ class Orchestrator:
         primary = selected[0] if selected else None
         started_at = datetime.now(timezone.utc).isoformat()
         config_snapshot = self.cfg.redacted_snapshot()
+        config: Dict[str, Any] = {
+            "snapshot": config_snapshot,
+            "perf": self.cfg.perf.model_dump(mode="json"),
+            "run": {
+                "repeats": self.cfg.run.repeats,
+                "warmup_requests": self.cfg.run.warmup_requests,
+                "warmup_per_model": self.cfg.run.warmup_per_model,
+                "cache_mode": self.cfg.run.cache_mode.value,
+                "thinking_mode": self.cfg.run.thinking_mode,
+                "max_requests": self.cfg.run.max_requests,
+                "max_retries": self.cfg.run.max_retries,
+            },
+            "scenarios": list(self.cfg.selected_scenarios()),
+            "context_windows": list(
+                getattr(self.cfg.perf, "context_windows", None) or []
+            ),
+            "server": {
+                "base_url": self.cfg.server.base_url,
+                "pid": self.server_pid,
+                "cache_mode": self.cfg.run.cache_mode.value,
+            },
+            "host": {"python": sys.version.split()[0], "cwd": str(Path.cwd())},
+        }
+        if self.method_name == "accuracy":
+            # Additive field: performance config keys are untouched (design §7).
+            config["method"] = self.method_name
+            config["accuracy"] = self.cfg.accuracy.model_dump(mode="json")
         manifest = RunManifest(
             run_id=self.writer.run_id,
             batch_id=getattr(self.writer, "batch_id", None),
@@ -321,28 +407,7 @@ class Orchestrator:
             created_at=started_at,
             started_at=started_at,
             git={"commit": git_commit, "dirty": git_dirty},
-            config={
-                "snapshot": config_snapshot,
-                "perf": self.cfg.perf.model_dump(mode="json"),
-                "run": {
-                    "repeats": self.cfg.run.repeats,
-                    "warmup_requests": self.cfg.run.warmup_requests,
-                    "warmup_per_model": self.cfg.run.warmup_per_model,
-                    "cache_mode": self.cfg.run.cache_mode.value,
-                    "thinking_mode": self.cfg.run.thinking_mode,
-                    "max_requests": self.cfg.run.max_requests,
-                },
-                "scenarios": list(self.cfg.selected_scenarios()),
-                "context_windows": list(
-                    getattr(self.cfg.perf, "context_windows", None) or []
-                ),
-                "server": {
-                    "base_url": self.cfg.server.base_url,
-                    "pid": self.server_pid,
-                    "cache_mode": self.cfg.run.cache_mode.value,
-                },
-                "host": {"python": sys.version.split()[0], "cwd": str(Path.cwd())},
-            },
+            config=config,
             env={
                 "hardware": hardware,
                 "omlx": self._omlx_env,
@@ -372,11 +437,11 @@ class Orchestrator:
         )
         self.writer.initialize(manifest)
         self._log(
-            f"run {self.writer.run_id} | mode=performance "
+            f"run {self.writer.run_id} | mode={self.method_name} "
             f"models={[m.label for m in self.cfg.selected_models()]} "
             f"datasets={list(self.cfg.selected_scenarios())} "
-            f"samples_per_dataset={self.cfg.perf.samples_per_dataset or 'all'} "
-            f"max_tokens={self.cfg.perf.max_tokens} repeats={self.cfg.run.repeats} "
+            f"{self._plan_log_fields()}"
+            f"repeats={self.cfg.run.repeats} "
             f"warmup_per_model={self.cfg.run.warmup_per_model}"
         )
         estimate = self._estimate_requests()
@@ -452,13 +517,20 @@ class Orchestrator:
             if self._log_fh:
                 self._log_fh.close()
                 self._log_fh = None
-        extra = {
-            "duration_s": round(self.stats.elapsed_s, 1),
-            "skipped": list(self.stats.skipped),
-            "warnings": list(self.stats.warnings),
-            "memory_errors": self.stats.memory_errors,
-            "cancelled": self.stats.cancelled,
-        }
+        extra = self._finalize_extra(
+            {
+                "duration_s": round(self.stats.elapsed_s, 1),
+                "skipped": list(self.stats.skipped),
+                "warnings": list(self.stats.warnings),
+                "memory_errors": self.stats.memory_errors,
+                "cancelled": self.stats.cancelled,
+                # Strict input alignment: aggregates must not report the ±10%
+                # band counters (every measured sample already equals target).
+                "strict_input_tokens": bool(
+                    self.cfg.perf.strict_input_tokens
+                ),
+            }
+        )
         summary = self.writer.finalize(
             self.stats.records,
             extra=extra,
@@ -471,6 +543,7 @@ class Orchestrator:
                 "cache_mode": self.cfg.run.cache_mode.value,
                 "thinking_mode": self.cfg.run.thinking_mode,
                 "max_requests": self.cfg.run.max_requests,
+                "max_retries": self.cfg.run.max_retries,
             },
         )
         self._log(
@@ -479,6 +552,73 @@ class Orchestrator:
             persist=False,
         )
         return summary
+
+    def _plan_log_fields(self) -> str:
+        """Method-specific part of the one-line plan log (performance default)."""
+        return (
+            f"samples_per_dataset={self.cfg.perf.samples_per_dataset or 'all'} "
+            f"max_tokens={self.cfg.perf.max_tokens} "
+        )
+
+    # ------------------------------------------------------------------ #
+    # method hooks (design §7; default = historical performance behaviour)
+    # ------------------------------------------------------------------ #
+
+    def _scenario_for(self, name: str, spec: ScenarioSpec) -> ScenarioAdapter:
+        """Build the scenario adapter for one configured scenario slice."""
+        return build_scenario(name, spec.params)
+
+    def _postprocess(
+        self,
+        *,
+        scenario: ScenarioAdapter,
+        sample: Sample,
+        stream: Optional[StreamResult],
+        error: Optional[str],
+        status: RecordStatus,
+    ) -> Tuple[Optional[Score], RecordStatus]:
+        """Score one response; performance never scores (returns ``(None, status)``)."""
+        return None, status
+
+    def _record_log(
+        self,
+        *,
+        scenario: ScenarioAdapter,
+        sample: Sample,
+        repeat: int,
+        status: RecordStatus,
+        error: Optional[str],
+        metrics: PerfMetrics,
+        state: CacheState,
+        score: Optional[Score],
+    ) -> None:
+        """Per-record log line; override for method-specific fields."""
+        if status is RecordStatus.OK:
+            self._log(
+                f"{scenario.name}/{sample.sample_id} r{repeat} "
+                f"ctx_tokens={metrics.input_context_tokens} | "
+                f"ttft={metrics.ttft_ms}ms e2e={metrics.e2e_ms}ms "
+                f"tps={metrics.gen_tps} mem={metrics.peak_memory_gb}GB"
+            )
+        elif status is RecordStatus.WARMUP:
+            self._log(
+                f"warmup {scenario.name} | ctx_tokens={metrics.input_context_tokens} "
+                f"ttft={metrics.ttft_ms}ms"
+            )
+        else:
+            self._log(
+                f"{status.value} {scenario.name} {sample.sample_id} r{repeat}: "
+                f"{error or state.note}"
+            )
+
+    def _finalize_extra(self, extra: Dict[str, Any]) -> Dict[str, Any]:
+        """Method-specific evidence added to ``RunWriter.finalize(extra=...)``.
+
+        Performance keeps the historical dict unchanged; accuracy adds the
+        test-set fingerprint and judge-dependency report so ``report.md`` can
+        name the exact rows/contract the run was scored with.
+        """
+        return extra
 
     def _estimate_requests(self) -> Optional[int]:
         """Measured-request count when every selected scenario has a fixed size.
@@ -735,9 +875,10 @@ class Orchestrator:
             temperature=0.0,
             seed=self.cfg.run.seed,
         )
-        thinking = self.cfg.run.thinking_mode
-        if thinking in ("disabled", "enabled"):
-            request.chat_template_kwargs = {"enable_thinking": thinking == "enabled"}
+        thinking_kwargs, thinking_label = thinking_control(self.cfg, model_id)
+        if thinking_kwargs:
+            request.chat_template_kwargs = dict(thinking_kwargs)
+        request.context_meta["thinking_control"] = thinking_label
         guard_reserve = (
             DECODE_GUARD_TOKEN_RESERVE if self.cfg.perf.decode_guard else 0
         )
@@ -746,12 +887,40 @@ class Orchestrator:
             # decode guard appended below.  They must NEVER be silently
             # truncated.
             declared = request.actual_prompt_tokens
-            self._apply_decode_guard(request)
+            # Strict input-token contract: the test set guarantees the target
+            # model's tokenizer counts exactly the bucket target, so the sample
+            # is only measured when actual == target (no ±10% band).
+            strict = bool(self.cfg.perf.strict_input_tokens)
+            if not strict:
+                self._apply_decode_guard(request)
+            # ``_apply_decode_guard`` appends a fixed +35-token user message.
+            # A strict set aligns the whole request to the bucket exactly, so
+            # the guard is intentionally NOT appended there; the long answer
+            # that makes the decode window trustworthy comes from the dataset
+            # task block plus ``max_tokens``.  Record the decision per sample
+            # so ``records.jsonl`` shows why the prompt has no guard.
+            request.context_meta["decode_guard_applied"] = bool(
+                request.context_meta.get("decode_guard")
+            )
+            if (
+                strict
+                and self.cfg.perf.decode_guard
+                and not self._strict_guard_note_issued
+            ):
+                message = (
+                    "strict input alignment: decode guard disabled for this test "
+                    "set (prompt tokens must equal the bucket target exactly; "
+                    "long output comes from the task block and max_tokens)"
+                )
+                self.stats.warnings.append(message)
+                self._log(f"NOTE: {message}")
+                self._strict_guard_note_issued = True
             # Tokenize the final messages+tools with the target model tokenizer.
-            # The count includes the chat template and decode guard, i.e. what
-            # the server will actually charge to the context window; it is the
-            # only sound basis for the window check and the 10% bucket
-            # tolerance (the declared value comes from the reference tokenizer).
+            # The count includes the chat template (and, in historical mode, the
+            # decode guard), i.e. what the server will actually charge to the
+            # context window; it is the only sound basis for the window check
+            # and the 10% bucket tolerance (the declared value comes from the
+            # reference tokenizer).
             tokenized: Optional[int] = None
             tokenize_started = time.perf_counter()
             try:
@@ -766,7 +935,9 @@ class Orchestrator:
                 request.context_meta["tokenize_error"] = (
                     f"{type(exc).__name__}: {exc}"
                 )
-                if not self._tokenize_warning_issued:
+                # In strict mode an unavailable tokenizer is a per-sample skip
+                # (raised below), not a run-wide fallback warning.
+                if not strict and not self._tokenize_warning_issued:
                     message = (
                         f"target tokenizer unavailable for {model_id}: {exc}; "
                         "falling back to declared tokens for the window check "
@@ -778,7 +949,13 @@ class Orchestrator:
             request.context_meta["tokenize_latency_ms"] = round(
                 (time.perf_counter() - tokenize_started) * 1000.0, 2
             )
-            if server_ctx:
+            bucket = sample.metadata.get("bucket") or request.context_meta.get("bucket")
+            # Window check first (lead-specified order): the tokenized count is
+            # the same value strict alignment compares, so an over-long sample
+            # is reported as a window problem, not as a token mismatch.  A
+            # strict sample without a tokenizer count cannot be window-checked
+            # here; it is skipped below with the tokenizer reason instead.
+            if server_ctx and (tokenized is not None or not strict):
                 request.context_meta["model_context_window"] = int(server_ctx)
                 if tokenized is not None:
                     room = (
@@ -816,20 +993,58 @@ class Orchestrator:
                         f"{int(actual_value) + reserve} exceeds context window "
                         f"{server_ctx} (not-testable; no silent truncation)"
                     )
-            bucket = sample.metadata.get("bucket") or request.context_meta.get("bucket")
-            bounds = tolerance_for_bucket(bucket, declared)
+            if strict:
+                # Enforce exact alignment *after* the window check: the sample
+                # must fit the model window before it can be measured, and any
+                # mismatch/unavailable tokenizer is a per-sample skip (never a
+                # run abort).  ``expected``/``got`` are kept verbatim so
+                # ``run.json.outcome.skipped`` is auditable.
+                label = self._cell_label(
+                    sample.dataset, self._context_length(sample)
+                )
+                trace = f"{scenario.name}/{label}/{sample.sample_id}"
+                if tokenized is None:
+                    raise SampleSkipped(
+                        "strict_input_tokens: tokenizer unavailable for "
+                        f"{model_id} ({trace})"
+                    )
+                strict_bounds = tolerance_for_bucket(
+                    bucket, declared, strict=True
+                )
+                if strict_bounds is None:
+                    raise SampleSkipped(
+                        f"strict_input_tokens: {trace} has no token target "
+                        "(bucket/declared missing)"
+                    )
+                strict_target = int(strict_bounds[0])
+                if tokenized != strict_target:
+                    raise SampleSkipped(
+                        f"strict_input_tokens: {trace} expected "
+                        f"{strict_target} got {tokenized}"
+                    )
+                request.context_meta["strict_input_tokens"] = True
+            bounds = tolerance_for_bucket(bucket, declared, strict=strict)
             if tokenized is not None and bounds is not None:
                 low, high = bounds
                 ok = low <= tokenized <= high
+                # Strict mode: the bucket target is authoritative (``declared``
+                # may come from a reference tokenizer and differ by a few tokens).
+                isl_target = (
+                    int(low)
+                    if strict
+                    else (int(declared) if declared is not None else None)
+                )
                 request.context_meta["isl_tolerance"] = {
-                    "target": int(declared) if declared is not None else None,
+                    "target": isl_target,
                     "low": low,
                     "high": high,
                     "actual": tokenized,
                     "ok": ok,
                 }
-            # No tokenizer-based skip: the sample is always measured, and the
-            # aggregate layer only uses actual counts inside the ±10% band.
+            # Historical (±10%) mode never skips on tokenizer counts: the sample
+            # is always measured and the aggregate layer only uses actual
+            # counts inside the band.  Strict mode has already validated
+            # alignment above (mismatches raise ``SampleSkipped``).
             self._request_cache[key] = request
             return request
         # Keep prompt + generation inside the model's context window.  The
@@ -867,10 +1082,13 @@ class Orchestrator:
                 request.truncated = True
                 request.context_meta["native_truncated"] = True
                 request.context_meta["model_context_window"] = server_ctx
-                if thinking in ("disabled", "enabled"):
-                    request.chat_template_kwargs = {
-                        "enable_thinking": thinking == "enabled"
-                    }
+                thinking_kwargs, thinking_label = thinking_control(
+                    self.cfg, model_id
+                )
+                request.chat_template_kwargs = (
+                    dict(thinking_kwargs) if thinking_kwargs else None
+                )
+                request.context_meta["thinking_control"] = thinking_label
         self._apply_decode_guard(request)
         self._request_cache[key] = request
         return request
@@ -943,10 +1161,11 @@ class Orchestrator:
             temperature=0.0,
             context_meta={"warmup": True},
         )
-        if self.cfg.run.thinking_mode in ("disabled", "enabled"):
-            request.chat_template_kwargs = {
-                "enable_thinking": self.cfg.run.thinking_mode == "enabled"
-            }
+        if self.cfg.run.thinking_mode in ("disabled", "enabled", "auto"):
+            thinking_kwargs, thinking_label = thinking_control(self.cfg, model_id)
+            if thinking_kwargs:
+                request.chat_template_kwargs = dict(thinking_kwargs)
+            request.context_meta["thinking_control"] = thinking_label
         for index in range(1, count + 1):
             started = time.perf_counter()
             try:
@@ -994,7 +1213,7 @@ class Orchestrator:
                 self._check_cancel()
                 if self._cap_reached():
                     return
-                scenario = build_scenario(name, spec.params)
+                scenario = self._scenario_for(name, spec)
                 try:
                     samples = self._load_samples(spec)
                 except Exception as exc:
@@ -1357,9 +1576,28 @@ class Orchestrator:
         first_sample = samples[0]
         warmup = self.cfg.run.warmup_requests
         if warmup:
-            try:
-                request = self._build_request(scenario, spec, model_id, first_sample, server_ctx)
-            except Exception as exc:
+            request = None
+            build_error: Optional[Exception] = None
+            for candidate in samples:
+                try:
+                    request = self._build_request(
+                        scenario, spec, model_id, candidate, server_ctx
+                    )
+                except SampleSkipped as exc:
+                    # Strict input-token alignment excludes this sample.  The
+                    # measured loop below records the per-sample skip; try the
+                    # next sample so the cell still gets its optional warmup.
+                    self._log(
+                        f"warmup: {candidate.sample_id} not eligible: {exc}"
+                    )
+                    continue
+                except Exception as exc:  # unchanged: build errors abort the cell
+                    build_error = exc
+                    break
+                first_sample = candidate
+                break
+            if build_error is not None:
+                exc = build_error
                 self._log(f"ERROR building warmup request: {exc}")
                 self.stats.skipped.append(f"{scenario.name}/{label}/warmup: {exc}")
                 self._record_abort_skips(
@@ -1372,30 +1610,36 @@ class Orchestrator:
                     reason=f"warmup request build failed: {exc}",
                 )
                 return
-            try:
-                for _ in range(warmup):
-                    self._execute(
-                        model_id,
-                        model_snapshot,
-                        scenario,
-                        sample=first_sample,
-                        request=request,
-                        repeat=-1,
-                        phase=Phase.WARMUP,
-                    )
-            except RunCancelled:
-                # A cancel during the optional per-cell warmup means no measured
-                # sample was taken: record every selected sample (AGENTS §13).
-                self._record_abort_skips(
-                    scenario,
-                    label,
-                    samples,
-                    start_index=0,
-                    start_repeat=0,
-                    repeats=repeats,
-                    reason="cancelled by user",
+            if request is None:
+                self._log(
+                    f"WARNING: no warmup-eligible sample in {scenario.name}/{label}; "
+                    "continuing without warmup (per-sample skips are recorded)"
                 )
-                raise
+            else:
+                try:
+                    for _ in range(warmup):
+                        self._execute(
+                            model_id,
+                            model_snapshot,
+                            scenario,
+                            sample=first_sample,
+                            request=request,
+                            repeat=-1,
+                            phase=Phase.WARMUP,
+                        )
+                except RunCancelled:
+                    # A cancel during the optional per-cell warmup means no measured
+                    # sample was taken: record every selected sample (AGENTS §13).
+                    self._record_abort_skips(
+                        scenario,
+                        label,
+                        samples,
+                        start_index=0,
+                        start_repeat=0,
+                        repeats=repeats,
+                        reason="cancelled by user",
+                    )
+                    raise
 
         current_sample_index = 0
         current_repeat = 0
@@ -1411,6 +1655,13 @@ class Orchestrator:
                     return
                 try:
                     request = self._build_request(scenario, spec, model_id, sample, server_ctx)
+                except SampleSkipped as exc:
+                    # Protocol-level per-sample skip (strict input-token
+                    # alignment): traceable in outcome.skipped, never measured,
+                    # never aborting the run (``fail_fast`` is not applied).
+                    self._log(f"SKIP {sample.sample_id}: {exc}")
+                    self.stats.skipped.append(str(exc))
+                    continue
                 except Exception as exc:
                     self._log(f"ERROR building request for {sample.sample_id}: {exc}")
                     self.stats.skipped.append(
@@ -1617,6 +1868,17 @@ class Orchestrator:
             self._log(f"WARNING: {message}")
             self._contamination_warning_issued = True
 
+        # Method hook: score the response and possibly demote the status
+        # (accuracy -> judge_error).  Runs after the measurement-validity
+        # decision and before the record is built; performance stays null.
+        score, status = self._postprocess(
+            scenario=scenario,
+            sample=sample,
+            stream=stream,
+            error=error,
+            status=status,
+        )
+
         input_context_chars = sum(len(m.content or "") for m in request.messages)
         metrics = PerfMetrics()
         if stream is not None:
@@ -1672,7 +1934,7 @@ class Orchestrator:
             request=request,
             response=self._to_raw_response(stream) if stream else RawResponse(),
             metrics=metrics,
-            score=None,  # performance mode: no accuracy scoring
+            score=score,
             cache=state,
             sample_meta=self._sample_meta(scenario, sample, request, trace),
         )
@@ -1693,23 +1955,22 @@ class Orchestrator:
                 "gen_tps": metrics.gen_tps,
                 "peak_rss_mb": metrics.peak_rss_mb,
                 "peak_memory_gb": metrics.peak_memory_gb,
+                # Additive: performance records keep None (no scoring).
+                "score": score.score if score else None,
+                "correct": score.correct if score else None,
             },
         )
 
-        if status is RecordStatus.OK:
-            self._log(
-                f"{scenario.name}/{sample.sample_id} r{repeat} "
-                f"ctx_tokens={metrics.input_context_tokens} | "
-                f"ttft={metrics.ttft_ms}ms e2e={metrics.e2e_ms}ms "
-                f"tps={metrics.gen_tps} mem={metrics.peak_memory_gb}GB"
-            )
-        elif status is RecordStatus.WARMUP:
-            self._log(
-                f"warmup {scenario.name} | ctx_tokens={metrics.input_context_tokens} "
-                f"ttft={metrics.ttft_ms}ms"
-            )
-        else:
-            self._log(f"{status.value} {scenario.name} {sample.sample_id} r{repeat}: {error or state.note}")
+        self._record_log(
+            scenario=scenario,
+            sample=sample,
+            repeat=repeat,
+            status=status,
+            error=error,
+            metrics=metrics,
+            state=state,
+            score=score,
+        )
         if self.cfg.run.fail_fast and status in (RecordStatus.ERROR, RecordStatus.TIMEOUT):
             raise RuntimeError(
                 f"fail_fast: {scenario.name}/{sample.sample_id} ended with {status.value}: {error}"

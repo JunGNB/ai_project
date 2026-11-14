@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>模型性能基准测试 · oMLX Console</title>
+  <title>模型基准测试（性能 / 精度） · oMLX Console</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
@@ -11,8 +11,8 @@
     <div class="brand">
       <div class="logo">MB</div>
       <div class="brand-text">
-        <h1>模型性能基准测试</h1>
-        <p class="sub">oMLX · 逐样本 TTFT / TG TPS / 峰值内存 / 输入上下文</p>
+        <h1>模型基准测试</h1>
+        <p class="sub">oMLX · 性能（TTFT / TG TPS / 峰值内存）与精度（确定性判题）双方法</p>
       </div>
     </div>
     <div class="top-actions">
@@ -26,6 +26,30 @@
 
   <main class="layout">
     <aside class="sidebar">
+      <section class="card method-card-section">
+        <div class="card-head">
+          <div>
+            <h2>测试方法</h2>
+            <p class="hint">性能测多快，精度测对不对；两种方法口径不同，不可混算。</p>
+          </div>
+          <span id="method-pill" class="pill soft">performance</span>
+        </div>
+        <div class="method-cards" role="radiogroup" aria-label="测试方法">
+          <button type="button" class="method-card active" data-method="performance"
+                  role="radio" aria-checked="true" title="性能测试：TTFT / TG TPS / 峰值内存 / 输入上下文">
+            <span class="method-title">性能测试</span>
+            <span class="method-desc">多快、占多少内存：TTFT / TG TPS / 峰值内存 / 输入上下文（不判分）</span>
+            <span class="method-fit">适用：速度、内存、缓存与吞吐对比</span>
+          </button>
+          <button type="button" class="method-card" data-method="accuracy"
+                  role="radio" aria-checked="false" title="精度测试：8 场景 × 250 样本，确定性判题">
+            <span class="method-title">精度测试</span>
+            <span class="method-desc">答得对不对：8 场景 × 250 = 2,000 样本，5 类确定性判题（无 LLM judge）</span>
+            <span class="method-fit">适用：bf16 / 量化的精度损失、同一样本集配对比较</span>
+          </button>
+        </div>
+      </section>
+
       <section class="card">
         <div class="card-head">
           <div>
@@ -59,44 +83,64 @@
       </section>
 
       <section class="card">
-        <div class="card-head"><h2>运行参数</h2><span class="pill soft">perf</span></div>
-        <div class="grid2">
-          <label class="field" title="对所选测试集下的每个场景分别生效">每个场景样本数
-            <input id="samples" type="number" min="1" placeholder="留空 = 全部" />
-          </label>
-          <label class="field">生成长度 max_tokens
-            <input id="max-tokens" type="number" min="1" placeholder="默认 50（OSL，可配置）" />
-          </label>
-          <label class="field">重复轮数
-            <input id="repeats" type="number" min="1" placeholder="默认 1" />
-          </label>
-          <label class="field">缓存模式
-            <select id="cache-mode">
-              <option value="cold">cold（推荐）</option>
-              <option value="warm">warm（诊断）</option>
-              <option value="none">none（诊断）</option>
-            </select>
-          </label>
-          <label class="field" title="默认开启：每个模型加载后发送 1 条丢弃短请求（短 prompt、max_tokens=8，仿 oMLX QUICK）以触发 JIT/Metal 编译。关闭后首个 measured 样本会包含冷启动，属非默认口径，结果不可与默认口径混算。">预热（丢弃）
-            <span class="check-line"><input id="warmup-enabled" type="checkbox" checked /> 模型加载后预热 1 次</span>
-          </label>
-          <label class="field span2">思考模式
-            <select id="thinking-mode">
-              <option value="disabled">disabled（默认）</option>
-              <option value="auto">auto（oMLX 默认）</option>
-              <option value="enabled">enabled</option>
-            </select>
-          </label>
-          <div class="field span2">上下文档位（可多选；不勾选 = 全部档位）
-            <div id="context-windows" class="ctx-windows"></div>
+        <div class="card-head"><h2>运行参数</h2><span id="params-pill" class="pill soft">perf</span></div>
+        <div id="perf-params">
+          <div class="grid2">
+            <label class="field" title="对所选测试集下的每个场景分别生效">每个场景样本数
+              <input id="samples" type="number" min="1" placeholder="留空 = 全部" />
+            </label>
+            <label class="field">生成长度 max_tokens
+              <input id="max-tokens" type="number" min="1" placeholder="留空 = 测试集声明（performance: 50）" />
+              <span class="hint" id="max-tokens-hint">留空 = 测试集声明的生成长度</span>
+            </label>
+            <label class="field">重复轮数
+              <input id="repeats" type="number" min="1" placeholder="默认 1" />
+            </label>
+            <label class="field">缓存模式
+              <select id="cache-mode">
+                <option value="cold">cold（推荐）</option>
+                <option value="warm">warm（诊断）</option>
+                <option value="none">none（诊断）</option>
+              </select>
+            </label>
+            <label class="field" title="默认开启：模型加载后发 1 条丢弃短请求（max_tokens=8）触发 JIT/编译；关闭后首个样本含冷启动，属非默认口径。">预热（丢弃）
+              <span class="check-line"><input id="warmup-enabled" type="checkbox" checked /> 模型加载后预热 1 次</span>
+            </label>
+            <label class="field span2">思考模式
+              <select id="thinking-mode">
+                <option value="disabled">disabled（默认）</option>
+                <option value="auto">auto（oMLX 默认）</option>
+                <option value="enabled">enabled</option>
+              </select>
+            </label>
+            <div class="field span2">上下文档位（可多选；不勾选 = 全部档位）
+              <div id="context-windows" class="ctx-windows"></div>
+            </div>
           </div>
+          <p class="hint">「每个场景样本数」按场景分别生效（留空 = 全部）；上下文档位只筛选样本；默认冷缓存，总测量数见下方计划。</p>
         </div>
-        <p class="hint">「每个场景样本数」对所选测试集下的每个场景分别生效（留空 = 全部可用样本；预构造样本按档位×语言分层抽取），总测量数见下方计划。
-          上下文档位只筛选样本，且只列出数据集实际存在的档位（performance 为 1K/8K/32K）；cell 始终按场景×数据集×档位聚合；默认冷缓存。</p>
+        <div id="accuracy-params" class="hidden">
+          <div class="grid2">
+            <label class="field" title="对所选精度测试集下的每个场景分别生效；留空 = 每场景全部 250 条固定样本">每个场景样本数
+              <input id="accuracy-samples" type="number" min="1" placeholder="留空 = 每场景全部 250" />
+            </label>
+            <div class="field">判题说明
+              <span class="accuracy-note">5 类确定性判题：mc_letter / ifeval / normalized_match / code_exec / tool_call；无 LLM judge、无人工评分。</span>
+            </div>
+            <div class="field span2">运行协议（固定）
+              <span class="accuracy-note">temperature=0 · top_p=1 · cold（清 hot+SSD）· repeats=1 · 无 decode guard</span>
+            </div>
+            <div class="field span2" title="全量耗时取决于模型/硬件；长上下文场景更慢">预计时间
+              <span id="accuracy-estimate-hint" class="accuracy-note">每场景 250 × 8 = 2,000 样本/模型；全量约 3h/模型。</span>
+            </div>
+          </div>
+          <p class="hint">生成长度取每行 <code>judge.max_new_tokens</code>；不提供 max_tokens / repeats / 缓存 / 档位参数。结果只与同一 testset（SHA-256 相同）的精度 run 比较。</p>
+        </div>
       </section>
 
       <section class="card start-card">
         <p id="estimate" class="estimate">请选择模型与数据集</p>
+        <p id="strict-hint" class="hint hidden"></p>
         <button id="start" class="btn primary block">开始测试</button>
       </section>
     </aside>
@@ -159,13 +203,15 @@
         <button class="tab active" data-tab="overall">整体结果</button>
         <button class="tab" data-tab="cells">数据集</button>
         <button class="tab" data-tab="samples">逐样本</button>
+        <button class="tab hidden" data-tab="errors">错误统计</button>
         <button class="tab" data-tab="environment">环境与配置</button>
         <button class="tab" data-tab="report">报告</button>
       </div>
       <div id="tab-overall" class="tab-panel">
         <div class="table-wrap">
           <table>
-            <thead><tr><th>模型</th><th>档位</th><th>数据集</th><th>样本</th><th>有效</th><th title="finish_reason=length（达到 max_tokens）的样本数；这些样本正常参与 TTFT/TG TPS/内存平均，TG TPS 按实际生成 token 计算">触顶</th><th title="TG TPS 被抑制的样本数（tool_calls/短解码窗口等）；原因见 records.jsonl">TG无效</th><th title="target tokenizer 实际 prompt 在 ±10% 带内的样本数（进入（±10%过滤）列）">ISL入带</th><th title="actual 在 ±10% 带外、仍测量但不进入（±10%过滤）列的样本数">ISL出带</th><th title="全样本口径：所有 measured+ok 样本（含 ISL 出带）的 TTFT 平均">TTFT ms</th><th title="全样本口径 TG TPS；括号为参与统计样本数/有效样本数">TG TPS</th><th title="±10%入带口径（跨 run 比较口径）：只统计 actual 在 target ±10% 带内的样本">TTFT ms（±10%过滤）</th><th title="±10%入带口径 TG TPS；括号为参与统计样本数/入带样本数">TG TPS（±10%过滤）</th><th title="oMLX 服务进程树 phys_footprint 峰值（含 Metal 分配）；oMLX 自带 benchmark 的 PeakMem 是 mlx.get_peak_memory() 的 Metal 峰值，通常低 0.4–0.9GB">峰值内存 GB</th><th>输入 token</th><th>状态</th></tr></thead>
+            <thead id="overall-head-perf"><tr><th>模型</th><th>档位</th><th>数据集</th><th>样本</th><th>有效</th><th title="finish_reason=length（达到 max_tokens）的样本数；这些样本正常参与 TTFT/TG TPS/内存平均，TG TPS 按实际生成 token 计算">触顶</th><th title="TG TPS 被抑制的样本数（tool_calls/短解码窗口等）；原因见 records.jsonl">TG无效</th><th title="TTFT 均值（measured+ok 样本）">TTFT ms</th><th title="TG TPS 均值；括号为参与统计数/有效数">TG TPS</th><th title="oMLX 服务进程树 phys_footprint 峰值（含 Metal 分配）；oMLX 自带 benchmark 的 PeakMem 是 mlx.get_peak_memory() 的 Metal 峰值，通常低 0.4–0.9GB">峰值内存 GB</th><th>输入 token</th><th>状态</th></tr></thead>
+            <thead id="overall-head-accuracy" class="hidden"><tr><th>模型</th><th title="已计分场景数">场景</th><th title="按语言剖面">语言</th><th title="数据集数">数据集</th><th>样本</th><th>有效</th><th title="n_scored = 有效（判题失败计 0 但仍在分母）">判分</th><th title="score==1 的样本数">正确</th><th title="响应为空/无法解析，计 0 分">格式失败</th><th title="判题器异常/依赖缺失，计 0 分">判题错误</th><th title="全部行平均（辅助口径）">均分</th><th title="0/1 判题族准确率（F1 场景不适用）">准确率</th><th>95%CI</th><th title="8 场景等权平均（结论口径）">宏平均</th></tr></thead>
             <tbody id="overall-body"></tbody>
           </table>
         </div>
@@ -173,7 +219,8 @@
       <div id="tab-cells" class="tab-panel hidden">
         <div class="table-wrap">
           <table>
-            <thead><tr><th>模型</th><th>数据集</th><th>档位</th><th>有效/样本</th><th title="finish_reason=length（达到 max_tokens）的样本数；正常参与平均">触顶</th><th title="TG TPS 被抑制的样本数">TG无效</th><th title="in-band 样本数（进入（±10%过滤）列）">ISL入带</th><th title="out-of-band 样本数（不进入（±10%过滤）列）">ISL出带</th><th title="全样本口径：所有 measured+ok 样本（含 ISL 出带）">TTFT ms</th><th title="全样本口径 TG TPS">TG TPS</th><th title="±10%入带口径（跨 run 比较口径）">TTFT ms（±10%过滤）</th><th title="±10%入带口径 TG TPS">TG TPS（±10%过滤）</th><th title="oMLX 服务进程树 phys_footprint 峰值（含 Metal 分配）；oMLX 自带 benchmark 的 PeakMem 是 mlx.get_peak_memory() 的 Metal 峰值，通常低 0.4–0.9GB">峰值内存 GB</th><th>输入 token</th><th>状态</th></tr></thead>
+            <thead id="cells-head-perf"><tr><th>模型</th><th>数据集</th><th>档位</th><th>有效/样本</th><th title="finish_reason=length（达到 max_tokens）的样本数；正常参与平均">触顶</th><th title="TG TPS 被抑制的样本数">TG无效</th><th>TTFT ms</th><th>TG TPS</th><th title="oMLX 服务进程树 phys_footprint 峰值（含 Metal 分配）；oMLX 自带 benchmark 的 PeakMem 是 mlx.get_peak_memory() 的 Metal 峰值，通常低 0.4–0.9GB">峰值内存 GB</th><th>输入 token</th><th>状态</th></tr></thead>
+            <thead id="cells-head-accuracy" class="hidden"><tr><th>模型</th><th>场景</th><th>数据集</th><th>样本</th><th>有效</th><th>均分</th><th>准确率</th><th>95%CI</th><th>判题族</th><th>指标</th><th title="判题器异常/依赖缺失（计 0 分并单列）">judge_error</th></tr></thead>
             <tbody id="cells-body"></tbody>
           </table>
         </div>
@@ -189,12 +236,14 @@
             <option value="error">error</option>
             <option value="timeout">timeout</option>
             <option value="contaminated">contaminated</option>
+            <option value="judge_error">judge_error</option>
           </select>
           <span id="sample-count" class="hint"></span>
         </div>
         <div class="table-wrap tall">
           <table>
-            <thead><tr><th>模型</th><th>数据集</th><th>样本</th><th>输入 token</th><th>输入字符</th><th>TTFT ms</th><th>TG TPS</th><th title="oMLX 服务进程树 phys_footprint 峰值（含 Metal 分配）；oMLX 自带 benchmark 的 PeakMem 是 mlx.get_peak_memory() 的 Metal 峰值，通常低 0.4–0.9GB">峰值内存 GB</th><th title="length=达到 max_tokens；stop=模型自然结束。两者都保留并参与平均">finish</th><th>状态</th></tr></thead>
+            <thead id="samples-head-perf"><tr><th>模型</th><th>数据集</th><th>样本</th><th>输入 token</th><th>输入字符</th><th>TTFT ms</th><th>TG TPS</th><th title="oMLX 服务进程树 phys_footprint 峰值（含 Metal 分配）；oMLX 自带 benchmark 的 PeakMem 是 mlx.get_peak_memory() 的 Metal 峰值，通常低 0.4–0.9GB">峰值内存 GB</th><th title="length=达到 max_tokens；stop=模型自然结束。两者都保留并参与平均">finish</th><th>状态</th></tr></thead>
+            <thead id="samples-head-accuracy" class="hidden"><tr><th>模型</th><th>场景</th><th>数据集</th><th>样本</th><th>语言</th><th>判题</th><th>得分</th><th>正确</th><th>格式失败</th><th>判题错误</th><th>max_new_tokens</th><th>耗时 ms</th><th>状态</th></tr></thead>
             <tbody id="samples-body"></tbody>
           </table>
         </div>
@@ -203,6 +252,9 @@
           <span id="sample-page" class="hint"></span>
           <button id="sample-next" class="btn ghost">下一页</button>
         </div>
+      </div>
+      <div id="tab-errors" class="tab-panel hidden">
+        <div id="errors-body" class="errors-body"></div>
       </div>
       <div id="tab-environment" class="tab-panel hidden">
         <div id="environment-body" class="env-grid"></div>
@@ -234,7 +286,7 @@
         <table>
           <thead><tr>
             <th class="check-col"><input id="sample-modal-checkall" type="checkbox" title="全选当前筛选结果"></th>
-            <th>样本 id</th><th>问题</th><th>上下文字符</th>
+            <th>样本 id</th><th>问题</th><th title="构建期参考 tokenizer 估算的 prompt 内容 token；performance 集严格对齐后即为档位目标">上下文 token</th>
           </tr></thead>
           <tbody id="sample-modal-list"></tbody>
         </table>

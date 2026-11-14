@@ -1,12 +1,16 @@
 # 测试系统验证与确认计划（V&V）
 
-> **状态**：current ｜ **版本**：v1.2（2026-11-10；v1.2 固定样本/actual 记录/±10% 入带聚合，
-> 新增 V-12/V-13）｜ **适用**：`modelbench` 0.3.x
+> **状态**：current ｜ **版本**：v1.4（2026-11-11；双方法：新增精度判题/协议/聚合/配对/隔离
+> 判据 V-14…V-17，对齐 [22-accuracy-test-plan.md](../spec/22-accuracy-test-plan.md) §7 AC-A1…AC-A10）｜
+> **适用**：`modelbench` 0.3.x 双方法 `method=performance|accuracy`
 > （bundle schema `3.0` / index schema `2.0` / 平铺 `output/runs/<run_id>/`）｜
 > **读者**：维护者、独立验证者（verifier）、发布负责人、AI Agent ｜
-> **范围**：**被测对象是本基准测试系统自身**（runner/缓存/指标/落盘/索引/CLI/Web），
-> 不是被测模型；模型性能口径见 [21-test-plan.md](../spec/21-test-plan.md) 与
-> [20-methodology.md](../spec/20-methodology.md)。验收标准与 TEST_PLAN §7 AC-1…AC-11 同源。
+> **范围**：**被测对象是本基准测试系统自身**（runner/缓存/指标/判题/落盘/索引/CLI/Web），
+> 不是被测模型；性能口径见 [21-test-plan.md](../spec/21-test-plan.md) 与
+> [20-methodology.md](../spec/20-methodology.md)，精度口径见
+> [22-accuracy-test-plan.md](../spec/22-accuracy-test-plan.md) 与
+> [../design/32-method-architecture.md](../design/32-method-architecture.md)。验收标准与
+> TEST_PLAN §7 AC-1…AC-11、ACCURACY_PLAN §7 AC-A1…AC-A10 同源。
 
 ## 1. 目的
 
@@ -21,12 +25,15 @@
 | 对象 | 主要风险 | 级别 |
 |---|---|---|
 | `application/benchmark.py`（执行/缓存/重试/取消/窗口判定） | 污染/少测/静默截断/口径漂移 | P0 |
+| `application/accuracy.py` + `domain/judges/`（精度编排/判题） | 判题不确定/`judge_error` 被剔除/协议漂移/依赖静默缺失 | P0 |
+| `domain/accuracy_metrics.py`（精度判分归一/聚合/配对） | 分母错、宏平均错、CI/配对统计错 | P0 |
+| `application/methods.py`（方法分派/协议强制） | 方法串味、协议未强制、未知方法被猜 | P0 |
 | `domain/metrics.py`（指标/聚合/TG TPS 有效性） | 非法 TPS、跨档合并、覆盖率缺失 | P0 |
 | `domain/context_tolerance.py` + tokenize（actual ISL） | 容差边界错、失败静默 | P0 |
-| `adapters/storage/{writer,blobstore,catalog,tools}.py` | 证据链断裂、索引/verify 失真 | P0 |
+| `adapters/storage/{writer,accuracy_output,blobstore,catalog,tools}.py` | 证据链断裂、索引/verify/rebuild 失真 | P0 |
 | `application/locking.py`（双锁） | 并发 run 互相驱逐模型 | P0 |
-| `interfaces/cli.py`、`interfaces/web/*` | 计划/展示与事实不符 | P1 |
-| `tool/dataset/*`（测试集构建） | 样本/声明 token 不可复现 | P1 |
+| `interfaces/cli.py`、`interfaces/web/*` | 计划/展示与事实不符、方法参数混用 | P1 |
+| `tool/dataset/*`（测试集构建） | 样本/声明 token/判题契约不可复现 | P1 |
 | 文档与文档契约 | 文档承诺与实现不一致 | P1 |
 
 ## 3. 验证方法（按成本从低到高）
@@ -43,6 +50,7 @@
 | M8 | Web 安全负例 | 写端点 Origin/Host 校验：跨站 Origin → 403、同源/无 Origin → 放行 | `pytest test/test_web_console.py` + curl 手工验证（记录命令/响应码） |
 | M9 | 后端结构契约 | `AppBackend` 必需方法齐全且可调用（鸭子类型） | `pytest test/test_core.py -k backend_implements_application_port_contract`；`backend_contract_errors(OMLXBackend()) == []` |
 | M10 | 迁移记录 schema | 新迁移件 records `schema_version=3.0` 且有 `sample_meta.migrated_from_schema`；旧迁移件允许 2.1 legacy | 检查 `tool/migrate/legacy_v2_to_v3.py` 输出 + 抽读 `records.jsonl` |
+| M11 | 精度全链路（fake server） | 方法分派/判题/冷缓存/超窗/判分产物/配对分析 | `pytest test/test_accuracy_run.py test/test_accuracy_metrics.py test/test_accuracy_analysis.py test/test_judges.py` |
 
 ## 4. 环境矩阵
 
@@ -79,9 +87,12 @@ V&V 自身的附加判据：
 | V-9 | Web 写端点同源防护 | 所有 `POST`（estimate/run/models sync/jobs cancel/runs reveal/output reveal/testsets reveal/index rebuild）在 `do_POST` 最前面校验 Origin：带 Origin 时必须为 `http`/`https` 且 netloc == `Host`（含端口），否则 403；无 Origin 的 curl/CLI 请求放行；**这不等于鉴权**，`--allow-external` 仍不得用于不可信网络 |
 | V-10 | 后端结构契约 | `REQUIRED_BACKEND_METHODS` 全部存在且可调用：`backend_contract_errors(OMLXBackend()) == []`；`test_core` 的 `test_omlx_backend_implements_application_port_contract` 通过；鸭子类型检查不要求继承 ABC（Orchestrator 端口外能力缺口仍见 ARCHITECTURE §8.2/T-004） |
 | V-11 | 迁移记录版本 | 新迁移件每条 record `schema_version=3.0` 且 `sample_meta.migrated_from_schema` 非空；旧迁移件允许 2.1（历史不改写），不得据单条 record 版本误判 bundle 布局 |
-
 | V-12 | 固定样本/SHA | 所有 run 引用同一 `testset.jsonl` SHA + manifest；不存在 per-model 构造/运行时裁剪补齐；跨设备/跨系统比较符合 [../spec/13-testset-portability.md](../spec/13-testset-portability.md) 的准入条件 |
 | V-13 | 样本量充分性 | 每个 cell/overall 报告 `n_isl_in_band`；in-band 样本不足以支撑均值时显式标记 `insufficient_samples`，不得静默当作有效结论 |
+| V-14 | 判题确定性与 gold 自检 | 同一响应重复调用 `domain/judges.evaluate` 结果逐位一致（`pytest test/test_judges.py`）；`tool/system/validate_judges.py` 的 gold 正例 + negative controls 全部 PASS；判题器无网络/无 LLM/不读外部状态；任一判题异常转 `judge_error`（0 分、留在分母）而不中断 run |
+| V-15 | 精度聚合可复算与协议 | `aggregates.json` 的 accuracy `overall/cells`（`n_scored`/`n_correct`/`n_judge_error`/`n_format_failure`/`n_missing_score`/`n_scenarios_scored`/`macro_score`/`micro_score`/CI/`by_language`）可由 `records.jsonl` 复算；`n_scored = n_valid = n_ok + judge_error`；每条 measured 记录 `temperature=0`/`top_p=1`/无 decode guard/`cache.mode=cold`/`cached_tokens==0`/`max_tokens==judge.max_new_tokens`；`verify` 的精度分支不套用 gen_tps/ISL 检查 |
+| V-16 | 精度样本 SHA 与配对可比性 | 两个 accuracy run 的 `batch.json.inputs.testset.sha256` 与 `judge_contract_version` 一致才可配对；`analyze --paired --method accuracy` 对样本不齐/未判分/判题族不一致显式报错；Δpp/McNemar（0/1）/配对 bootstrap（F1）/Holm 校正口径与 [22-accuracy-test-plan.md](../spec/22-accuracy-test-plan.md) §4 一致；噪声基线（`--noise-baseline-pp`）显式给出 |
+| V-17 | 双方法隔离 | 性能 run `score` 恒 null、`aggregates` 为性能形状；精度 run 独立 `run_id`（`__accuracy__`）、`run.json.method="accuracy"`、`aggregates` 为精度形状；`verify`/`rebuild`/`analyze` 对未知/混用方法报错；两种方法不共享分数或合并平均（`test_accuracy_run.py` + `test_results.py`） |
 
 ## 6. 再验证触发条件（任一命中必须重跑 §3 M2 + M3，M5 视风险）
 
@@ -92,7 +103,11 @@ V&V 自身的附加判据：
 5. 数据集重建（`testset.jsonl`/manifest SHA 变化）；
 6. 依赖升级（httpx/pydantic/psutil/openpyxl 等）或 Python 版本变化；
 7. Web 路由/安全校验（Origin/Host）、`application/ports.py` 结构契约、迁移器输出 schema 变更；
-8. 任何 P0 缺陷修复后。
+8. **方法分派/精度链路变化**：`application/methods.py`、`AccuracyOrchestrator`、`domain/judges/`
+   判题算法/依赖、`domain/accuracy_metrics.py` 聚合/CI/配对、`accuracy_output` 投影、
+   `--method`/`--noise-baseline-pp` 语义、精度 testset 或 judge 契约版本变化；
+9. 精度可选依赖（`[eval]`）版本/可得性变化，或判题器 gold 自检基线变化；
+10. 任何 P0 缺陷修复后。
 
 ## 7. 证据留存
 
@@ -104,6 +119,7 @@ V&V 自身的附加判据：
 | 校验结果 | `./modelbench verify --json` 输出 | 附在任务 note 或评审报告 |
 | 独立复核 | 评审报告（如 `reports/review/*.md`） | 与任务/commit 关联 |
 | 任务记录 | `harness/tasks/` 下 T-XXX.json 的 `notes`（含 run_id 与命令） | 随任务板（本地，不提交） |
+| 精度判题证据 | `tool/system/validate_judges.py` 输出（`RESULT: PASS`）、`pytest test/test_judges.py`、fake-server e2e 的精度 bundle（`aggregates.json`/`records.jsonl` 复算表） | 随任务 note / `docs/records/` |
 
 ## 8. 角色与独立性
 
@@ -117,8 +133,11 @@ V&V 自身的附加判据：
 ## 9. 已知局限（如实说明）
 
 1. fake-server 只能证明协议/编排正确，不能证明真实 oMLX 的时序/内存行为；
-2. live smoke 单次小样本（`--samples 1`）不构成性能结论，只验证链路；
-3. 本计划不覆盖"模型能力"验证（判分器未接入 run）；
+2. live smoke 单次小样本（`--samples 1`）不构成性能结论，也不构成精度结论，只验证链路；
+3. 本计划**不覆盖模型能力结论**：精度方法已接入 run（判题/聚合/配对可验证），但"模型 A 比 B
+   准确"这类结论仍取决于固定样本/统计口径，需按 [../spec/13-testset-portability.md](../spec/13-testset-portability.md)
+   与 [22-accuracy-test-plan.md](../spec/22-accuracy-test-plan.md) 的准入条件引用；本次实现未做
+   真实 oMLX 全量精度 run，端到端证据来自 fake server；
 4. 10 样本/格的统计稳定性不足以支撑 p95/p99 断言（见 TEST_PLAN §8 第 10 条）；
 5. 双锁依赖 OS 文件锁；不支持文件锁的平台上系统直接拒绝启动（fail-closed）；
 6. actual ISL 不触发跳过：所有能测样本都 measured，均值只使用 ±10% 入带样本；出带样本保留
@@ -134,3 +153,4 @@ V&V 自身的附加判据：
 | 2026-11-10 | v1.1 | 新增 Web 同源防护（V-9）、后端结构契约（V-10）、迁移 schema（V-11）判据 |
 | 2026-11-10 | v1.2 | 口径改为固定一套样本 + actual 记录 + ±10% 入带聚合；新增 V-12（固定样本/SHA）与 V-13（样本量充分性）；AC 对齐 AC-1…AC-11 |
 | 2026-11-10 | v1.3 | `n_measured` 口径改为全部 measured 记录（error/timeout 入账）+ `n_ok` 判据（AC-2）；V-7 白名单表述对齐 `docs_contract.py` 实际清单 |
+| 2026-11-11 | v1.4 | 双方法：验证对象/方法（M11）补精度；新增 V-14 判题确定性、V-15 精度聚合可复算与协议、V-16 精度样本 SHA/配对可比性、V-17 双方法隔离；再验证触发与证据留存同步 |

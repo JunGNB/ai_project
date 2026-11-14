@@ -14,26 +14,26 @@
 - 输入 prompt 使用数据集样本的**预构造 messages/tools**（`dataset/test/performance`），
   不做渲染/拼接/填充；`RequestSpec.actual_prompt_tokens` 取样本声明的 tokens
   （参考 tokenizer 的**声明值**，仍保留作对照）；
-- **实际输入大小（actual ISL，仅记录/聚合用，不驱动跳过）**：请求前用目标模型 `POST /v1/tokenize`
-  对**最终 messages + tools（含 chat template 与 decode guard）**计数，写入
+- **实际输入大小（actual ISL，strict 集）**：请求前用目标模型 `POST /v1/tokenize`
+  对**最终 messages（strict 集不含 decode guard）**计数，写入
   `request.tokenized_prompt_tokens`，并在 `request.context_meta.isl_tolerance` 记录
   `{target, low, high, actual, ok}`，用 `request.context_meta.window_check_basis`
-  （`tokenized`/`declared`）说明窗口判定依据。**所有档位同一 ±10% 带**：1K 921–1,126、
-  8K 7,372–9,011、32K 29,491–36,044。该值用于 **(a)** 记录 actual 与入带/出带
-  （`samples.csv.isl_band`、`n_isl_in_band`/`n_isl_out_of_band`）与 **(b)** 模型窗口判定；
-  **不会因 tokenizer/actual 偏差提前跳过**——只有窗口不足（not-testable）或请求失败才 skip，
-  其余样本都 measured；出带样本保留在 records/samples.csv，不进「（±10%过滤）」均值，
-  但计入默认的全样本均值（`perf_all`，见 §4 双口径聚合）；
+  （`tokenized`/`declared`）说明窗口判定依据。**strict 集（默认 `performance`）长度 0 容差**：
+  `low = high = target`（1K 1,024 / 8K 8,192 / 32K 32,768），`tokenized_prompt_tokens != bucket`
+  或 tokenize 失败 → 该样本 skip 进 `run.json.outcome.skipped`（原因带 expected/got），
+  不再有入带/出带与误差统计；长度由运行前 `align.py` 按目标模型 tokenizer 重建同一设计保证
+  （见 [11-performance-testset.md](11-performance-testset.md) §4）。**非 strict 集**（历史/精度口径）
+  仍为 ±10% 带（1K 921–1,126、8K 7,372–9,011、32K 29,491–36,044），actual 不驱动跳过，
+  出带样本保留但不进「（±10%过滤）」均值、计入 `perf_all`；
 - **tokenize 在测量窗口之外**：流程是 `tokenize`（目标 tokenizer，耗时记入
   `request.context_meta.tokenize_latency_ms`）→ **清 hot+SSD 缓存** → measured 请求。
   测量窗口（`t0`…`t_end`，用于 TTFT/TPS/内存）从清缓存后的请求开始，
   **tokenize 耗时不计入 TTFT/TPS/内存**；由于缓存清理在 tokenize **之后**，tokenize 自身
   产生的缓存/预热影响不会带入测量。32K 首次 tokenize 约 80ms，后续客户端按 prompt 缓存复用，
   240 条/模型总开销约数秒。
-- 预构造样本若**实际 token + max_tokens 50 + 安全边距 128** 超过模型窗口，该样本**跳过**并
-  写入 `run.json.outcome.skipped`（not-testable，不静默截断）；tokenize 失败时回退
-  `声明 tokens + max_tokens + context_safety_margin(128) + decode_guard_reserve(64)`（默认 50+128+64=242）估算并记
-  warning。仅 legacy/自定义样本才按头 70% + 尾 30% 截断，并记录 `truncated/truncation_ratio`；
+- 预构造样本若**实际 token + max_tokens(50) + 安全边距 128** 超过模型窗口，该样本**跳过**并
+  写入 `run.json.outcome.skipped`（not-testable，不静默截断）；strict 集不做 70%/30% 截断，
+  tokenize 失败即 skip（不静默回退）；
 - `cached_tokens` 来自服务端 `usage.prompt_tokens_details.cached_tokens`，用于缓存污染检测。
 
 ---
@@ -69,7 +69,7 @@
 
 **为什么需要 `max_tokens` 下限 + decode guard**：旧方案里准确性短答案（1–3 token）会让
 `gen_tps/tpot` 按约定置空。性能测试不再判分，因此统一使用 `perf.max_tokens`
-（默认 **50**，CLI/Web 可配置）。达到 `max_tokens`（`finish_reason=length`）**不是丢弃**：
+（配置默认 50；测试集可用 `max_tokens` 声明自己的 OSL，默认性能集声明 **50**；CLI/Web 显式覆盖优先）。达到 `max_tokens`（`finish_reason=length`）**不是丢弃**：
 样本照常参与 TTFT/内存/吞吐聚合，`gen_tps/tpot` 用实际生成的 `completion_tokens`
 计算到停止前的解码窗口，绝不按上限外推。
 但仅设 `max_tokens` 不够：性能样本常以 `Answer:` 结尾（LongBench v2 选择题），模型会
@@ -100,7 +100,6 @@
 
 抑制不计入分母：`Distribution.n` 与报告里的 `mean (n/有效数)` 显示真实覆盖，
 `aggregates.*.n_gen_tps_invalid` 给出被抑制样本数；**不做插补、不回收异常值、不按上限外推**。
-历史 `throughput` 合成探针已不在默认测试集中，`synthetic` 适配器仅为 legacy 兼容保留。
 
 **工具循环**：性能 run **不执行工具循环、不评工具正确性**。预构造的 agentic 场景
 （general_agent/search_agent）只发送一次原始请求：`tools` 只带目标请求自身定义
@@ -224,34 +223,28 @@ token 用量、错误文本）才能解释"为什么这个模型的平均值是�
      [11-performance-testset.md](11-performance-testset.md) §4.4）定标，是数据集声明依据；
      记录在 `request.actual_prompt_tokens`，仅作对照，**不再用于窗口判定**。
      `perf.context_windows`（legacy/诊断）仍按声明值筛选样本。
-  2. **实际值（actual ISL，记录/聚合用）**：请求前用目标模型 `POST /v1/tokenize` 对**最终
-     messages + tools（含 chat template 与 decode guard）**计数，写入
+  2. **实际值（actual ISL，strict 集 0 容差）**：请求前用目标模型 `POST /v1/tokenize` 对**最终
+     messages（strict 集不含 decode guard）**计数，写入
      `request.tokenized_prompt_tokens`，并在 `request.context_meta.isl_tolerance` 记录
-     `{target, low, high, actual, ok}`（`window_check_basis=tokenized`；tokenize 失败回退
-     `declared`）。**所有档位同一 ±10% 带**：**1K 921–1,126**、**8K 7,372–9,011**、
-     **32K 29,491–36,044**（target=1,024/8,192/32,768）。该值只用于 (a) 记录 actual 与
-     `samples.csv.isl_band` 入带/出带、(b) 模型窗口判定；**不用于跳过**——所有能测样本都
-     measured，只有窗口不足/请求失败才 skip。tokenize 失败时无法计算 actual，回退
-     `声明 tokens + max_tokens + 128 + decode_guard_reserve`（默认 242）做窗口判定并 warning。
+     `{target, low, high, actual, ok}`（`window_check_basis=tokenized`）。**strict 集**
+     （默认 `performance`）：`low = high = target`（1,024/8,192/32,768），不等或 tokenize 失败即
+     skip 进 `run.json.outcome.skipped`（expected/got），不做误差统计、不做运行期裁剪；
+     `align.py` 运行前已按目标 tokenizer 重建同一设计。**非 strict 集**：±10% 带
+     （1K 921–1,126、8K 7,372–9,011、32K 29,491–36,044），actual 不驱动跳过。
   3. **记录口径（服务端 usage）**：`metrics.input_context_tokens` 来自 `usage.prompt_tokens`
      （缺失时回落 `tokenized_prompt_tokens`/声明值），代表目标模型实际看到的输入大小；
      它与 `request.tokenized_prompt_tokens` 的差值 ≈ chat template/服务端预处理差异
-     （本机 ±2 token 量级），与 `request.actual_prompt_tokens`（cl100k 声明值）的差值
-     = tokenizer 计数差 + decode guard + template（分组件见 §2），由构造侧预算模型校准吸收，
-     属预期协议开销，不是 tokenizer 误差。
+     （本机 ±2 token 量级）；strict 集要求 `tokenized_prompt_tokens == bucket`，
+     因此 `input_context_tokens` 与目标长度的差只来自服务端 usage 口径差异（对照而非误差）。
 
-**为什么固定一套样本、却在运行时记录 actual 并按 ±10% 带聚合**：样本构造阶段用**通用
-cl100k tokenizer** 把**内容 token** 控制在**校准预算** ±5%（预算 = `(bucket − RESERVE)/INFL`，
-RESERVE 为固定渲染预留 270（tools 行）/90（纯文本行），INFL 为内容类型膨胀系数实测中位数：代码 1.07、
-数学 1.15、长文 1.24、非拉丁语种 0.50–0.94；校准证据 run `20261110T112641Z-8349`），保证
-240 条样本可逐字节复现并跨设备复用，同时把最常见的跨 tokenizer 计数差吸收进构造侧；但残余
-差异仍存在（不同模型 tokenizer 对同一文本的计数可差数倍）。因此：**不因为 actual 偏差跳过**
-（否则同一套样本在不同模型上就
-不可比），而是记录 actual、双口径聚合：默认全样本均值（`perf_all`，含出带）+
-「（±10%过滤）」入带均值（`perf`，跨 run 比较口径）、出带样本保留不丢，
-并报告 actual 分布与入带/出带计数。构造 ±5% vs 运行 ±10% 的完整推导见
-[11-performance-testset.md](11-performance-testset.md) §4.5（单一事实源）；跨系统比较准入见
-[13-testset-portability.md](13-testset-portability.md)。
+**为什么"设计固定 + 运行前按目标 tokenizer 严格对齐"**：样本设计（target 集合、单元流、
+任务块、抽样 seed）一次定稿、全模型复用；长度则是**目标模型 tokenizer 的函数**——同一文本在不同
+tokenizer 下可差数倍，所以跨模型的"严格 1K/8K/32K"必须逐模型构造。做法：构建期用**通用 cl100k**
+（非任何被测模型）产出基线并定稿设计指纹；运行前由 `tool/dataset/performance/align.py` 读同一
+设计 + `dataset/raw`，按目标模型 tokenizer 重建 240 行并逐条校验 `prompt_tokens == bucket`
+（容差 0），失败则换 reserve 重试、最终失败即报错退出；runner 发送前再复核一次，不等即 skip。
+因此不存在 ±10% 带、出带样本与"误差统计"；跨模型比较的凭据是设计指纹 + 对齐报告（见
+[13-testset-portability.md](13-testset-portability.md)），而不是同一个 testset 文件 SHA。
 
 - **窗口判定**：预构造样本原样发送、不截断；用**实际值**校验
   `tokenized_prompt_tokens + max_tokens 50 + 安全边距 128 > model_context_window` → 该行
@@ -283,19 +276,46 @@ RESERVE 为固定渲染预留 270（tools 行）/90（纯文本行），INFL 为
 
 ---
 
-## 6. 判分（当前不参与运行）
+## 6. 判分（按测试方法）
 
-性能测试**不做准确性判分**：runner 不再调用 `ScenarioAdapter.score`，
-`SampleRecord.score` 恒为 null，summary 不输出 accuracy/CI。
+`run.json.method` 决定是否判分；两种方法**不共用同一份判分/聚合口径**。
 
-`src/modelbench/domain/evaluators/` 与各场景的 `score()` 作为领域能力保留，
-供未来恢复准确性测试或离线复核使用；本测试不加载、不执行判分器（避免代码执行类判分的
-额外开销与风险）。
+### 6.1 性能方法（`method=performance`）：不判分
 
-精度数据侧已有隐藏离线资产 `dataset/test/accuracy/testset.jsonl`（2,000 行 = 8 × 250），
-但**不接入 run**：`manifest.status=offline-asset`、`runner=not wired`、`hidden=true`，
-且没有 `testset.yaml`，不会出现在 Web/CLI 测试集列表。在接入并跑出独立 run_id 前，
-不得引用任何精度分数。
+性能测试**不做准确性判分**：runner 不调用判分器，`SampleRecord.score` 恒为 `null`，
+聚合不输出 accuracy/Wilson CI。`src/modelbench/domain/evaluators/` 与各场景的 `score()`
+作为领域能力保留（离线复核/未来后端），性能 run **不加载、不执行**判分器（避免代码执行类
+判分的额外开销与风险）。性能测的是"多快、占多少内存"，不是"答得对不对"。
+
+### 6.2 精度方法（`method=accuracy`）：逐样本确定性判分
+
+精度 run 对每个样本的响应调用 `src/modelbench/domain/judges/` 的 **5 类确定性判题族**
+（`mc_letter`/`ifeval`/`normalized_match`/`code_exec`/`tool_call`，判题实现单一事实源；
+无 LLM judge、无网络、无人工评分），逐条落 `records[].score`。判定与判定边界：
+
+- **协议（固定）**：`cold` 缓存、`temperature=0`、`top_p=1`、**无 decode guard**、
+  `repeats=1`、传输/HTTP 错误重试 1 次；生成长度取每行 `judge.max_new_tokens`。
+- **判题失败**：`status=judge_error`，**计 0 分且保留在分母**（不得剔除，否则分数虚高）；
+  空响应/无法解析 → `format_failure=true`、计 0 分并单列格式失败率。
+- **指标**（完整定义与验收见 [22-accuracy-test-plan.md](22-accuracy-test-plan.md) §4）：
+  - **场景分** = 该场景判分行均分（8 场景等权，每场景先聚合自身数据集）；
+  - **宏平均** = 8 场景分等权平均（**结论口径**，`macro_score`）；微平均（全行均值）仅辅助；
+  - **0/1 判题族**用 Wilson 95% CI，F1/混合用正态近似（`n<2` 为 null）；
+  - **配对分析**（bf16 vs 量化，同一 testset SHA + 同一 judge 契约版本）：场景 Δ(pp)、
+    精确 McNemar（0/1）、配对 bootstrap（F1）、8 场景 Holm 校正；样本不齐/判题族不一致必须
+    显式报错，不静默丢弃；
+  - 错误/质量计数：`n_scored`（= 有效判分分母）、`n_correct`、`n_error`、`n_timeout`、
+    `n_judge_error`、`n_format_failure`、`n_skipped(over_window)`，可与分母对账。
+- **判题依赖**：`ifeval` 需要官方 checker（`absl-py`/`nltk`/`langdetect`/`immutabledict`），
+  中文 F1/ROUGE 需要 `jieba`/`rouge`，均由 `pip install -e ".[eval]"` 提供。缺失时**不静默
+  给分**：run 启动检查本次测试集实际用到的判题族，写 `run.json.outcome.warnings`（含缺包名），
+  相关样本 `judge_error`；不把缺依赖的场景排除出分母。安装见
+  [../guides/40-install.md](../guides/40-install.md) §6。
+- **不混算**：精度分数不得与性能指标相乘/加权成综合分，也不与性能 run 混算；精度 run 使用
+  独立 `run_id`（`__accuracy__` 段）。
+
+实现与产物形状见 [../design/32-method-architecture.md](../design/32-method-architecture.md)
+与 [../design/31-output-contract.md](../design/31-output-contract.md) §4.4–§4.6。
 
 ---
 
@@ -383,8 +403,11 @@ RESERVE 为固定渲染预留 270（tools 行）/90（纯文本行），INFL 为
 ## 10. 已知限制
 
 1. **并发**：本系统顺序发请求，测的是单请求性能；并发吞吐需扩展（如异步 worker）。
-2. **准确性**：当前性能测试不判分；精度 testset 是离线资产（未接入 runner/判题），
-   模型"答得好不好"不在本测试结论范围内。
+2. **准确性**：按方法区分——性能方法不判分（`score` 恒 null）；精度方法已作为独立
+   `method=accuracy` 接入（5 类确定性判题、`testset.yaml`、独立 run_id），其口径与验证见
+   [22-accuracy-test-plan.md](22-accuracy-test-plan.md) 与
+   [../design/32-method-architecture.md](../design/32-method-architecture.md)。性能 run 不读取
+   精度集、不产生精度分数；精度 run 不产出 TTFT/TPS/内存结论（除逐样本请求时延用于排障）。
 3. **长文截断**：预构造样本超窗时**跳过而不是截断**；仅 legacy 样本才头尾截断，
    与原始全文结果不可直接等价。
 4. **思考型模型**：默认关闭思考；若开启且 `max_tokens` 被思考耗尽，`content` 为空，
@@ -400,8 +423,10 @@ RESERVE 为固定渲染预留 270（tools 行）/90（纯文本行），INFL 为
    运行期窗口判定用**目标模型实测量**（`tokenized_prompt_tokens`）+ `max_tokens` +
    `context_safety_margin(128)`；构建期验收上界不是实测需求。
 9. **测量有效性标记**：`gen_tps` 在短窗口/工具调用/异常值下置 null（原因见 §2），
-   覆盖率以 `n_gen_tps_invalid` 展示；actual ISL 不触发跳过，所有能测样本都 measured，
-   聚合双口径：入带 `n_isl_in_band` 进「（±10%过滤）」均值（`perf`）、出带
-   `n_isl_out_of_band` 保留且计入全样本均值（`perf_all`）；
-   32K target 仍为 32,768，仅受模型窗口/请求失败影响；跨模型比较应报告 actual 分布与
-   入带/出带计数（见 [13-testset-portability.md](13-testset-portability.md)）。
+   覆盖率以 `n_gen_tps_invalid` 展示；strict 集长度不匹配即 skip（带 expected/got），
+   聚合只含 measured 并报 `n_measured`/`n_skipped`，**没有入带/出带概念**；
+   非 strict 集（历史口径）actual ISL 不触发跳过，双口径聚合：入带 `n_isl_in_band` 进
+   「（±10%过滤）」均值（`perf`）、出带 `n_isl_out_of_band` 保留且计入全样本均值（`perf_all`）；
+   32K target 仍为 32,768，仅受模型窗口/请求失败影响；跨模型比较应报告对齐报告
+   （strict）或 actual 分布与入带/出带计数（非 strict），见
+   [13-testset-portability.md](13-testset-portability.md)。

@@ -49,6 +49,10 @@ class RecordStatus(str, Enum):
     TIMEOUT = "timeout"
     CONTAMINATED = "contaminated"  # cache hit detected in a cold measurement
     WARMUP = "warmup"
+    #: Accuracy only: the response was obtained but the judge raised (unknown
+    #: family, missing optional dependency, malformed contract, ...).  Counted as
+    #: 0 and kept in the score denominator; never silently dropped.
+    JUDGE_ERROR = "judge_error"
 
 
 class Phase(str, Enum):
@@ -404,6 +408,116 @@ class SampleResult(BaseModel):
     cache_mode: Optional[str] = None
     cache_cleared: Optional[bool] = None
     cache_polluted: Optional[bool] = None
+
+
+# --------------------------------------------------------------------------- #
+# Accuracy aggregation (method=accuracy)
+# --------------------------------------------------------------------------- #
+
+
+class AccuracySlice(BaseModel):
+    """Score/count summary for one accuracy slice (language / dataset / cell).
+
+    Counting rules are documented once in
+    :class:`modelbench.domain.accuracy_metrics`; the important ones:
+
+    * ``n_samples`` = measured records in the slice;
+    * ``n_valid`` = measured records that produced a judgment attempt
+      (``ok`` + ``judge_error``); ``error``/``timeout`` are reported separately;
+    * ``n_scored`` = denominator of ``mean_score`` = ``n_valid`` (a judge error
+      is 0 and stays in the denominator so scores cannot be inflated);
+    * ``n_correct`` only counts rows whose normalized score is exactly 1.0;
+    * ``accuracy`` is the 0/1-family accuracy (null for pure F1 slices) and
+      ``mean_score`` the F1/0-1 average; both CIs are null when ``n < 2``.
+    """
+
+    n_samples: int = 0
+    n_valid: int = 0
+    n_ok: int = 0
+    n_error: int = 0
+    n_timeout: int = 0
+    n_judge_error: int = 0
+    n_format_failure: int = 0
+    n_missing_score: int = 0
+    n_scored: int = 0
+    n_correct: int = 0
+    mean_score: Optional[float] = None
+    accuracy: Optional[float] = None
+    score_std: Optional[float] = None
+    score_ci95_low: Optional[float] = None
+    score_ci95_high: Optional[float] = None
+    accuracy_ci95_low: Optional[float] = None
+    accuracy_ci95_high: Optional[float] = None
+
+
+class AccuracyCellAggregate(AccuracySlice):
+    """Per model x scenario x dataset accuracy aggregate (one row per cell)."""
+
+    model: str
+    method: str = "accuracy"
+    scenario: str
+    dataset: str
+    judge_family: Optional[str] = None
+    metric: Optional[str] = None
+    #: Same summary split by ``language`` (en/zh/...); never used for ranking
+    #: single-language 25-row slices, only to locate regressions.
+    by_language: Dict[str, AccuracySlice] = Field(default_factory=dict)
+
+
+class AccuracyOverallAggregate(AccuracySlice):
+    """Per-model headline accuracy row: one row per model.
+
+    ``macro_score`` is the **conclusion metric**: the equal-weight mean of the
+    per-scenario scores (each scenario score first averages its rows, so a
+    scenario with more datasets cannot dominate).  ``micro_score`` is the plain
+    all-row mean and is auxiliary only.
+    """
+
+    model: str
+    method: str = "accuracy"
+    macro_score: Optional[float] = None
+    micro_score: Optional[float] = None
+    macro_accuracy: Optional[float] = None
+    n_scenarios_scored: int = 0
+    #: Per-scenario score used by ``macro_score`` (recomputable from records).
+    scenario_scores: Dict[str, float] = Field(default_factory=dict)
+    by_language: Dict[str, AccuracySlice] = Field(default_factory=dict)
+    judge_families: List[str] = Field(default_factory=list)
+
+
+class AccuracySampleResult(BaseModel):
+    """One row of the accuracy per-sample table (``samples.csv`` shape)."""
+
+    model: str
+    model_id: Optional[str] = None
+    scenario: str
+    dataset: str
+    language: Optional[str] = None
+    sample_id: str
+    upstream_id: Optional[str] = None
+    repeat: int = 0
+    phase: str = "measured"
+    status: str = "ok"
+    error: Optional[str] = None
+    judge_family: Optional[str] = None
+    judge_metric: Optional[str] = None
+    #: Normalized judge score (0/1 or F1); null for error/timeout.
+    score: Optional[float] = None
+    correct: Optional[bool] = None
+    format_failure: bool = False
+    judge_error: bool = False
+    max_new_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+    input_context_tokens: Optional[int] = None
+    actual_prompt_tokens: Optional[int] = None
+    ttft_ms: Optional[float] = None
+    e2e_ms: Optional[float] = None
+    finish_reason: Optional[str] = None
+    cache_mode: Optional[str] = None
+    cache_cleared: Optional[bool] = None
+    cache_polluted: Optional[bool] = None
+    prompt_sha256: Optional[str] = None
+    timestamp: Optional[str] = None
 
 
 class RunManifest(BaseModel):

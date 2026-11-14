@@ -206,6 +206,44 @@ def test_default_perf_config():
     assert cfg.run.thinking_mode == "disabled"
 
 
+def test_model_thinking_disable_strategy_and_control():
+    """Thinking control is model-specific (oMLX key-presence quirk).
+
+    MiniCPM-V-4.6 must omit chat_template_kwargs for disabled thinking; its
+    template defaults to no-think, but passing enable_thinking=false flips it
+    into a reasoning block that consumed the entire generation budget in the
+    2026-11 accuracy run.  Other models keep the explicit false value.
+    """
+    from pydantic import ValidationError
+
+    from modelbench.adapters.config.settings import ModelSpec
+    from modelbench.application.benchmark import thinking_control
+
+    cfg = load_config()
+    cfg.run.thinking_mode = "disabled"
+    four_six = next(m for m in cfg.models if m.id == "MiniCPM-V-4.6")
+    assert four_six.thinking_disable == "omit"
+    kwargs, label = thinking_control(cfg, "MiniCPM-V-4.6")
+    assert kwargs is None and label == "disabled:omit"
+
+    five_one = next(m for m in cfg.models if m.id == "MiniCPM5-1B")
+    assert five_one.thinking_disable == "explicit_false"
+    kwargs, label = thinking_control(cfg, "MiniCPM5-1B")
+    assert kwargs == {"enable_thinking": False}
+    assert label == "disabled:explicit_false"
+
+    cfg.run.thinking_mode = "enabled"
+    assert thinking_control(cfg, "MiniCPM-V-4.6") == (
+        {"enable_thinking": True},
+        "enabled",
+    )
+    cfg.run.thinking_mode = "auto"
+    assert thinking_control(cfg, "MiniCPM-V-4.6") == (None, "auto")
+
+    with pytest.raises(ValidationError):
+        ModelSpec(id="x", thinking_disable="nope")
+
+
 def test_config_redacts_keys():
     cfg = load_config()
     cfg.server.api_key = "secret-key"
@@ -822,35 +860,6 @@ def test_timeout_errors_map_to_timeout_status():
     assert Orchestrator._is_timeout("ConnectTimeout: connect timed out") is True
     assert Orchestrator._is_timeout("HTTPStatusError: HTTP 500") is False
     assert Orchestrator._is_timeout(None) is False
-
-
-# --------------------------------------------------------------------------- #
-# throughput probe
-# --------------------------------------------------------------------------- #
-
-
-def test_synthetic_adapter_and_throughput_scenario(tmp_path):
-    from modelbench.adapters.datasets.registry import get_adapter
-    from modelbench.domain.scenarios.registry import build_scenario
-
-    adapter = get_adapter(
-        "synthetic", tmp_path / "raw", tmp_path / "processed", {"count": 3}
-    )
-    samples = adapter.load()
-    assert [s.sample_id for s in samples] == ["synthetic-0000", "synthetic-0001", "synthetic-0002"]
-
-    scenario = build_scenario("throughput", {})
-    assert scenario.scoring is False
-    request = scenario.build_request(
-        "m",
-        samples[0],
-        None,
-        FakeTokenizer(),
-        max_tokens=64,
-    )
-    assert request.max_tokens >= 128  # probe needs a measurable decode window
-    assert request.chat_template_kwargs is None  # runner applies thinking mode
-    assert scenario.score(samples[0], RawResponse(text="x")) is None
 
 
 def test_custom_jsonl_adapter(tmp_path):

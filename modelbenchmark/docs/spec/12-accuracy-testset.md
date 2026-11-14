@@ -1,9 +1,14 @@
 # 本地小模型精度测试：样本集设计与抽样方案
 
-> 版本：v1.1（2026-11-10）
-> 范围：**只覆盖精度（accuracy）测试的样本选择**，不涉及性能/时延测量。
-> **固定一套隐藏离线样本、全设备/全模型复用**：不按模型重新构造/裁剪/补齐；不含性能 run 的
-> 判分接入。样本契约与测试系统职责边界见 [13-testset-portability.md](13-testset-portability.md)。
+> 版本：v1.2（2026-11-11；样本设计不变，状态更新为**已接入**）
+> 范围：**只覆盖精度（accuracy）测试的样本选择与判题契约**，不涉及性能/时延测量。
+> **固定一套样本、全设备/全模型复用**：不按模型重新构造/裁剪/补齐。该测试集已作为独立
+> 方法 `method=accuracy` 接入 run（`dataset/test/accuracy/testset.yaml` 声明
+> `method: accuracy`；`manifest.json` 为 `status=wired` / `runner=accuracy` /
+> `hidden=false`；独立 `run_id`），运行协议/指标/验收见
+> [22-accuracy-test-plan.md](22-accuracy-test-plan.md)，实现见
+> [../design/32-method-architecture.md](../design/32-method-architecture.md)。样本契约与
+> 测试系统职责边界见 [13-testset-portability.md](13-testset-portability.md)。
 > 被测对象：`openbmb/MiniCPM-V-4.6` 这类小模型（本机实测：24 层、hidden 1024、bf16 权重约 2.4 GB、最大上下文 262,144），用于 **bf16 原始模型 vs 量化模型** 的精度损失对比。
 > 产物：8 个场景 × 250 条 = 2,000 条样本、5 类确定性判题器、可逐字节复现的抽样脚本与 manifest。
 
@@ -244,7 +249,7 @@ reports/dataset-build/accuracy/selection_report.md      自动生成的抽样明
 
 | 机制 | 做法 |
 |---|---|
-| 随机源 | 不使用有状态的 `random`；层内按 `sha256("42|" + upstream_id)` 升序取前 k |
+| 随机源 | 不使用有状态的 `random`；层内按 `sha256("42\|" + upstream_id)` 升序取前 k |
 | 顺序无关 | 抽样结果只依赖 id 集合，与文件行序、目录顺序无关 |
 | 配额确定性 | 最大余数法；余数并列时按 `sha256(stratum)` 决出，不依赖字典序以外的状态 |
 | 可校验 | `manifest.json` 记录 `testset.jsonl` 的字节数与 SHA-256；`build.py --check` 复算 |
@@ -254,16 +259,35 @@ reports/dataset-build/accuracy/selection_report.md      自动生成的抽样明
 
 ### 4.3 分层与配额
 
-| 场景 | 分层键 | 池 | 配额规则 | 实际选中 |
-|---|---|---|---:|---|---|
-| 知识问答 | 56 个学科（跨语言对齐过滤后） | en 13,802 | 每学科保底 2，余量按池比例（最大余数） | 125 题（2–3/学科）× en/zh |
-| 指令遵循 | 一级约束类型（8 类） | 510 | 按池比例，每类保底 1 | detectable_format 56、keywords 42、length 37、change_case 32、combination 27、startend 25、punctuation 16、content 15 |
-| 长上下文 | 语言 × 长度桶 × 任务 | en 700 / zh 294 | (en 4–8K 50 / 8–16K 55 / 16–32K 45) + (zh 4–8K 50 / 8–16K 50)；桶内按任务池比例 | narrativeqa 46、qasper 23、hotpotqa 37、2wikimqa 27、multifieldqa_en 17、dureader 68、multifieldqa_zh 32 |
-| 数学与逻辑 | GSM8K 计算步数 5 桶；CMATH 年级 6 层 | 1,319 / 1,098 | 各 125，按池比例，每层保底 1 | GSM8K 9/34/34/27/21；CMATH 19/28/27/14/15/22 |
-| 编程 | 数据集 × 题面长度四分位 | 164 / 427 | 各 125，四分位按池比例（MBPP 按新渲染 prompt 的 token 长度分层） | HumanEval 32/31/31/31；MBPP 31/31/32/31 |
-| 通用 Agent | 11 个 BFCL 单轮类 | 2,741 | 每类保底 12，余量按池比例 | live_multiple 59、simple_python 30、live_simple 23、irrelevance 22、multiple 21、parallel 20、parallel_multiple 20、simple_java 16、simple_javascript 14、live_parallel_multiple 13、live_parallel 12 |
-| 搜索 Agent | 题型（bridge/comparison）× 跳数（2/3/4+） | 7,405 | 6 层按池比例，每层保底 1 | bridge 198（128/51/19）、comparison 52（39/9/4） |
-| 多语言 | 6 个学科大类 | 跨语言过滤后 13,552 题 × 10 语 | 25 题配额按大类合格池比例（8/5/5/3/2/2），每题在 10 语各评测一次 | 25 题 × 10 语 |
+**分层设计**（每场景 250 行，合计 8 × 250 = 2,000 行）：
+
+| 场景 | 分层键 | 池规模 | 配额规则 |
+|---|---|---|---|
+| 知识问答 | 56 个学科（跨语言对齐过滤后） | en 13,802 | 每学科保底 2，余量按池比例（最大余数） |
+| 指令遵循 | 一级约束类型（8 类） | 510 | 按池比例，每类保底 1 |
+| 长上下文 | 语言 × 长度桶 × 任务 | en 700 / zh 294 | en 4–8K 50、8–16K 55、16–32K 45；zh 4–8K 50、8–16K 50；桶内按任务池比例 |
+| 数学与逻辑 | GSM8K 计算步数 5 桶；CMATH 年级 6 层 | 1,319 / 1,098 | 各 125，按池比例，每层保底 1 |
+| 编程 | 数据集 × 题面长度四分位 | 164 / 427 | 各 125，四分位按池比例（MBPP 按新渲染 prompt 的 token 长度分层） |
+| 通用 Agent | 11 个 BFCL 单轮类 | 2,741 | 每类保底 12，余量按池比例 |
+| 搜索 Agent | 题型（bridge/comparison）× 跳数（2/3/4+） | 7,405 | 6 层按池比例，每层保底 1 |
+| 多语言 | 6 个学科大类 | 跨语言过滤后 13,552 题 × 10 语 | 25 题按大类合格池比例（8/5/5/3/2/2），每题在 10 语各评测一次 |
+
+**实际选中明细**（括号内为该维度合计，可对账 250 行/场景）：
+
+- **知识问答**：125 题（2–3/学科）× en/zh 双语配对 = 250 行；
+- **指令遵循**（一级约束类型，合计 250）：detectable_format 56、keywords 42、
+  length 37、change_case 32、combination 27、startend 25、punctuation 16、content 15；
+- **长上下文**（按任务）：en 合计 150 —— narrativeqa 46、qasper 23、hotpotqa 37、
+  2wikimqa 27、multifieldqa_en 17；zh 合计 100 —— dureader 68、multifieldqa_zh 32；
+- **数学与逻辑**：GSM8K（计算步数 5 桶，合计 125）9/34/34/27/21；
+  CMATH（年级 6 层，合计 125）19/28/27/14/15/22；
+- **编程**（题面长度四分位）：HumanEval 32/31/31/31（125）；MBPP 31/31/32/31（125）；
+- **通用 Agent**（BFCL 11 类，合计 250）：live_multiple 59、simple_python 30、
+  live_simple 23、irrelevance 22、multiple 21、parallel 20、parallel_multiple 20、
+  simple_java 16、simple_javascript 14、live_parallel_multiple 13、live_parallel 12；
+- **搜索 Agent**（题型 × 跳数，合计 250）：bridge 198（2/3/4+ 跳数 = 128/51/19）、
+  comparison 52（39/9/4）；
+- **多语言**：25 题 × 10 语 = 250 行（题配额按学科大类 8/5/5/3/2/2）。
 
 ### 4.4 过滤、去重与互斥规则
 
@@ -319,13 +343,20 @@ reports/dataset-build/accuracy/selection_report.md      自动生成的抽样明
 
 ```
 dataset/test/accuracy/
-├── testset.jsonl     # 2,000 行单文件（8 场景 × 250；gitignored）
-└── manifest.json     # 抽样/统计/数据源/SHA-256（提交；status=offline-asset）
+├── testset.jsonl     # 2,000 行单文件（8 场景 × 250；gitignored、可重建）
+├── testset.yaml      # 测试集定义（提交；`method: accuracy` + 8 场景切片）
+└── manifest.json     # 抽样/统计/数据源/SHA-256（提交；status=wired / runner=accuracy / hidden=false）
 reports/dataset-build/accuracy/
 ├── selection_report.md   # 自动生成的抽样明细（中间产物）
 ├── pilot/                # 参考模型难度试点（§8，非正式结果）
 └── archive/              # 旧版本产物（仅追溯）
 ```
+
+- `testset.jsonl` 与 `manifest.json` 的关系：前者是**派生数据**（不提交，由 `build.py` 从
+  `dataset/raw/` 确定性重建，SHA-256 以 manifest 的 `files.testset.jsonl.sha256` 为准）；
+  后者与 `testset.yaml` 随仓库提交，是"同一套样本"的契约凭据。
+- 已接入 run：CLI/Web 的测试集列表会出现 `accuracy`（按 `testset.yaml` 的 `method` 归入精度方法），
+  运行 `./modelbench run --method accuracy` 或默认推断（`--testset accuracy`）。
 
 ### 5.2 单行 schema
 
@@ -464,7 +495,7 @@ dataset/raw/                     # 上游原始文件与工具资产（只读，
 ├── hotpotqa/distractor/validation-*.parquet
 ├── tokenizer/cl100k_base/{cl100k_base.tiktoken,tokenizer.json}   # 通用参考 tokenizer（blob + derive_cl100k.py 确定性派生）
 └── nltk_data/{punkt.zip,punkt_tab.zip,tokenizers/}  # 官方 IFEval checker 依赖
-dataset/test/accuracy/           # 精度测试集（jsonl 不提交；manifest 提交；无 testset.yaml，保持隐藏）
+dataset/test/accuracy/           # 精度测试集（jsonl 不提交；testset.yaml + manifest 提交；method=accuracy）
 reports/dataset-build/accuracy/              # 抽样报告、难度试点等中间产物（不提交）
 ```
 
@@ -490,6 +521,8 @@ reports/dataset-build/accuracy/              # 抽样报告、难度试点等中
 ### 7.3 完整性校验
 
 - `dataset/test/accuracy/manifest.json` 对每个上游文件记录相对路径、字节数、SHA-256、来源 URL 与许可；
+  其 `status=wired` / `runner=accuracy` / `hidden=false` 与 `testset.yaml` 的存在是"精度方法已接入"
+  的声明，`build.py --check` 会校验这三项（以及 yaml 的 `method: accuracy` 与 8 场景）；
 - 抽样后行数校验：单个 `testset.jsonl` 共 2,000 行、每场景 250 行、id 唯一、判题族合法、prompt 非空、`input_tokens` 为正整数；
 - `build.py --check` 额外校验契约：知识 125 对 en/zh answer 相等、无错位学科/已知错误行；多语言 25 组 × 10 语 answer 全相等且每行 4 个选项互异；长上下文 `judge.answers` 从 raw 复算为完整 union（本版 7 行受益）；MBPP `entry_point` 非空且出现在题面中；每行 `judge.max_new_tokens` 存在且与 §6.1 一致；`metric` 取值合法（`f1`/`f1_zh`/`rouge_zh`/`numeric_exact`）；
 - 判题器校验：`tool/system/validate_judges.py` 的 1,750 条 gold 正例 + negative controls 全部通过（`RESULT: PASS`，§10 附录 B）；
@@ -506,7 +539,7 @@ reports/dataset-build/accuracy/              # 抽样报告、难度试点等中
 | 1. 环境 | `./modelbench setup` + `.venv/bin/pip install -e ".[dev,datasets,eval]"` | 构造需要 `pyarrow`/`tokenizers`；判题自检另需 `eval` |
 | 2. 下数据 | `.venv/bin/python tool/dataset/accuracy/fetch.py` | 默认 `hf-mirror.com`；`--mirror` 可切 HF 官方；`--only` 只下子集；`--dry-run` 预览 |
 | 3. 校验数据 | `.venv/bin/python tool/dataset/accuracy/fetch.py --verify` | 只读 size + SHA-256，exit 0 表示齐全 |
-| 4. 构造集 | `.venv/bin/python tool/dataset/accuracy/build.py` | 生成 `dataset/test/accuracy/testset.jsonl` + manifest + 报告（不生成 testset.yaml） |
+| 4. 构造集 | `.venv/bin/python tool/dataset/accuracy/build.py` | 生成 `dataset/test/accuracy/testset.jsonl` + `manifest.json`（`status=wired`/`runner=accuracy`/`hidden=false`）+ 抽样报告；`testset.yaml` 是提交的固定文件，`--check` 会校验其 `method: accuracy` 与 8 个场景切片 |
 | 5. 校验集 | `.venv/bin/python tool/dataset/accuracy/build.py --check` | 行数/id/字段/判题族/SHA-256 |
 
 Windows 把解释器路径换成 `.venv\Scripts\python.exe`，参数不变；无法装 `pip` 的 uv 环境用
@@ -539,7 +572,13 @@ Windows 把解释器路径换成 `.venv\Scripts\python.exe`，参数不变；无
 
 ---
 
-## 8. 参考模型难度试点（MiniCPM-V-4.6，12 条/场景）
+## 8. 参考模型难度试点（MiniCPM-V-4.6，12 条/场景，历史）
+
+> **历史试点，不是正式精度结论**：以下数字来自 v1.1 样本集构建期的参考模型校准（每场景 12 条），
+> 只用于判断"小模型不会全错/全对"与暴露判题/格式问题。正式精度结论必须来自
+> `method=accuracy` 的独立 run（协议与统计见
+> [22-accuracy-test-plan.md](22-accuracy-test-plan.md)），本节的 12 条试点数字不得引用为
+> 模型分数、也不得与正式 run 混算。
 
 ### 8.1 方法
 

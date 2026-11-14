@@ -48,6 +48,23 @@ def test_mc_letter_refuses_to_guess(response):
     assert judges.extract_letter(response) is None
 
 
+def test_mc_letter_explicit_answer_wins_over_refusal_words():
+    """Regression from the 2026-11 real accuracy runs.
+
+    The refusal regex used to be checked before the explicit answer, so a
+    response like "... we don't have enough information about P(B) ... The answer
+    is B." became ``format_failure`` even though the model committed to B.
+    """
+    assert judges.extract_letter("We don't have enough information about P(B). The answer is B.") == "B"
+    assert judges.extract_letter("Cannot determine A and C. The answer is D.") == "D"
+    assert judges.extract_letter("无法确定其他选项。答案是 C。") == "C"
+    # Refusal-only responses still return None (no false positives).
+    assert judges.extract_letter("Cannot determine; insufficient information.") is None
+    # Markdown/option-prefixed explicit answers are also recognised.
+    assert judges.extract_letter("The answer is **C**.") == "C"
+    assert judges.extract_letter("Answer: Option B") == "B"
+
+
 def test_mc_letter_gold_wrong_negative_control():
     row = {"judge": {"family": "mc_letter", "answer": "C"}}
     assert judges.evaluate(row, "答案是 C")["pass"] is True
@@ -209,3 +226,56 @@ def test_ifeval_checker_loads_and_rejects_empty_response():
 def test_unknown_family_raises():
     with pytest.raises(ValueError, match="unknown judge family"):
         judges.evaluate({"judge": {"family": "nope"}}, "x")
+
+
+# ---------------------------------------------------------------- WP-1 regression
+
+def test_domain_evaluate_never_raises_on_broken_contracts():
+    """The domain entry point (used by the accuracy runner) must never throw."""
+    from modelbench.domain.judges import JUDGE_FAMILIES, evaluate as domain_evaluate
+
+    assert JUDGE_FAMILIES == ("mc_letter", "ifeval", "normalized_match", "code_exec", "tool_call")
+    broken = [
+        {},                                            # missing judge contract
+        {"judge": {}},                                 # missing family
+        {"judge": {"family": "nope"}},                 # unknown family
+        {"judge": {"family": "normalized_match"}},     # missing answers
+        {"judge": {"family": "code_exec", "test_code": "raise SystemExit"}},
+        {"judge": {"family": "tool_call"}},            # missing ground_truth
+        {"judge": {"family": "ifeval"}},               # missing instruction list
+    ]
+    for row in broken:
+        result = domain_evaluate(row, "some response")
+        assert result.score == 0.0 and result.passed is False
+    assert domain_evaluate({}, "x").detail["judge_error"] is True
+    empty = domain_evaluate({"judge": {"family": "mc_letter", "answer": "A"}}, "")
+    assert empty.detail["format_failure"] is True and empty.passed is False
+    ok = domain_evaluate({"judge": {"family": "mc_letter", "answer": "A"}}, "The answer is A.")
+    assert ok.to_dict()["pass"] is True and ok.detail["family"] == "mc_letter"
+
+
+def test_code_exec_infrastructure_error_is_judge_error(monkeypatch):
+    """A broken execution environment is a judge error, not a wrong answer.
+
+    A model solution that hangs is a deterministic 0 (timeout); a missing/failed
+    interpreter is an infrastructure failure and must be surfaced as
+    ``judge_error`` so it stays visible (0 points, kept in the denominator).
+    """
+    from modelbench.domain.judges import code as code_judge
+    from modelbench.domain.judges import evaluate as domain_evaluate
+
+    def boom(*args, **kwargs):
+        raise OSError("interpreter unavailable")
+
+    monkeypatch.setattr(code_judge.subprocess, "run", boom)
+    row = {
+        "judge": {
+            "family": "code_exec",
+            "test_code": "assert True",
+            "prompt_prefix": "def f():\n    pass\n",
+        }
+    }
+    result = domain_evaluate(row, "def f():\n    pass\n")
+    assert result.score == 0.0 and result.passed is False
+    assert result.detail["judge_error"] is True
+    assert "infrastructure" in result.detail["reason"]

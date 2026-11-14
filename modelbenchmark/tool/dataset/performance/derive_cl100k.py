@@ -4,10 +4,11 @@
 
 The performance test set sizes its samples with **cl100k_base**, the generic
 OpenAI tokenizer (the industry de-facto reference for token counting), instead
-of any model-specific tokenizer.  The Rust ``tokenizers`` library cannot read
+of any model-specific tokenizer, so the committed build is reproducible without
+ownership of a model.  The Rust ``tokenizers`` library cannot read
 the tiktoken ``.tiktoken`` blob directly, so this script converts it once into
 an equivalent ``tokenizer.json``; ``fetch.py`` regenerates it deterministically
-(byte-identical, SHA-256 pinned in ``raw_spec.json``).
+(byte-identical, SHA-256 pinned in this file).
 
 Method (canonical incremental BPE): tiktoken ranks 0-255 are the 256 single
 bytes; every rank ``r >= 256`` is the byte string produced by one merge.  For

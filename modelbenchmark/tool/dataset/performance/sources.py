@@ -1,156 +1,124 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Raw-asset specification for the performance test set (``dataset/test/performance``).
+"""Upstream data sources for the performance test set (``performance``).
 
-``raw_spec.json`` is the committed, auditable list of every upstream file the
-performance builder needs: relative path under ``dataset/raw/``, download URL, byte
-size and SHA-256.  ``dataset/raw/`` itself is gitignored, so a fresh clone fetches
-these files with ``tool/dataset/performance/fetch.py`` and then rebuilds the test
-set with ``tool/dataset/performance/build.py``.
+Every entry is a file that already lives under ``dataset/raw/`` (gitignored
+evidence directory) or that :mod:`tool.dataset.performance.fetch` can restore from
+the pinned upstream URL.  ``url`` is the canonical Hugging Face path (``hf-mirror``
+is used at download time when ``HUGGINGFACE_MIRROR``/``--mirror`` is set).
 
-This module also owns the *dataset* metadata (human source URL / license) that
-ends up in the test-set manifest.  Only the five datasets the performance set
-actually reads are listed here (no accuracy-only assets).
+Selection rationale for every source lives in
+``docs/spec/11-performance-testset.md``; this table only records *where the
+bytes come from* (plus size / sha256 / license, filled by ``fetch --verify``).
 """
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Dict, List
+from typing import Dict, List
 
-from tool.common.fs import DATA_DIR, RAW_DIR, read_json
+HF = "https://huggingface.co/datasets/"
 
-SPEC_PATH = Path(__file__).with_name("raw_spec.json")
-
-#: Dataset -> human-facing provenance.  File-level URL/size/SHA-256 live in
-#: ``raw_spec.json``; these are the canonical project / model-card links.
-DATASETS: Dict[str, Dict[str, Any]] = {
+#: scenario -> (source id, upstream files used by the builder)
+#: ``path`` is relative to ``dataset/raw``.
+SOURCES: Dict[str, Dict] = {
+    "reference_tokenizer_blob": {
+        "path": "tokenizer/cl100k_base/cl100k_base.tiktoken",
+        "url": "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken",
+        "license": "MIT (tiktoken, OpenAI)",
+        "note": "通用参考 tokenizer 的 tiktoken 词表；构建期用它精确对齐 prompt token 数，"
+                "不代表任何被测模型",
+        "required": True,
+    },
+    "reference_tokenizer": {
+        "path": "tokenizer/cl100k_base/tokenizer.json",
+        "url": "generated",
+        "license": "MIT (tiktoken, OpenAI)",
+        "note": "由 derive_cl100k.py 从上面的 tiktoken 词表确定性转换而来（SHA-256 固定）",
+        "generated": True,
+        "required": True,
+    },
+    # ------------------------------------------- 知识问答（中文）/ 长上下文 / 搜索 Agent（英文）
+    "longbench_pro": {
+        "path": "longbench_pro/longbench_pro.json",
+        "url": HF + "caskcsg/LongBench-Pro/resolve/main/longbench_pro.json",
+        "license": "apache-2.0",
+        "note": "LongBench-Pro (2026-01) 1,500 条，750 中/750 英，原生 8K/16K/32K/64K/128K/256K",
+        "required": True,
+    },
+    # ---------------------------------------------------------------- 指令遵循（中文）
+    "vcsum": {
+        "path": "longbench_v1/data/vcsum.jsonl",
+        "url": HF + "zai-org/LongBench/resolve/main/data.zip",
+        "license": "apache-2.0",
+        "note": "LongBench v1 中文会议纪要，200 篇（0.6K–23K tok），作为长输入载体",
+        "required": True,
+    },
+    "multi_if": {
+        "path": "multi_if/multiIF_20241018.csv",
+        "url": HF + "facebook/Multi-IF/resolve/main/multiIF_20241018.csv",
+        "license": "cc-by-nc-2.0",
+        "note": "Multi-IF (2024-10) 中文约束集合（454 条，提供 instruction_id/kwargs）",
+        "required": True,
+    },
+    # ---------------------------------------------------------------- 编程（英文）
     "longbench_v2": {
-        "name": "LongBench v2",
-        "source_url": "https://huggingface.co/datasets/zai-org/LongBench-v2",
-        "license": "Apache-2.0",
-        "used_by": ["knowledge_qa", "long_context", "coding", "search_agent"],
+        "path": "longbench_v2/data.json",
+        "url": HF + "zai-org/LongBench-v2/resolve/main/data.json",
+        "license": "apache-2.0",
+        "note": "LongBench v2 (2024-12) 503 条；本测试集只用 Code Repository Understanding（50 条）",
+        "required": True,
     },
-    "ifeval": {
-        "name": "IFEval",
-        "source_url": "https://github.com/google-research/google-research/tree/master/instruction_following_eval",
-        "license": "Apache-2.0",
-        "used_by": ["instruction_following"],
+    # ---------------------------------------------------------------- 数学与逻辑（英文，2026 题面）
+    "aime_2026": {
+        "path": "aime2026/data/train-00000-of-00001.parquet",
+        "url": HF + "MathArena/aime_2026/resolve/main/data/train-00000-of-00001.parquet",
+        "license": "cc-by-nc-sa-4.0",
+        "note": "AIME 2026（2026-10-19 发布）30 道 2026 年竞赛题，仅题面（无解答）",
+        "required": True,
     },
-    "gsm8k": {
-        "name": "GSM8K",
-        "source_url": "https://huggingface.co/datasets/openai/gsm8k",
-        "license": "MIT",
-        "used_by": ["math_logic"],
+    "math_500": {
+        "path": "math_500/test.jsonl",
+        "url": HF + "HuggingFaceH4/MATH-500/resolve/main/test.jsonl",
+        "license": "mit",
+        "note": "MATH-500 (2025-12) 500 题 + 完整解答，用作 many-shot 示范",
+        "required": True,
     },
+    # ---------------------------------------------------------------- 通用 Agent（英文）
     "bfcl_v4": {
-        "name": "BFCL v4",
-        "source_url": "https://github.com/ShishirPatil/gorilla/tree/main/berkeley-function-call-leaderboard",
-        "license": "Apache-2.0",
-        "used_by": ["general_agent"],
+        "path": "bfcl/BFCL_v4_simple_python.json",
+        "url": HF + "gorilla-llm/Berkeley-Function-Calling-Leaderboard/resolve/main/BFCL_v4_simple_python.json",
+        "license": "apache-2.0",
+        "note": "BFCL v4 (gorilla-llm, 2026-04-29 发布)；simple_python 400 行 + multiple 200 行",
+        "required": True,
     },
+    # ---------------------------------------------------------------- 多语言（10 语种，含中文）
     "global_mmlu": {
-        "name": "Global-MMLU",
-        "source_url": "https://huggingface.co/datasets/CohereLabs/Global-MMLU",
-        "license": "Apache-2.0",
-        "used_by": ["multilingual"],
+        "path": "global_mmlu/{lang}/test.parquet",
+        "url": HF + "CohereLabs/Global-MMLU/resolve/main/{lang}/test.parquet",
+        "license": "apache-2.0",
+        "note": "Global-MMLU (2025-08) 42 语种；本测试集取 zh/en/fr/de/es/pt/ru/ja/ko/ar",
+        "required": True,
     },
 }
 
-#: Non-dataset assets required by builders (reference tokenizer).
-TOOLING: Dict[str, Dict[str, str]] = {
-    "tokenizer": {
-        "name": "cl100k_base (OpenAI)",
-        "source_url": "https://github.com/openai/tiktoken/blob/main/README.md",
-        "license": "MIT (tiktoken) / cl100k_base encoding data",
-        "purpose": (
-            "generic industry reference tokenizer for the declared content-token "
-            "counts (no chat template, no model-specific tokenizer)"
-        ),
-    },
+#: scenario -> source id (documented in the design doc / manifest provenance)
+SCENARIO_SOURCE: Dict[str, str] = {
+    "knowledge_qa": "longbench_pro:T3. Evidence-Grounded QA",
+    "instruction_following": "multi_if+vcsum",
+    "long_context": "longbench_pro:T4. Summarization & Synthesis",
+    "math_logic": "aime_2026+math_500",
+    "coding": "longbench_v2:Code Repository Understanding",
+    "general_agent": "bfcl_v4:simple_python+multiple",
+    "search_agent": "longbench_pro:T1/T5 Retrieval & Attribution",
+    "multilingual": "global_mmlu",
 }
 
 
-def load_spec() -> Dict[str, Any]:
-    return read_json(SPEC_PATH)
-
-
-def files_for(dataset: str) -> List[Dict[str, Any]]:
-    return [f for f in load_spec()["files"] if f["dataset"] == dataset]
-
-
-def dataset_provenance(scope: str = "data") -> Dict[str, Any]:
-    """Manifest-ready provenance: dataset -> source URL, license, files.
-
-    ``scope`` is ``"data"`` (the five performance datasets) or ``"tooling"``
-    (the reference tokenizer).
-    """
-    meta = DATASETS if scope == "data" else TOOLING
-    out: Dict[str, Any] = {}
-    for dataset, info in meta.items():
-        files = files_for(dataset)
-        generated = [
-            g
-            for g in load_spec()["generated"]
-            if g.get("dataset") == dataset and {"path", "bytes", "sha256"} <= set(g)
-        ]
-        if not files and not generated:
+def raw_paths(raw_dir) -> List[str]:
+    """Expand ``{lang}`` placeholders for the multilingual source."""
+    out: List[str] = []
+    for key, spec in SOURCES.items():
+        path = str(spec["path"])
+        if "{lang}" in path:
             continue
-        out[dataset] = {
-            "name": info["name"],
-            "source_url": info["source_url"],
-            "license": info["license"],
-            "files": [
-                {"path": f["path"], "bytes": f["bytes"], "sha256": f["sha256"]}
-                for f in files
-            ]
-            + [
-                {
-                    "path": g["path"],
-                    "bytes": g["bytes"],
-                    "sha256": g["sha256"],
-                    "derived_by": str(g.get("generator") or "spec"),
-                }
-                for g in generated
-            ],
-        }
-        if "used_by" in info:
-            out[dataset]["used_by"] = info["used_by"]
+        out.append(path)
     return out
-
-
-def raw_path_display(rel: str) -> str:
-    """Stable repo-relative path used in manifests/docs (``dataset/raw/...``)."""
-    return str(DATA_DIR.relative_to(Path(__file__).resolve().parents[3]) / "raw" / rel)
-
-
-def tokenizer_entry() -> Dict[str, Any]:
-    """The ``tokenizer/cl100k_base/tokenizer.json`` raw-spec entry.
-
-    The derived ``tokenizer.json`` (generated rule) is what the builder loads;
-    its spec entry carries the deterministic generator script and pinned
-    SHA-256, so the manifest can cite an auditable file identity.
-    """
-    generated = load_spec()["generated"]
-    entry = next(
-        (g for g in generated if g["path"].endswith("tokenizer.json")), None
-    )
-    if entry is not None:
-        return entry
-    return next(
-        f for f in files_for("tokenizer") if f["path"].endswith("tokenizer.json")
-    )
-
-
-def required_paths() -> List[Path]:
-    """Absolute paths of every raw file this builder reads (for the preflight).
-
-    Includes both downloaded files and deterministic ``generated`` assets (the
-    derived cl100k ``tokenizer.json``).
-    """
-    spec = load_spec()
-    paths = [RAW_DIR / f["path"] for f in spec["files"]]
-    for item in spec.get("generated", []):
-        path = RAW_DIR / item["path"]
-        if path not in paths:
-            paths.append(path)
-    return paths

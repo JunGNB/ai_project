@@ -233,6 +233,24 @@ def _stability(perf: Dict[str, Distribution]) -> Optional[float]:
     return None
 
 
+def strict_aligned(record: SampleRecord) -> bool:
+    """True when the sample was measured under the strict input-token contract.
+
+    Strict test sets align every prompt to the bucket target exactly, so the
+    ±10% band counters are meaningless there: ``n_isl_in_band`` /
+    ``n_isl_out_of_band`` are reported as 0 (never as a "band ratio") and the
+    full valid measured set feeds the aggregates.
+    """
+    meta = record.request.context_meta or {}
+    return bool(meta.get("strict_input_tokens"))
+
+
+def _strict_cell(records: List[SampleRecord]) -> bool:
+    """True when every valid record of a cell is strict-aligned."""
+    marked = [strict_aligned(r) for r in records]
+    return bool(marked) and all(marked)
+
+
 def aggregate_cell(records: List[SampleRecord]) -> CellAggregate:
     if not records:
         raise ValueError("cannot aggregate an empty record list")
@@ -257,10 +275,20 @@ def aggregate_cell(records: List[SampleRecord]) -> CellAggregate:
         if r.phase.value == "measured"
         and r.status in (RecordStatus.ERROR, RecordStatus.TIMEOUT)
     )
-    in_band = [r for r in valid if isl_band(r)]
-    cell.n_isl_in_band = len(in_band)
-    cell.n_isl_out_of_band = len(valid) - len(in_band)
-    cell.insufficient_samples = len(in_band) < MIN_IN_BAND_SAMPLES
+    if _strict_cell(valid):
+        # Strict alignment: every valid sample already equals its bucket
+        # target, so there is no in/out-band split to report (0/0 instead of a
+        # misleading 100% in-band ratio).  Aggregates still use all valid
+        # measured samples.
+        in_band = list(valid)
+        cell.n_isl_in_band = 0
+        cell.n_isl_out_of_band = 0
+        cell.insufficient_samples = False
+    else:
+        in_band = [r for r in valid if isl_band(r)]
+        cell.n_isl_in_band = len(in_band)
+        cell.n_isl_out_of_band = len(valid) - len(in_band)
+        cell.insufficient_samples = len(in_band) < MIN_IN_BAND_SAMPLES
     # Capped/TG-invalid counts describe the whole valid measured set (the
     # documented "valid measured samples" wording), not the ISL band: a cell
     # whose samples are all out of band still reports its capped count.
@@ -322,10 +350,17 @@ def aggregate_overall(records: Iterable[SampleRecord]) -> List[OverallAggregate]
                 and r.status in (RecordStatus.ERROR, RecordStatus.TIMEOUT)
             ),
         )
-        in_band = [r for r in valid if isl_band(r)]
-        entry.n_isl_in_band = len(in_band)
-        entry.n_isl_out_of_band = len(valid) - len(in_band)
-        entry.insufficient_samples = len(in_band) < MIN_IN_BAND_SAMPLES
+        if _strict_cell(valid):
+            # Same strict contract as cells: no ±10% band counters.
+            in_band = list(valid)
+            entry.n_isl_in_band = 0
+            entry.n_isl_out_of_band = 0
+            entry.insufficient_samples = False
+        else:
+            in_band = [r for r in valid if isl_band(r)]
+            entry.n_isl_in_band = len(in_band)
+            entry.n_isl_out_of_band = len(valid) - len(in_band)
+            entry.insufficient_samples = len(in_band) < MIN_IN_BAND_SAMPLES
         # Same calibre rule as cells: capped/TG-invalid counts and peak maxima
         # describe the whole valid measured set, not the band.
         entry.n_length_capped = sum(1 for r in valid if is_length_capped(r))

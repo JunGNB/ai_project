@@ -1,7 +1,9 @@
 name: performance
-title: 性能测试（8 场景 × 1K/8K/32K × 10，240 measured）
-description: 8 场景 × 3 档 × 10 个 target；同 target 三档仅上下文长度不同；不判分。样本由 tool/dataset/performance/build.py
-  从 dataset/raw 的上游数据确定性抽样构建。
+title: 性能测试（8 场景 × 1K/8K/32K × 10 target，240 measured）
+description: 性能测试集：每个场景 10 个 target，同一 target 渲染 1K/8K/32K 三档；样本由 tool/dataset/performance/build.py
+  从 dataset/raw 的上游数据确定性构建，并由 tool/dataset/performance/align.py 在运行前用目标模型 tokenizer
+  对齐到精确的 prompt token 数（1024/8192/32768，0 容差）。strict_input_tokens=true 时运行器要求逐样本 prompt
+  token 数严格等于目标值，不等即跳过记录，不做误差带统计。含中文场景；生成长度 max_tokens=50。
 scenarios:
   knowledge_qa:
     dataset: perf_jsonl
@@ -45,10 +47,11 @@ scenarios:
       path: dataset/test/performance/testset.jsonl
 sampling:
   seed: 42
-  targets_per_cell: 10
-  method: sha256(seed|upstream_id) + stratified largest remainder
+  targets_per_scenario: 10
+  method: sha256(seed|id) + stratified largest remainder
 buckets:
   1k: 1024
   8k: 8192
   32k: 32768
-osl: 50
+strict_input_tokens: true
+max_tokens: 50

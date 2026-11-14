@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from modelbench.adapters.omlx.backend import OMLXBackend
 from modelbench.application.batch import BatchRunner
 from modelbench.application.benchmark import RunCancelled
 from modelbench.adapters.config.settings import load_config, resolve_project_path
 from modelbench.domain.context_windows import normalize_windows
+from modelbench.domain.method import RunMethod
 from modelbench.application.plan import (
     apply_testset,
     dataset_plan,
@@ -90,14 +92,200 @@ class Job:
         }
 
 
+#: Default test set per method (``MethodProfile.default_testset`` until WP-2 lands).
+_DEFAULT_TESTSET = {"performance": "performance", "accuracy": "accuracy"}
+
+
+def _parse_method(value: Any) -> RunMethod:
+    """Coerce a payload/CLI method value; unknown values raise ``ValueError``."""
+    try:
+        return RunMethod.parse(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"unknown method: {value!r}; expected one of "
+            f"{[method.value for method in RunMethod]}"
+        ) from exc
+
+
+def _method_profile(method: Any):
+    """Return the WP-2 ``MethodProfile`` or ``None`` while ``application.methods`` is absent."""
+    try:
+        from modelbench.application.methods import get_method
+    except ImportError:  # WP-2 not merged yet (transitional fallback below)
+        return None
+    return get_method(method)
+
+
+def _fallback_configure(cfg: Any) -> None:
+    """Accuracy protocol defaults used until ``application.methods`` lands.
+
+    Mirrors ``docs/spec/22-accuracy-test-plan.md`` §2: cold cache, repeats=1,
+    one retry.  Performance is unchanged.
+    """
+    from modelbench.domain.models import CacheMode
+
+    if cfg.method is RunMethod.ACCURACY:
+        cfg.run.repeats = 1
+        cfg.run.cache_mode = CacheMode.COLD
+        cfg.run.max_retries = 1
+        cfg.run.warmup_requests = 0
+
+
+def configure_method(cfg: Any) -> None:
+    """Apply ``MethodProfile.configure`` (fallback while WP-2 is absent)."""
+    profile = _method_profile(cfg.method)
+    configure = getattr(profile, "configure", None) if profile is not None else None
+    if callable(configure):
+        configure(cfg)
+    else:
+        _fallback_configure(cfg)
+
+
+def _apply_testset(cfg: Any, testset: Any, explicit_method: Optional[RunMethod]) -> None:
+    """Apply a test set, tolerating the pre-WP-2 ``apply_testset`` signature.
+
+    WP-2 adds ``explicit_method=`` (conflict -> ``ValueError``).  Until then the
+    2-argument signature is used and ``cfg.method`` is set here; a conflict is
+    rejected by the caller before this runs.
+    """
+    try:
+        apply_testset(cfg, testset, explicit_method=explicit_method)
+    except TypeError:
+        apply_testset(cfg, testset)
+        cfg.method = testset.method if explicit_method is None else explicit_method
+
+
+#: Cache for judge families read from an accuracy ``testset.jsonl``.
+_JUDGE_FAMILY_CACHE: Dict[Tuple[str, int, int, Tuple[str, ...]], List[str]] = {}
+
+
+def _testset_data_path(cfg: Any, testset: Any) -> Path:
+    """Backing JSONL for a test set (explicit ``dataset_params.path`` wins)."""
+    for override in testset.scenarios.values():
+        params = override.dataset_params or {}
+        value = params.get("path") or (params.get("dataset_params") or {}).get("path")
+        if value:
+            return resolve_project_path(str(value))
+    return Path(cfg.datasets.testset_dir) / testset.name / "testset.jsonl"
+
+
+def testset_judge_families(cfg: Any, testset: Any) -> Dict[str, Any]:
+    """Judge families declared by an accuracy test set.
+
+    Reads the **first row of every configured scenario** (each scenario maps to
+    one judge family) and returns ``{"families": [...], "available": bool}``.
+    The scan is cached by ``(path, mtime, size)``; a missing file is reported as
+    ``available: False`` (CLI/Web then show the build command) instead of
+    raising.
+    """
+    if testset is None:
+        return {"families": [], "available": False}
+    path = _testset_data_path(cfg, testset)
+    wanted = tuple(str(name) for name in testset.scenarios)
+    try:
+        stat = path.stat()
+    except OSError:
+        return {"families": [], "available": False}
+    key = (str(path), stat.st_mtime_ns, stat.st_size, wanted)
+    cached = _JUDGE_FAMILY_CACHE.get(key)
+    if cached is not None:
+        return {"families": list(cached), "available": True}
+    families: List[str] = []
+    found: set = set()
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                scenario = str(row.get("scenario") or "")
+                if scenario not in wanted or scenario in found:
+                    continue
+                judge = row.get("judge") or {}
+                family = str(judge.get("family") or "")
+                if family:
+                    found.add(scenario)
+                    if family not in families:
+                        families.append(family)
+                if len(found) == len(wanted):
+                    break
+    except OSError:
+        return {"families": [], "available": False}
+    _JUDGE_FAMILY_CACHE.clear()
+    _JUDGE_FAMILY_CACHE[key] = families
+    return {"families": list(families), "available": True}
+
+
+def _accuracy_plan_extras(cfg: Any, name: str) -> Dict[str, Any]:
+    """Accuracy sample selectors for ``DatasetAdapter.plan``/``dataset_plan``."""
+    explicit = cfg.accuracy.sample_ids_for(name)
+    count = cfg.accuracy.samples_for(name)
+    extra: Dict[str, Any] = {}
+    if explicit:
+        extra["sample_ids"] = list(explicit)
+    elif count is not None:
+        extra["samples"] = int(count)
+    return extra
+
+
+def _accuracy_counts(cfg: Any) -> Dict[str, Any]:
+    """Plan summary for method=accuracy (one plan group per scenario)."""
+    models = cfg.selected_models()
+    scenarios = cfg.selected_scenarios()
+    samples_per_scenario: List[int] = []
+    groups_total = 0
+    samples_known = True
+    cells_known = True
+    for name, spec in scenarios.items():
+        groups = dataset_plan(cfg, spec, _accuracy_plan_extras(cfg, name))
+        if groups is None:
+            # Accuracy data (testset.jsonl) is not built: counts stay unknown
+            # until the user builds it; the UI shows the build command.
+            samples_known = False
+            cells_known = False
+            break
+        samples_per_scenario.append(sum(int(item.get("n") or 0) for item in groups))
+        groups_total += len(groups)
+    samples_total = (
+        sum(samples_per_scenario) * len(models)
+        if samples_known and samples_per_scenario
+        else None
+    )
+    cells_total = (
+        groups_total * len(models)
+        if cells_known and groups_total
+        else None
+    )
+    return {
+        "models": [model.label for model in models],
+        "models_total": len(models),
+        "scenarios": list(scenarios),
+        "scenarios_total": len(scenarios),
+        "cells_total": cells_total,
+        "cells_known": cells_known and bool(groups_total),
+        "samples_total": samples_total,
+        "samples_known": samples_known,
+        "repeats": int(cfg.run.repeats),
+        "method": "accuracy",
+    }
+
+
 def plan_counts(cfg: Any) -> Dict[str, Any]:
     """Cheap plan summary for the progress/estimate UI.
 
     Uses ``DatasetAdapter.plan()`` (cached index, no sample loading) for
-    scenarios whose size is defined by the dataset (the eight ``perf_jsonl``
-    slices).  Cells are counted per (scenario, dataset, context_length) group so
-    the progress bar matches the aggregates written by the run.
+    scenarios whose size is defined by the dataset.  Performance cells are
+    counted per (scenario, dataset, context_length) group; accuracy cells are
+    one group per scenario (no buckets, no ISL filtering).
     """
+    if RunMethod.parse(cfg.method) is RunMethod.ACCURACY:
+        return _accuracy_counts(cfg)
     models = cfg.selected_models()
     scenarios = cfg.selected_scenarios()
     labels = [model.label for model in models]
@@ -141,7 +329,9 @@ def plan_counts(cfg: Any) -> Dict[str, Any]:
         "cells_total": cells_total,
         "cells_known": cells_known and bool(groups_total),
         "samples_total": samples_total,
+        "samples_known": samples_known,
         "repeats": int(cfg.run.repeats),
+        "method": "performance",
     }
 
 
@@ -201,15 +391,145 @@ def _optional_int(value: Any, field_name: str) -> Optional[int]:
     return parsed
 
 
+def _resolve_method_and_testset(cfg: Any, payload: Dict[str, Any]) -> RunMethod:
+    """Resolve ``payload.method``/``testset`` and apply the test set.
+
+    Contract (design §4.1/§9.1): an explicit method must agree with the test
+    set's declared method; a missing test set falls back to the method's default
+    test set; an unknown method is a ``ValueError`` (HTTP 400 / CLI exit 1).
+    """
+    testsets = load_testsets(Path(cfg.datasets.testset_dir))
+    raw_method = payload.get("method")
+    explicit = _parse_method(raw_method) if raw_method not in (None, "") else None
+    testset_name = str(payload.get("testset") or "").strip()
+    if testset_name and testset_name not in testsets:
+        raise ValueError(f"unknown testset: {testset_name}")
+    if testset_name:
+        testset = testsets[testset_name]
+        if explicit is not None and testset.method != explicit:
+            raise ValueError(
+                f"method {explicit.value} conflicts with testset {testset_name} "
+                f"(method={testset.method.value}); pick one method"
+            )
+        method = explicit or testset.method
+    else:
+        method = explicit or RunMethod.PERFORMANCE
+        preferred = _DEFAULT_TESTSET[method.value]
+        testset = testsets.get(preferred)
+        if testset is None:
+            testset = next(
+                (item for item in testsets.values() if item.method == method), None
+            )
+        if testset is None:
+            raise ValueError(f"unknown testset: {preferred}")
+    _apply_testset(cfg, testset, explicit)
+    cfg.method = method
+    return method
+
+
+def _clean_sample_ids(payload: Dict[str, Any]) -> Dict[str, List[str]]:
+    sample_ids = payload.get("sample_ids") or {}
+    if not sample_ids:
+        return {}
+    if not isinstance(sample_ids, dict):
+        raise ValueError("sample_ids must be an object of scenario -> [sample_id]")
+    cleaned: Dict[str, List[str]] = {}
+    for name, ids in sample_ids.items():
+        if not isinstance(ids, list):
+            raise ValueError(f"sample_ids.{name} must be a list of sample ids")
+        values = [str(item) for item in ids if str(item).strip()]
+        if values:
+            cleaned[str(name)] = values
+    return cleaned
+
+
+def _clean_scenario_samples(payload: Dict[str, Any]) -> Dict[str, int]:
+    scenario_samples = payload.get("scenario_samples") or {}
+    if not scenario_samples:
+        return {}
+    if not isinstance(scenario_samples, dict):
+        raise ValueError("scenario_samples must be an object of scenario -> count")
+    cleaned = {
+        str(name): _optional_int(value, f"scenario_samples.{name}")
+        for name, value in scenario_samples.items()
+    }
+    return {name: value for name, value in cleaned.items() if value is not None}
+
+
+def _payload_context_windows(payload: Dict[str, Any]) -> List[int]:
+    context_windows = payload.get("context_windows")
+    if context_windows in (None, []):
+        return []
+    if not isinstance(context_windows, list):
+        raise ValueError("context_windows must be a list of token counts")
+    try:
+        return normalize_windows([int(value) for value in context_windows])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("context_windows entries must be integers (tokens)") from exc
+
+
+def _apply_perf_params(cfg: Any, payload: Dict[str, Any]) -> None:
+    """Performance-only selectors (method=performance)."""
+    cfg.perf.sample_ids = _clean_sample_ids(payload)
+    cfg.perf.samples_by_scenario = _clean_scenario_samples(payload)
+    cfg.perf.context_windows = _payload_context_windows(payload)
+    samples = _optional_int(payload.get("samples"), "samples")
+    if samples is not None:
+        cfg.perf.samples_per_dataset = samples
+    max_tokens = _optional_int(payload.get("max_tokens"), "max_tokens")
+    if max_tokens is not None:
+        cfg.perf.max_tokens = max_tokens
+    repeats = _optional_int(payload.get("repeats"), "repeats")
+    if repeats is not None:
+        cfg.run.repeats = repeats
+    if payload.get("cache_mode"):
+        from modelbench.domain.models import CacheMode
+
+        cfg.run.cache_mode = CacheMode(str(payload["cache_mode"]))
+
+
+def _apply_accuracy_params(cfg: Any, payload: Dict[str, Any]) -> None:
+    """Accuracy-only selectors; the run protocol is fixed by spec §2.
+
+    ``max_tokens``/``context_windows``/``repeats>1``/``warm``/``none`` belong to
+    the performance method: silently accepting them would change the accuracy
+    measurement protocol, so they are rejected with a 400/CLI error.
+    """
+    samples = _optional_int(payload.get("samples"), "samples")
+    max_tokens = _optional_int(payload.get("max_tokens"), "max_tokens")
+    if max_tokens is not None:
+        raise ValueError(
+            "accuracy 方法不允许 max_tokens：生成长度由每行 judge.max_new_tokens 固定"
+            "（见 docs/spec/22-accuracy-test-plan.md §2）"
+        )
+    if _payload_context_windows(payload):
+        raise ValueError(
+            "accuracy 方法不允许 context_windows：精度不做上下文档位筛选/ISL 入带"
+            "（见 docs/spec/22-accuracy-test-plan.md §2）"
+        )
+    repeats = _optional_int(payload.get("repeats"), "repeats")
+    if repeats is not None and repeats != 1:
+        raise ValueError("accuracy 固定 repeats=1（每样本一次响应一条判分记录）")
+    cache_mode = payload.get("cache_mode")
+    if cache_mode not in (None, "", "cold"):
+        raise ValueError("accuracy 固定 cold 缓存（每个 measured 请求前清 hot+SSD）")
+    cfg.accuracy.sample_ids = _clean_sample_ids(payload)
+    cfg.accuracy.samples_by_scenario = _clean_scenario_samples(payload)
+    if samples is not None:
+        cfg.accuracy.samples_per_scenario = samples
+    # The protocol is fixed regardless of config defaults (configure applies it
+    # again once WP-2 lands; belt and braces here keeps the payload honest).
+    from modelbench.domain.models import CacheMode
+
+    cfg.run.cache_mode = CacheMode.COLD
+    cfg.run.repeats = 1
+
+
 def build_config(payload: Dict[str, Any]):
     """Resolve UI request -> ProjectConfig (same semantics as CLI)."""
     cfg = load_config()
-    testset_name = str(payload.get("testset") or "performance")
-
-    testsets = load_testsets(Path(cfg.datasets.testset_dir))
-    if testset_name not in testsets:
-        raise ValueError(f"unknown testset: {testset_name}")
-    apply_testset(cfg, testsets[testset_name])
+    method = _resolve_method_and_testset(cfg, payload)
+    configure_method(cfg)
 
     models = payload.get("models") or []
     if not isinstance(models, list) or not models:
@@ -222,58 +542,7 @@ def build_config(payload: Dict[str, Any]):
             raise ValueError("select at least one dataset/scenario")
         cfg.selection.scenarios = [str(name) for name in scenarios]
 
-    sample_ids = payload.get("sample_ids") or {}
-    if sample_ids:
-        if not isinstance(sample_ids, dict):
-            raise ValueError("sample_ids must be an object of scenario -> [sample_id]")
-        cleaned: Dict[str, List[str]] = {}
-        for name, ids in sample_ids.items():
-            if not isinstance(ids, list):
-                raise ValueError(f"sample_ids.{name} must be a list of sample ids")
-            values = [str(item) for item in ids if str(item).strip()]
-            if values:
-                cleaned[str(name)] = values
-        cfg.perf.sample_ids = cleaned
-
-    scenario_samples = payload.get("scenario_samples") or {}
-    if scenario_samples:
-        if not isinstance(scenario_samples, dict):
-            raise ValueError("scenario_samples must be an object of scenario -> count")
-        cfg.perf.samples_by_scenario = {
-            str(name): _optional_int(value, f"scenario_samples.{name}")
-            for name, value in scenario_samples.items()
-        }
-        cfg.perf.samples_by_scenario = {
-            name: value
-            for name, value in cfg.perf.samples_by_scenario.items()
-            if value is not None
-        }
-
-    context_windows = payload.get("context_windows")
-    if context_windows not in (None, []):
-        if not isinstance(context_windows, list):
-            raise ValueError("context_windows must be a list of token counts")
-        try:
-            cfg.perf.context_windows = normalize_windows(
-                [int(value) for value in context_windows]
-            )
-        except (TypeError, ValueError) as exc:
-            raise ValueError("context_windows entries must be integers (tokens)") from exc
-
-    samples = _optional_int(payload.get("samples"), "samples")
-    if samples is not None:
-        cfg.perf.samples_per_dataset = samples
-    max_tokens = _optional_int(payload.get("max_tokens"), "max_tokens")
-    if max_tokens is not None:
-        cfg.perf.max_tokens = max_tokens
-
-    repeats = _optional_int(payload.get("repeats"), "repeats")
-    if repeats is not None:
-        cfg.run.repeats = repeats
-    if payload.get("cache_mode"):
-        from modelbench.domain.models import CacheMode
-
-        cfg.run.cache_mode = CacheMode(str(payload["cache_mode"]))
+    # Method-agnostic run parameters.
     if payload.get("thinking_mode"):
         cfg.run.thinking_mode = str(payload["thinking_mode"])
     if payload.get("max_requests"):
@@ -300,6 +569,12 @@ def build_config(payload: Dict[str, Any]):
         # project root (not the server process CWD), otherwise runs are written
         # outside the catalog that /api/runs reads.
         cfg.run.output_dir = str(resolve_project_path(str(payload["output_dir"])))
+
+    if method is RunMethod.ACCURACY:
+        _apply_accuracy_params(cfg, payload)
+    else:
+        _apply_perf_params(cfg, payload)
+
     cfg.run.isolate_models = True
     cfg.run.restore_state = True
     return cfg

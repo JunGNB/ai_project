@@ -19,14 +19,114 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from modelbench import __version__
-from modelbench.adapters.config.settings import PROJECT_ROOT, ProjectConfig, load_config
+from modelbench.adapters.config.settings import (
+    PROJECT_ROOT,
+    ProjectConfig,
+    load_config,
+    resolve_project_path,
+)
 from modelbench.adapters.omlx.backend import OMLXBackend
-from modelbench.application.plan import plan_overview
+from modelbench.application.plan import apply_testset, plan_overview
+from modelbench.domain.method import RunMethod
+
+
+def _parse_method(value: Any) -> RunMethod:
+    """Coerce ``--method``; unknown values raise ``ValueError`` (exit code 1)."""
+    try:
+        return RunMethod.parse(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"unknown method: {value!r}; expected one of "
+            f"{[method.value for method in RunMethod]}"
+        ) from exc
+
+
+def _apply_testset_compat(cfg: ProjectConfig, testset: Any, explicit: Any) -> None:
+    """Apply a test set with the WP-2 conflict check (explicit_method=)."""
+    try:
+        apply_testset(cfg, testset, explicit_method=explicit)
+    except TypeError:  # pragma: no cover - pre-WP-2 signature (transitional)
+        apply_testset(cfg, testset)
+
+
+def _configure_method(cfg: ProjectConfig) -> None:
+    """Apply the method's fixed-protocol defaults (WP-2 ``MethodProfile``)."""
+    try:
+        from modelbench.application.methods import get_method
+    except ImportError:  # pragma: no cover - WP-2 not merged yet
+        if RunMethod.parse(cfg.method) is RunMethod.ACCURACY:
+            from modelbench.domain.models import CacheMode
+
+            cfg.run.cache_mode = CacheMode.COLD
+            cfg.run.repeats = 1
+            cfg.run.max_retries = 1
+            cfg.run.warmup_requests = 0
+        return
+    get_method(cfg.method).configure(cfg)
+
+
+def _print_accuracy_plan(cfg: ProjectConfig, plan: Dict[str, Any]) -> None:
+    """Accuracy plan: per-scenario samples, judge families, time hint."""
+    models = plan.get("models") or []
+    scenarios = plan.get("scenarios") or []
+    labels = [row.get("label") or row.get("name") for row in scenarios]
+    print(f"models ({len(models)}): {models}")
+    print(f"scenarios ({len(labels)}): {labels}")
+    samples_label = plan.get("samples_label") or (
+        "全部可用样本" if cfg.accuracy.samples_per_scenario is None
+        else str(cfg.accuracy.samples_per_scenario)
+    )
+    print(f"samples_per_scenario: {samples_label}")
+    families = plan.get("judge_families") or []
+    print(
+        "judge families: "
+        + (", ".join(str(item) for item in families) if families
+           else "unknown (build dataset/test/accuracy/testset.jsonl to list them)")
+    )
+    print(
+        "protocol: temperature=0   top_p=1   "
+        f"cache_mode: {plan.get('cache_mode', 'cold')}   no decode guard   "
+        f"repeats: {plan.get('repeats', 1)}   "
+        f"retries: {cfg.run.max_retries}   "
+        f"warmup_per_model: {plan.get('warmup_per_model', cfg.run.warmup_per_model)}"
+    )
+    for row in scenarios:
+        total = row.get("samples_total")
+        print(
+            f"  scenario: {row.get('name')} | {row.get('dataset')} | "
+            f"{'unknown' if total is None else total} sample(s)"
+        )
+    # Accuracy has exactly one cell per scenario (the dataset split lives in
+    # the aggregates), so the per-cell lines are redundant with the scenario
+    # lines above; print only the estimate.
+    if plan.get("cells_estimate") is not None:
+        print(f"estimated cells: ~{plan['cells_estimate']}")
+    if plan.get("request_estimate") is not None:
+        print(f"estimated measured requests: ~{plan['request_estimate']}")
+    else:
+        print(
+            "estimated measured requests: unknown until the accuracy testset is built "
+            "(python tool/dataset/accuracy/build.py)"
+        )
+    print(
+        "estimated time: ~3h per model for 2,000 samples "
+        "(long context ~2-2.5h; docs/spec/22-accuracy-test-plan.md §8)"
+    )
+    if plan.get("max_requests"):
+        print(f"max_requests cap: {plan['max_requests']}")
+    print(
+        "output layout: output/runs/<run_id>/ (flat; run_id = "
+        "<batch_id>__accuracy__<model_slug>) + output/batches/<batch_id>.json"
+    )
 
 
 def _print_plan(cfg: ProjectConfig) -> None:
     plan = plan_overview(cfg)
-    print("mode: performance")
+    mode = str(plan.get("mode") or RunMethod.parse(cfg.method).value)
+    print(f"mode: {mode}")
+    if mode == "accuracy":
+        _print_accuracy_plan(cfg, plan)
+        return
     print(f"models ({len(plan['models'])}): {plan['models']}")
     scenarios = [item["label"] for item in plan["scenarios"]]
     print(f"scenarios ({len(scenarios)}): {scenarios}")
@@ -81,8 +181,8 @@ def build_config(args: argparse.Namespace) -> ProjectConfig:
         run_overrides["max_requests"] = args.max_requests
     if getattr(args, "warmup", None) is not None:
         run_overrides["warmup_requests"] = args.warmup
-    if getattr(args, "samples", None) is not None:
-        perf_overrides["samples_per_dataset"] = args.samples
+    # NOTE: --samples is method-specific (perf.samples_per_dataset vs
+    # accuracy.samples_per_scenario) and is applied after the method resolves.
     if getattr(args, "max_tokens", None) is not None:
         perf_overrides["max_tokens"] = args.max_tokens
     if getattr(args, "context_windows", None) is not None:
@@ -97,18 +197,68 @@ def build_config(args: argparse.Namespace) -> ProjectConfig:
         overrides=overrides,
     )
 
-    # Optional named test set (dataset/test/<name>/testset.yaml).
+    # Resolve the method first: explicit --method wins, otherwise the test set's
+    # declared method (default performance). A conflict is a hard error: never
+    # silently change the measurement calibre (design §4.1/§9.3).
+    from modelbench.adapters.config.testsets import load_testsets
+
+    testsets = load_testsets(Path(cfg.datasets.testset_dir))
+    raw_method = getattr(args, "method", None)
+    explicit = _parse_method(raw_method) if raw_method else None
     testset_name = getattr(args, "testset", None)
     if testset_name:
-        from modelbench.adapters.config.testsets import load_testsets
-        from modelbench.application.plan import apply_testset
-
-        testsets = load_testsets(Path(cfg.datasets.testset_dir))
         if testset_name not in testsets:
             raise ValueError(
                 f"unknown testset '{testset_name}'; available: {', '.join(sorted(testsets))}"
             )
-        apply_testset(cfg, testsets[testset_name])
+        testset = testsets[testset_name]
+        if explicit is not None and testset.method != explicit:
+            raise ValueError(
+                f"method {explicit.value} conflicts with testset '{testset_name}' "
+                f"(method={testset.method.value}); pick a matching test set or drop --method"
+            )
+        method = explicit or testset.method
+    else:
+        method = explicit or RunMethod.PERFORMANCE
+        preferred = "accuracy" if method is RunMethod.ACCURACY else "performance"
+        testset = testsets.get(preferred) or next(
+            (item for item in testsets.values() if item.method == method), None
+        )
+        if testset is None:
+            raise ValueError(f"unknown testset: {preferred}")
+
+    # Accuracy runs a fixed protocol: those flags would change the calibre.
+    if method is RunMethod.ACCURACY:
+        if getattr(args, "max_tokens", None) is not None:
+            raise ValueError(
+                "accuracy 方法不允许 --max-tokens：生成长度由每行 judge.max_new_tokens 固定"
+                "（见 docs/spec/22-accuracy-test-plan.md §2）"
+            )
+        if getattr(args, "context_windows", None):
+            raise ValueError(
+                "accuracy 方法不允许 --context-windows：精度不做上下文档位筛选/ISL 入带"
+                "（见 docs/spec/22-accuracy-test-plan.md §2）"
+            )
+        if getattr(args, "repeats", None) is not None and int(args.repeats) != 1:
+            raise ValueError("accuracy 固定 --repeats 1（每样本一次响应一条判分记录）")
+        if getattr(args, "cache_mode", None) not in (None, "cold"):
+            raise ValueError("accuracy 固定 --cache-mode cold（每个 measured 请求前清 hot+SSD）")
+
+    _apply_testset_compat(cfg, testset, explicit)
+    cfg.method = method
+    _configure_method(cfg)
+    # Explicit CLI generation length wins over the test set's declared default.
+    if getattr(args, "max_tokens", None) is not None:
+        cfg.perf.max_tokens = int(args.max_tokens)
+
+    samples = getattr(args, "samples", None)
+    if samples is not None:
+        if int(samples) < 1:
+            raise ValueError("--samples must be >= 1")
+        if method is RunMethod.ACCURACY:
+            cfg.accuracy.samples_per_scenario = int(samples)
+        else:
+            cfg.perf.samples_per_dataset = int(samples)
 
     if getattr(args, "models", None):
         cfg.selection.models = list(args.models)
@@ -195,7 +345,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 def _verify_dataset_manifest(raw_dir: Path) -> List[str]:
     """Verify every file recorded in a dataset's download manifest.
 
-    Datasets without a manifest (e.g. longbench_v2, synthetic) are skipped;
+    Datasets without a manifest (e.g. longbench_v2) are skipped;
     adapters still validate their own files when they load.
     """
     manifest_path = raw_dir / "download_manifest.json"
@@ -252,8 +402,12 @@ def cmd_validate(args: argparse.Namespace) -> int:
         "modelbench.adapters.host.hardware",
         "modelbench.adapters.datasets.registry",
         "modelbench.domain.evaluators.base",
+        "modelbench.domain.judges",
         "modelbench.domain.scenarios.registry",
+        "modelbench.domain.method",
         "modelbench.domain.metrics",
+        "modelbench.adapters.datasets.accuracy_jsonl",
+        "modelbench.application.methods",
         "modelbench.application.benchmark",
         "modelbench.adapters.storage.writer",
         "modelbench.adapters.storage.excel_report",
@@ -287,14 +441,95 @@ def cmd_validate(args: argparse.Namespace) -> int:
         return 1
 
     # 2b) testsets (root comes from datasets.testset_dir)
+    testsets: Dict[str, Any] = {}
     try:
         from modelbench.adapters.config.testsets import load_testsets
 
         testsets = load_testsets(Path(cfg.datasets.testset_dir))
-        print(f"  [ok] testsets: {', '.join(sorted(testsets))}")
+        print(
+            "  [ok] testsets: "
+            + ", ".join(
+                f"{name} ({testset.method.value})"
+                for name, testset in sorted(testsets.items())
+            )
+        )
     except Exception as exc:  # noqa: BLE001
         print(f"  [FAIL] testsets: {exc}")
         failures.append("testsets")
+
+    # 2c) accuracy test set (offline asset): missing data is a warning, never a
+    #     failure (the jsonl is gitignored and built by tool/dataset/accuracy).
+    accuracy_testset = next(
+        (testset for testset in testsets.values() if testset.method is RunMethod.ACCURACY),
+        None,
+    )
+    if accuracy_testset is not None:
+        from modelbench.interfaces.web.jobs import testset_judge_families
+
+        judge_info = testset_judge_families(cfg, accuracy_testset)
+        families = list(judge_info.get("families") or [])
+        try:
+            from modelbench.domain.judges import missing_dependencies
+
+            missing_deps = missing_dependencies(families)
+        except Exception as exc:  # noqa: BLE001 - dependency probe is advisory
+            print(f"  [warn] cannot probe accuracy judge dependencies: {exc}")
+        else:
+            if missing_deps:
+                print(
+                    "  [warn] accuracy judges missing optional dependencies "
+                    f"(affected samples -> judge_error): {', '.join(missing_deps)}"
+                )
+        data_path = None
+        for override in accuracy_testset.scenarios.values():
+            value = (override.dataset_params or {}).get("path")
+            if value:
+                data_path = resolve_project_path(str(value))
+                break
+        if data_path is None:
+            data_path = (
+                Path(cfg.datasets.testset_dir)
+                / accuracy_testset.name
+                / "testset.jsonl"
+            )
+        if not judge_info.get("available"):
+            print(
+                f"  [warn] accuracy testset data missing: {data_path} "
+                "(build with python tool/dataset/accuracy/build.py; "
+                "see dataset/README.md)"
+            )
+        else:
+            from modelbench.adapters.datasets.registry import get_adapter
+
+            for name, override in accuracy_testset.scenarios.items():
+                params = dict(override.dataset_params or {})
+                try:
+                    adapter = get_adapter(
+                        "accuracy_jsonl",
+                        raw_dir=Path(cfg.datasets.raw_dir),
+                        processed_dir=Path(cfg.datasets.processed_dir),
+                        params=params,
+                        testset_dir=Path(cfg.datasets.testset_dir),
+                    )
+                    samples = adapter.load()
+                    print(
+                        f"  [ok] dataset accuracy_jsonl[{name}]: "
+                        f"{len(samples)} samples"
+                    )
+                except FileNotFoundError as exc:
+                    print(f"  [warn] dataset accuracy_jsonl[{name}] not built: {exc}")
+                except Exception as exc:  # noqa: BLE001
+                    if getattr(args, "allow_missing", False):
+                        print(
+                            f"  [warn] dataset accuracy_jsonl[{name}]: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                    else:
+                        print(
+                            f"  [FAIL] dataset accuracy_jsonl[{name}]: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                        failures.append(f"dataset accuracy_jsonl[{name}]")
 
     # 3) datasets referenced by configured scenarios.
     #    Deduplicate by (dataset, dataset_params): the eight performance
@@ -448,11 +683,11 @@ def cmd_list(args: argparse.Namespace) -> int:
             path = Path(cfg.datasets.raw_dir) / name
             print(f"  {name:<14} raw_dir={path} exists={path.exists()}")
     if what in ("testsets", "all"):
-        from modelbench.adapters.config.testsets import available_testsets
+        from modelbench.adapters.config.testsets import load_testsets
 
         print("testsets:")
-        for name in available_testsets():
-            print(f"  {name}")
+        for name, testset in sorted(load_testsets(Path(cfg.datasets.testset_dir)).items()):
+            print(f"  {name:<24} method={testset.method.value}")
     if what in ("models", "all"):
         print("models (configured):")
         for model in cfg.models:
@@ -492,12 +727,17 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     argv = list(args.runs)
     if args.metrics:
         argv += ["--metrics", *args.metrics]
+    # WP-5 contract: method auto/performance/accuracy + optional noise baseline.
+    argv += ["--method", str(getattr(args, "method", None) or "auto")]
+    argv += ["--noise-baseline-pp", str(getattr(args, "noise_baseline_pp", 0.0) or 0.0)]
     if getattr(args, "json", False):
         argv.append("--json")
     if getattr(args, "paired", False):
         argv.append("--paired")
     if getattr(args, "output_dir", None):
         argv += ["--output-dir", args.output_dir]
+    # Exit codes are owned by analysis.cli (2 = sample mismatch/testset SHA
+    # mismatch for accuracy paired comparisons); never swallow them here.
     return analysis_main(argv)
 
 
@@ -746,8 +986,17 @@ def build_parser() -> argparse.ArgumentParser:
             help="test set under dataset/test/ (e.g. performance)",
         )
 
-    p_run = sub.add_parser("run", help="execute a performance benchmark run")
+    p_run = sub.add_parser("run", help="execute a performance or accuracy run")
     add_common(p_run)
+    p_run.add_argument(
+        "--method",
+        choices=["performance", "accuracy"],
+        help=(
+            "test method (default: inferred from --testset, otherwise performance). "
+            "A method that contradicts the test set is an error; accuracy runs a "
+            "fixed cold/temperature=0/repeats=1 protocol"
+        ),
+    )
     p_run.add_argument("--models", nargs="+", help="model ids/aliases (default: first enabled)")
     p_run.add_argument("--scenarios", nargs="+", help="only run these scenario names")
     p_run.add_argument(
@@ -853,6 +1102,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--metrics",
         nargs="+",
         help="metrics to compare (default: ttft_ms gen_tps tpot_ms e2e_ms peak_memory_gb input_context_tokens)",
+    )
+    p_an.add_argument(
+        "--method",
+        choices=["auto", "performance", "accuracy"],
+        default="auto",
+        help=(
+            "test method: auto (default; per run.json.method), performance, or "
+            "accuracy. Mixing methods is an error."
+        ),
+    )
+    p_an.add_argument(
+        "--noise-baseline-pp",
+        type=float,
+        default=0.0,
+        help=(
+            "accuracy paired verdict: |Δpp| must exceed this run-to-run noise "
+            "baseline before a regression/improvement label is printed"
+        ),
     )
     p_an.add_argument("--json", action="store_true", help="emit summaries as JSON")
     p_an.add_argument(
