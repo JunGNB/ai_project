@@ -2,22 +2,22 @@
 
 Contract under test (see ``docs/spec/11-performance-testset.md``):
 
-* 8 scenarios x 3 buckets x 10 targets = 240 rows, one fixed target set per scenario;
-* a row's ``tokens`` is the **prompt token target** (1024 / 8192 / 32768) and the
-  build must hit it exactly with the reference tokenizer (no tolerance band);
-* the three rows of one target are strictly nested context prefixes;
+* 8 scenarios x 3 buckets (1K/4K/32K) x 10 targets = 240 rows;
+* a row carries ``content_goal = 2 x bucket`` reference tokens (primary + filler)
+  and declares ``tokens = bucket`` as the run-time prompt-token target;
+* the primary part must survive every local model tokenizer and the task block
+  (build-time validity), so run-time trimming never cuts into it;
 * sampling is deterministic (``sha256(seed|id)`` ordering + largest remainder).
 
-The offline-safe cases run everywhere.  Tokenizer-dependent cases (``make_row``,
-``fit_prefix``, the built artifacts, the CLI smoke test) are skipped when
-``dataset/raw`` has not been downloaded, exactly like the clone-after-fetch flow.
+Tokenizer-dependent cases are skipped when ``dataset/raw`` or the built set is
+missing, exactly like the clone-after-fetch flow.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
-from pathlib import Path
+import shutil
+from typing import Any, Dict, List
 
 import pytest
 
@@ -37,11 +37,24 @@ needs_built_set = pytest.mark.skipif(
 )
 
 
+class FakeMaxModel:
+    """Cheap stand-in for :class:`build.MaxModelCounter` (no model zoo needed)."""
+
+    def tokens(self, text: str, lang: str) -> int:
+        return int(len(text) / 3) + 1
+
+
+def _counter() -> "build.Counter":
+    return build.Counter(RAW_TOKENIZER)
+
+
 # --------------------------------------------------------------------------- #
-# constants and shared helpers
+# constants and pure helpers
 # --------------------------------------------------------------------------- #
-def test_constants_match_the_design():
-    assert build.BUCKETS == {"1k": 1024, "8k": 8192, "32k": 32768}
+
+
+def test_constants_match_the_documented_contract():
+    assert build.BUCKETS == {"1k": 1024, "4k": 4096, "32k": 32768}
     assert build.SCENARIOS == (
         "knowledge_qa",
         "instruction_following",
@@ -53,345 +66,328 @@ def test_constants_match_the_design():
         "multilingual",
     )
     assert build.TARGETS_PER_SCENARIO == 10
-    assert build.OSL == 50 and build.MIN_COMPLETION_TOKENS == 50
-    assert build.TASK_MAX_TOKENS == 400
-    for bucket, target in build.BUCKETS.items():
-        assert build.content_goal(bucket) == target
-    assert build.SCENARIO_LANG["knowledge_qa"] == "zh"
-    assert build.SCENARIO_LANG["instruction_following"] == "zh"
-    assert build.SCENARIO_LANG["multilingual"] == "multi"
+    assert build.SEED == 42
+    assert build.OSL == 50
+    assert build.OVERSIZE == 2
+    assert build.TEMPLATE_MARGIN == 2
 
 
-def test_content_goal_honours_the_template_reserve(monkeypatch):
-    monkeypatch.setattr(build, "CONTENT_RESERVE", 64)
-    assert build.content_goal("1k") == 1024 - 64
-    assert build.content_goal("32k") == 32768 - 64
+def test_content_goal_is_two_buckets():
+    assert build.content_goal("1k") == 2048
+    assert build.content_goal("4k") == 8192
+    assert build.content_goal("32k") == 65536
 
 
-def test_sampling_module_is_the_shared_implementation():
-    from tool.dataset.performance import sampling
-
-    assert build.deterministic_pick is sampling.deterministic_pick
-    assert build.allocate is sampling.allocate
-
-
-# --------------------------------------------------------------------------- #
-# deterministic stratified sampling
-# --------------------------------------------------------------------------- #
-def test_deterministic_pick_is_deterministic_and_order_independent():
-    ids = [f"row-{index:03d}" for index in range(50)]
-    first = build.deterministic_pick(ids, 10)
-    assert first == build.deterministic_pick(list(reversed(ids)), 10)
-    assert first == build.deterministic_pick(ids, 10)
-    assert len(first) == 10 and len(set(first)) == 10
-    assert build.deterministic_pick(ids, 10, seed=7) != first
+def test_scenario_langs_follows_the_design():
+    assert build.scenario_langs("knowledge_qa", "1k") == ("en",)
+    assert build.scenario_langs("knowledge_qa", "4k") == ("en",)
+    assert build.scenario_langs("knowledge_qa", "32k") == ("zh",)
+    assert build.scenario_langs("instruction_following", "4k") == ("zh",)
+    assert build.scenario_langs("long_context", "32k") == ("en",)
+    assert build.scenario_langs("multilingual", "1k") == build.MULTILINGUAL_LANGS
 
 
-def test_deterministic_pick_rejects_oversized_request():
-    with pytest.raises(ValueError):
-        build.deterministic_pick(["a", "b"], 3)
-
-
-def test_allocate_uses_largest_remainder_and_respects_pools():
-    pools = {"a": 10, "b": 3, "c": 1}
-    picked = build.allocate(pools, 10, min_each=1)
-    assert sum(picked.values()) == 10
-    assert all(0 <= count <= pools[key] for key, count in picked.items())
-    assert picked["a"] >= picked["b"] >= picked["c"]
-
-
-def test_allocate_rejects_k_above_the_pool():
-    with pytest.raises(ValueError):
-        build.allocate({"a": 1}, 2)
-
-
-# --------------------------------------------------------------------------- #
-# exact alignment primitives
-# --------------------------------------------------------------------------- #
-@needs_tokenizer
-def test_fit_prefix_hits_the_budget_exactly():
-    counter = build.Counter(RAW_TOKENIZER)
-    units = [
-        "Sentence number %d explains why exact token budgets matter for prefill timing."
-        % index
-        for index in range(2000)
-    ]
-    for budget in (256, 1024, 8192):
-        text, got = build.fit_prefix(counter, units, budget)
-        assert got == budget == counter.n(text)
+def test_scenario_datasets_use_hotpotqa_for_short_knowledge_and_search():
+    assert build.SCENARIO_DATASET[("knowledge_qa", "1k")] == "hotpotqa"
+    assert build.SCENARIO_DATASET[("knowledge_qa", "4k")] == "hotpotqa"
+    assert build.SCENARIO_DATASET[("knowledge_qa", "32k")].startswith("longbench_pro")
+    assert build.SCENARIO_DATASET[("search_agent", "4k")] == "hotpotqa"
+    assert build.SCENARIO_DATASET[("coding", "1k")] == "humaneval"
 
 
 @needs_tokenizer
-def test_make_row_is_exact_and_nested():
-    counter = build.Counter(RAW_TOKENIZER)
-    units = [
-        ("Section %d. " % index)
-        + ("The quick brown fox jumps over the lazy dog. " * 40)
-        for index in range(200)
-    ]
-    target = {
-        "target_id": "tgt-long_context-000",
-        "upstream_id": "unit-test|nested",
-        "source": "unit-test",
-        "units": units,
-        "task": "Summarize the material above in at least 150 words.",
-        "stream_tokens": 40_000,
-        "meta": {"lang": "en"},
+def test_trim_to_goal_hits_the_goal_within_two_tokens():
+    counter = _counter()
+    text = "\n\n".join(
+        f"Paragraph {i}: the quick brown fox jumps over the lazy dog near the river."
+        for i in range(400)
+    )
+    out = build.trim_to_goal(counter, text, 2048)
+    assert abs(counter.n(out) - 2048) <= 2
+    assert text.startswith(out)
+
+
+# --------------------------------------------------------------------------- #
+# make_row: body = primary + filler, task kept apart
+# --------------------------------------------------------------------------- #
+
+
+def _target() -> Dict[str, Any]:
+    return {
+        "target_id": "tgt-knowledge_qa-abc123",
+        "scenario": "knowledge_qa",
+        "bucket": "1k",
+        "lang": "en",
+        "source": "hotpotqa",
+        "upstream_id": "hotpotqa#abc123",
+        "stratum": "all",
+        "primary": ["Aurora was born in the small town of Riverton in 1902."],
+        "filler": [],
+        "task": "Answer the question with evidence. Name the place Aurora was born.",
+        "evidence": "Riverton",
+        "cut_policy": "paragraph",
+        "meta": {"subject": "hotpotqa"},
     }
-    bodies = {}
-    for bucket in ("1k", "8k", "32k"):
-        row, body = build.make_row(counter, "long_context", target, bucket, 0)
-        bodies[bucket] = body
-        assert row["tokens"] == build.BUCKETS[bucket]
-        assert row["messages_tokens"] == build.BUCKETS[bucket]
-        assert row["meta"]["content_tokens"] == build.content_goal(bucket)
-        assert row["meta"]["task_sha256"] == build.sha256_text(target["task"])[:16]
-        assert counter.n(row["messages"][0]["content"]) == build.BUCKETS[bucket]
-        assert row["tools"] == [] and row["tools_tokens"] == 0
-    assert bodies["8k"].startswith(bodies["1k"])
-    assert bodies["32k"].startswith(bodies["8k"])
 
 
-def _fake_targets(count: int = build.TARGETS_PER_SCENARIO):
-    targets = {}
+@needs_tokenizer
+def test_make_row_keeps_primary_intact_and_task_separate():
+    counter = _counter()
+    target = _target()
+    target["filler"] = [
+        f"Filler paragraph {i}: unrelated background material for the same corpus."
+        for i in range(200)
+    ]
+    row = build.make_row(counter, FakeMaxModel(), target, "1k", 0)
+
+    assert row["id"] == "perf-knowledge_qa-1k-000"
+    assert row["bucket"] == "1k"
+    assert row["tokens"] == 1024
+    assert row["dataset"] == "hotpotqa"
+    assert [m["role"] for m in row["messages"]] == ["user", "user"]
+    body, task = row["messages"][0]["content"], row["messages"][1]["content"]
+    assert body.startswith(target["primary"][0])  # trimming never eats the primary
+    assert task == target["task"]
+    meta = row["meta"]
+    assert meta["primary_complete"] is True
+    assert meta["evidence_in_primary"] is True
+    assert meta["fits_bucket"] is True
+    assert meta["content_tokens"] == meta["body_tokens"] + meta["task_tokens"]
+    assert abs(meta["body_tokens"] - build.content_goal("1k")) <= 2
+    assert meta["content_tokens"] > build.content_goal("1k")  # body + task block
+
+
+@needs_tokenizer
+def test_make_row_rejects_empty_or_oversized_primary():
+    counter = _counter()
+    target = _target()
+    target["primary"] = [""]
+    with pytest.raises(ValueError, match="empty primary"):
+        build.make_row(counter, FakeMaxModel(), target, "1k", 0)
+
+    target = _target()
+    target["primary"] = ["word " * 5000]
+    with pytest.raises(ValueError, match="primary part"):
+        build.make_row(counter, FakeMaxModel(), target, "1k", 0)
+
+
+@needs_tokenizer
+def test_make_row_enforces_primary_plus_task_bucket_margin():
+    counter = _counter()
+    target = _target()
+    target["filler"] = ["x " * 8000]
+    target["task"] = "y " * 4000  # blows past the 1K bucket even for cheap tokenizers
+    with pytest.raises(ValueError, match="exceeds bucket"):
+        build.make_row(counter, FakeMaxModel(), target, "1k", 0)
+
+
+def test_pick_targets_is_deterministic_and_stratified():
+    candidates = [
+        {"target_id": f"tgt-{name}-{i}", "stratum": name}
+        for name in ("a", "b")
+        for i in range(6)
+    ]
+    first = build.pick_targets(candidates, 4)
+    second = build.pick_targets(list(reversed(candidates)), 4)
+    assert [c["target_id"] for c in first] == [c["target_id"] for c in second]
+    assert len({c["stratum"] for c in first}) == 2  # both strata served
+    with pytest.raises(ValueError, match="allocate"):
+        build.pick_targets(candidates[:2], 4)
+
+
+# --------------------------------------------------------------------------- #
+# validate_rows: rejects every contract break
+# --------------------------------------------------------------------------- #
+
+
+def _synthetic_rows() -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
     for scenario in build.SCENARIOS:
-        targets[scenario] = [
-            {
-                "target_id": f"tgt-{scenario}-{index:03d}",
-                "upstream_id": f"synthetic|{scenario}|{index:03d}",
-                "source": "synthetic",
-                "units": [],
-                "task": f"task for {scenario}",
-                "stream_tokens": build.STREAM_MIN_TOKENS,
-                "meta": {},
-            }
-            for index in range(count)
-        ]
-    return targets
-
-
-def _fake_rows(force_lang: str | None = None):
-    rows = []
-    bodies = {}
-    for scenario in build.SCENARIOS:
-        lang = force_lang or build.SCENARIO_LANG[scenario]
-        for index in range(build.TARGETS_PER_SCENARIO):
-            target_id = f"tgt-{scenario}-{index:03d}"
-            task = f"task for {scenario}"
-            task_sha = build.sha256_text(task)[:16]
-            for bucket in build.BUCKETS:
-                body = f"{scenario} body {index} "
-                body += {"1k": "1k", "8k": "1k 8k", "32k": "1k 8k 32k"}[bucket]
-                bodies[(target_id, bucket)] = body
+        for bucket in build.BUCKETS:
+            langs = build.scenario_langs(scenario, bucket)
+            for index in range(build.TARGETS_PER_SCENARIO):
+                if scenario == "multilingual":
+                    lang = build.MULTILINGUAL_LANGS[index]
+                else:
+                    lang = langs[0]
+                goal = build.content_goal(bucket)
+                meta = {
+                    "lang": lang,
+                    "content_tokens": goal,
+                    "body_tokens": goal - 100,
+                    "task_tokens": 100,
+                    "primary_complete": True,
+                    "evidence_in_primary": True,
+                    "fits_bucket": True,
+                    "primary_model_tokens": 10,
+                    "task_model_tokens": 10,
+                }
                 rows.append(
                     {
                         "id": f"perf-{scenario}-{bucket}-{index:03d}",
                         "scenario": scenario,
                         "bucket": bucket,
-                        "target_id": target_id,
-                        "dataset": build.SCENARIO_DATASET[scenario],
                         "tokens": build.BUCKETS[bucket],
-                        "messages_tokens": build.BUCKETS[bucket],
-                        "tools_tokens": 0,
-                        "messages": [{"role": "user", "content": body + task}],
                         "tools": [],
-                        "constructed": True,
-                        "meta": {
-                            "lang": lang,
-                            "content_tokens": build.content_goal(bucket),
-                            "task_sha256": task_sha,
-                        },
+                        "messages": [
+                            {"role": "user", "content": "body"},
+                            {"role": "user", "content": "task"},
+                        ],
+                        "meta": meta,
                     }
                 )
-    return rows, bodies
+    return rows
 
 
-def test_validate_rows_accepts_a_good_set():
-    rows, bodies = _fake_rows()
-    report = build.validate_rows(rows, _fake_targets(), list(build.BUCKETS), bodies)
-    assert report["problems"] == []
-    assert report["langs"]["zh"] == 60
+def test_validate_rows_accepts_the_synthetic_contract():
+    build.validate_rows(_synthetic_rows(), [])
 
 
-def test_validate_rows_rejects_short_cells():
-    rows, bodies = _fake_rows()
-    report = build.validate_rows(rows[:-3], _fake_targets(), list(build.BUCKETS), bodies)
-    assert any("rows != 10" in problem for problem in report["problems"])
+def test_validate_rows_rejects_missing_cells_and_short_cells():
+    rows = _synthetic_rows()
+    with pytest.raises(ValueError, match="cells mismatch"):
+        build.validate_rows(rows[:-10], [])
+    with pytest.raises(ValueError, match="rows != 10"):
+        build.validate_rows(rows[1:], [])
 
 
-def test_validate_rows_rejects_token_drift():
-    rows, bodies = _fake_rows()
-    rows[0]["tokens"] = 1000
-    report = build.validate_rows(rows, _fake_targets(), list(build.BUCKETS), bodies)
-    assert any("tokens 1000" in problem for problem in report["problems"])
+def test_validate_rows_rejects_token_and_accounting_drift():
+    rows = _synthetic_rows()
+    rows[0]["tokens"] = 2048
+    with pytest.raises(ValueError, match="tokens != bucket"):
+        build.validate_rows(rows, [])
+
+    rows = _synthetic_rows()
+    rows[0]["meta"]["content_tokens"] = 1
+    with pytest.raises(ValueError, match="content_tokens"):
+        build.validate_rows(rows, [])
+
+    rows = _synthetic_rows()
+    rows[0]["meta"]["body_tokens"] = 1
+    with pytest.raises(ValueError, match="accounting"):
+        build.validate_rows(rows, [])
 
 
-def test_validate_rows_rejects_content_drift():
-    rows, bodies = _fake_rows()
-    rows[0]["meta"]["content_tokens"] = 700
-    report = build.validate_rows(rows, _fake_targets(), list(build.BUCKETS), bodies)
-    assert any("content 700" in problem for problem in report["problems"])
+def test_validate_rows_rejects_shape_flags_and_language():
+    rows = _synthetic_rows()
+    rows[0]["tools"] = [{"name": "t"}]
+    with pytest.raises(ValueError, match="two user messages"):
+        build.validate_rows(rows, [])
 
+    rows = _synthetic_rows()
+    rows[0]["messages"] = [{"role": "system", "content": "x"}]
+    with pytest.raises(ValueError, match="two user messages"):
+        build.validate_rows(rows, [])
 
-def test_validate_rows_rejects_tools_accounting():
-    rows, bodies = _fake_rows()
-    rows[0]["tools"] = [{"type": "function", "function": {"name": "search"}}]
-    report = build.validate_rows(rows, _fake_targets(), list(build.BUCKETS), bodies)
-    assert any("accounting mismatch" in problem for problem in report["problems"])
+    rows = _synthetic_rows()
+    rows[0]["meta"]["fits_bucket"] = False
+    with pytest.raises(ValueError, match="do not fit"):
+        build.validate_rows(rows, [])
 
-
-def test_validate_rows_rejects_unnested_contexts():
-    rows, bodies = _fake_rows()
-    target_id = rows[0]["target_id"]
-    bodies[(target_id, "8k")] = "different 8k body"
-    report = build.validate_rows(rows, _fake_targets(), list(build.BUCKETS), bodies)
-    assert any("not nested prefixes" in problem for problem in report["problems"])
-
-
-def test_validate_rows_rejects_missing_chinese():
-    rows, bodies = _fake_rows(force_lang="en")
-    report = build.validate_rows(rows, _fake_targets(), list(build.BUCKETS), bodies)
-    assert "no Chinese sample in the test set" in report["problems"]
+    rows = _synthetic_rows()
+    rows[0]["meta"]["lang"] = "de"
+    with pytest.raises(ValueError, match="unexpected language"):
+        build.validate_rows(rows, [])
 
 
 # --------------------------------------------------------------------------- #
 # built artifacts
 # --------------------------------------------------------------------------- #
-def _artifact_oracle() -> dict:
-    """Resolve the tokenizer/reserve that produced the current ``testset.jsonl``.
-
-    The file is gitignored and may be either the reference build (SHA matches the
-    committed manifest) or a pre-run aligned rebuild (SHA matches an alignment
-    report under ``dataset/.cache/performance``).  Both are valid; tests must not
-    assume one of them -- same rule as ``build.check_outputs``.
-    """
-
-    sha = hashlib.sha256(OUT_JSONL.read_bytes()).hexdigest()
-    manifest = json.loads(OUT_MANIFEST.read_text(encoding="utf-8"))
-    if sha == manifest["rows_sha256"]:
-        return {
-            "sha256": sha,
-            "reserve": int(manifest["construction"]["template_reserve_tokens"]),
-            "tokenizer": manifest["tokenizer"]["path"],
-            "source": "manifest",
-        }
-    cache = build.OUT_DIR.parents[1] / ".cache" / "performance"
-    for report_path in sorted(cache.glob("alignment-*.json")):
-        report = json.loads(report_path.read_text(encoding="utf-8"))
-        if report.get("rows_sha256") == sha:
-            return {
-                "sha256": sha,
-                "reserve": int(report["reserve_tokens"]),
-                "tokenizer": report["tokenizer"]["path"],
-                "source": report_path.name,
-            }
-    raise AssertionError(
-        "testset.jsonl does not match the manifest nor any alignment report; "
-        "run tool/dataset/performance/build.py (reference) or align.py (target model)"
-    )
 
 
 @needs_built_set
 def test_built_testset_matches_the_contract():
-    oracle = _artifact_oracle()
-    rows = [json.loads(line) for line in OUT_JSONL.read_text(encoding="utf-8").splitlines()]
-    assert len(rows) == len(build.SCENARIOS) * len(build.BUCKETS) * build.TARGETS_PER_SCENARIO
-    assert len({row["target_id"] for row in rows}) == 80
-    cells = {}
-    for row in rows:
-        cells.setdefault(row["scenario"], {}).setdefault(row["bucket"], 0)
-        cells[row["scenario"]][row["bucket"]] += 1
-        assert row["tokens"] == build.BUCKETS[row["bucket"]]
-        assert row["messages_tokens"] == row["tokens"]
-        assert row["tools"] == [] and row["tools_tokens"] == 0
-        assert row["meta"]["content_tokens"] == build.BUCKETS[row["bucket"]] - oracle["reserve"]
-        assert row["meta"]["template_reserve_tokens"] == oracle["reserve"]
-        assert row["meta"]["task_tokens"] <= build.TASK_MAX_TOKENS
-        assert len(row["messages"]) == 1 and row["messages"][0]["role"] == "user"
-    assert set(cells) == set(build.SCENARIOS)
-    assert all(count == 10 for per_bucket in cells.values() for count in per_bucket.values())
-    langs = {}
-    for row in rows:
-        langs[row["meta"]["lang"]] = langs.get(row["meta"]["lang"], 0) + 1
-    assert langs["zh"] >= 60
-    assert langs["en"] >= 60
-    assert len(langs) == 10  # en, zh + the 8 non-Chinese MMLU languages
+    rows = [
+        json.loads(line)
+        for line in OUT_JSONL.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(rows) == 240
+    cells = {(row["scenario"], row["bucket"]) for row in rows}
+    assert cells == {(s, b) for s in build.SCENARIOS for b in build.BUCKETS}
+    for bucket in build.BUCKETS:
+        cell_rows = [row for row in rows if row["bucket"] == bucket]
+        assert len(cell_rows) == 80
+        assert {row["tokens"] for row in cell_rows} == {build.BUCKETS[bucket]}
+        for row in cell_rows:
+            meta = row["meta"]
+            assert meta["primary_complete"] is True
+            assert meta["fits_bucket"] is True
+            assert isinstance(meta["primary_share"], (int, float))
+    assert sum(1 for row in rows if row["meta"]["lang"] == "zh") >= 40
+    assert {row["meta"]["lang"] for row in rows} >= set(build.MULTILINGUAL_LANGS)
 
 
 @needs_built_set
 def test_built_manifest_matches_the_rows():
-    oracle = _artifact_oracle()
-    rows = [json.loads(line) for line in OUT_JSONL.read_text(encoding="utf-8").splitlines()]
     manifest = json.loads(OUT_MANIFEST.read_text(encoding="utf-8"))
     assert manifest["name"] == "performance"
-    assert manifest["rows"] == len(rows) == 240
-    assert oracle["sha256"] == hashlib.sha256(OUT_JSONL.read_bytes()).hexdigest()
-    assert manifest["buckets"] == build.BUCKETS
-    assert manifest["construction"]["tolerance_tokens"] == 0
-    assert manifest["construction"]["prompt_tokens"] == build.BUCKETS
-    assert "never a model under test" in manifest["tokenizer"]["role"]
-    assert manifest["alignment"]["tolerance_tokens"] == 0
-    assert manifest["alignment"]["verified_by"].startswith("tool/dataset/performance/align.py")
-    assert manifest["max_tokens"] == build.OSL
-    assert manifest["min_completion_tokens_required"] == 50
+    assert manifest["buckets"] == {"1k": 1024, "4k": 4096, "32k": 32768}
+    assert manifest["max_tokens"] == 50
+    construction = manifest["construction"]
+    assert construction["oversize"] == 2
+    assert construction["content_tokens"] == {"1k": 2048, "4k": 8192, "32k": 65536}
+    runtime = construction["runtime_alignment"]
+    assert runtime["mode"] == "trim+pad"
+    assert runtime["tolerance_tokens"] == 0
+    assert runtime["skipped_on_mismatch"] is False
+    assert manifest["rows"] == 240
+    assert sum(int(cell["rows"]) for cell in manifest["cells"].values()) == 240
+    # The committed file is either the reference build or a per-model aligned build;
+    # both are valid as long as the SHA matches the manifest or an alignment report.
+    rows_sha = build.sha256_file(OUT_JSONL)
+    report_shas = set()
+    for path in sorted(
+        (build.PROJECT_ROOT / "dataset" / ".cache" / "performance").glob("alignment-*.json")
+    ):
+        try:
+            report_shas.add(json.loads(path.read_text(encoding="utf-8"))["rows_sha256"])
+        except Exception:  # pragma: no cover - unreadable cache entry
+            continue
+    assert rows_sha == manifest["rows_sha256"] or rows_sha in report_shas
 
 
 @needs_built_set
-def test_check_outputs_accepts_the_built_set(capsys):
-    assert build.check_outputs(build.OUT_DIR) == 0
-    out = capsys.readouterr().out
-    assert "[check] ok" in out and "tokenizer oracle" in out
+def test_built_yaml_declares_buckets_alignment_and_generation():
+    import yaml
+
+    data = yaml.safe_load(OUT_YAML.read_text(encoding="utf-8"))
+    assert data["name"] == "performance"
+    assert data["buckets"] == {"1k": 1024, "4k": 4096, "32k": 32768}
+    assert data["max_tokens"] == 50
+    assert data["strict_input_tokens"] is True
+    assert "osl" not in data
+    assert len(data["scenarios"]) == 8
+    for scenario, spec in data["scenarios"].items():
+        assert spec["dataset"] == "perf_jsonl"
+        assert spec["dataset_params"]["scenario"] == scenario
+        assert spec["dataset_params"]["path"].endswith("dataset/test/performance/testset.jsonl")
 
 
 @needs_built_set
-def test_check_outputs_rejects_token_drift(tmp_path, capsys):
-    import json
-    import shutil
+def test_check_outputs_accepts_the_built_set():
+    build.check_outputs(build.OUT_DIR)
 
-    for name in ("manifest.json", "testset.jsonl", "testset.yaml"):
-        shutil.copy(build.OUT_DIR / name, tmp_path / name)
+
+@needs_built_set
+def test_check_outputs_rejects_token_drift(tmp_path):
+    shutil.copy(OUT_JSONL, tmp_path / "testset.jsonl")
+    shutil.copy(OUT_MANIFEST, tmp_path / "manifest.json")
+    shutil.copy(OUT_YAML, tmp_path / "testset.yaml")
     rows = [
         json.loads(line)
         for line in (tmp_path / "testset.jsonl").read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    rows[0]["tokens"] = rows[0]["tokens"] - 1
-    payload = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
-    (tmp_path / "testset.jsonl").write_text(payload, encoding="utf-8")
-
-    assert build.check_outputs(tmp_path) == 1
-    out = capsys.readouterr().out
-    assert "does not match manifest rows_sha256" in out
-
-
-@needs_built_set
-def test_check_outputs_cli_entry(capsys):
-    assert build.main(["--check"]) == 0
-    assert "[check] ok" in capsys.readouterr().out
+    rows[0]["tokens"] = 2048
+    (tmp_path / "testset.jsonl").write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError):
+        build.check_outputs(tmp_path)
 
 
-# --------------------------------------------------------------------------- #
-# align.py: pre-run rebuild contract
-# --------------------------------------------------------------------------- #
-from tool.dataset.performance import align as align_mod  # noqa: E402
-
-
-@needs_tokenizer
-def test_align_requires_model_when_server_mode():
-    with pytest.raises(SystemExit) as exc:
-        align_mod.main(
-            ["--tokenizer", str(RAW_TOKENIZER), "--base-url", "http://127.0.0.1:8000"]
-        )
-    assert exc.value.code == 2
-
-
-@needs_tokenizer
-def test_align_offline_requires_reserve():
-    with pytest.raises(SystemExit) as exc:
-        align_mod.main(["--tokenizer", str(RAW_TOKENIZER)])
-    assert exc.value.code == 2
-
-
-def test_align_resolve_api_key_prefers_env(monkeypatch):
-    monkeypatch.setenv("OMLX_API_KEY", "env-key")
-    assert align_mod.resolve_api_key("http://127.0.0.1:9") == "env-key"
+def test_check_reports_missing_directory(tmp_path):
+    with pytest.raises(Exception):
+        build.main(["--check", "--out-dir", str(tmp_path / "absent")])

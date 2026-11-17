@@ -1,240 +1,339 @@
 {
   "name": "performance",
-  "generated_at": "2026-11-14T19:23:11+0800",
+  "generated_at": "2026-11-16T12:13:30Z",
   "builder": "tool/dataset/performance/build.py",
   "seed": 42,
   "targets_per_scenario": 10,
   "buckets": {
     "1k": 1024,
-    "8k": 8192,
+    "4k": 4096,
     "32k": 32768
   },
   "max_tokens": 50,
   "min_completion_tokens_required": 50,
-  "tokenizer": {
-    "path": "/Users/huawei/Desktop/模型管家相关资料/modelbenchmark/dataset/raw/tokenizer/cl100k_base/tokenizer.json",
-    "sha256": "745dc2f8e2eb601a99627c0bef0c11fcb5bf8b311b74472c9b87184aa7c1a154",
-    "vocab_size": 100256,
-    "role": "reference (never a model under test; production runs use align.py)"
+  "reference_tokenizer": {
+    "path": "tokenizer/cl100k_base/tokenizer.json",
+    "sha256": "745dc2f8e2eb601a99627c0bef0c11fcb5bf8b311b74472c9b87184aa7c1a154"
   },
   "construction": {
-    "prompt_tokens": {
-      "1k": 1024,
-      "8k": 8192,
-      "32k": 32768
-    },
-    "template_reserve_tokens": 0,
+    "policy": "primary + filler",
+    "oversize": 2,
     "content_tokens": {
-      "1k": 1024,
-      "8k": 8192,
-      "32k": 32768
+      "1k": 2048,
+      "4k": 8192,
+      "32k": 65536
     },
-    "tolerance_tokens": 0,
-    "method": "ordered unit stream prefix + token-boundary cut + fixed task block",
-    "stream_min_tokens": 36000
-  },
-  "alignment": {
-    "unit": "prompt tokens of the rendered chat request (chat template included)",
-    "tolerance_tokens": 0,
-    "verified_by": "tool/dataset/performance/align.py against the target model"
-  },
-  "cells": {
-    "knowledge_qa": {
-      "1k": 10,
-      "8k": 10,
-      "32k": 10
-    },
-    "instruction_following": {
-      "1k": 10,
-      "8k": 10,
-      "32k": 10
-    },
-    "long_context": {
-      "1k": 10,
-      "8k": 10,
-      "32k": 10
-    },
-    "math_logic": {
-      "1k": 10,
-      "8k": 10,
-      "32k": 10
-    },
-    "coding": {
-      "1k": 10,
-      "8k": 10,
-      "32k": 10
-    },
-    "general_agent": {
-      "1k": 10,
-      "8k": 10,
-      "32k": 10
-    },
-    "search_agent": {
-      "1k": 10,
-      "8k": 10,
-      "32k": 10
-    },
-    "multilingual": {
-      "1k": 10,
-      "8k": 10,
-      "32k": 10
+    "template_margin_tokens": 2,
+    "runtime_alignment": {
+      "mode": "trim+pad",
+      "target": "prompt tokens of the rendered chat request",
+      "tolerance_tokens": 0,
+      "skipped_on_mismatch": false,
+      "aligner": "src/modelbench/application/prompt_align.py"
     }
   },
-  "langs": {
-    "zh": 63,
-    "en": 153,
-    "fr": 3,
-    "de": 3,
-    "es": 3,
-    "pt": 3,
-    "ru": 3,
-    "ja": 3,
-    "ko": 3,
-    "ar": 3
-  },
-  "stats": {
-    "task_tokens_min": 56,
-    "task_tokens_max": 395,
-    "content_chars": {
-      "1k": {
-        "min": 768,
-        "median": 4220,
-        "max": 4877
-      },
-      "8k": {
-        "min": 5722,
-        "median": 36455,
-        "max": 42196
-      },
-      "32k": {
-        "min": 22556,
-        "median": 145716,
-        "max": 169256
+  "validation": {
+    "checks": [
+      "primary units complete and present at body start",
+      "evidence string present in primary for evidence-critical scenarios",
+      "max known-tokenizer(primary) + max known-tokenizer(task) + template <= bucket",
+      "body content tokens == bucket x oversize (reference tokenizer)",
+      "two user messages, no tools, 10 rows per cell"
+    ],
+    "tokenizer_probe": {
+      "models": [
+        "gemma-4-E4B-it-oQ4",
+        "google/gemma-4-E4B-it",
+        "mlx-community/MiniCPM-o-4_5-4bit",
+        "mlx-community/Qwen3.5-9B-MLX-4bit",
+        "mlx-community/Qwen3.8-27B-4bit",
+        "openbmb/MiniCPM-V-4.6",
+        "openbmb/MiniCPM-V-4.7-1B",
+        "openbmb/MiniCPM5-1B",
+        "openbmb/MiniCPM5-2B",
+        "qwen/qwen3.6-35B-A3B",
+        "qwen3.6-35B-A3B-oQ4"
+      ],
+      "fallback": {
+        "en": 1.25,
+        "zh": 0.85,
+        "multi": 1.25
       }
-    }
+    },
+    "evidence_rows": 40
   },
   "sources": {
-    "knowledge_qa": {
-      "dataset": "longbench_pro:T3. Evidence-Grounded QA",
-      "upstream_ids": [
-        "01bc4408f2c18cf3a65fbc5dee3333db13d57af8f4a5feaa9ca58e986ab438a6",
-        "6c6f3beb9938e27397d4d3310b2307f62efeebd8bbea444c04434070b2714653",
-        "a647b340fbeb483da3e45fcc18d3233854b366c581abb2c7e2c5d568000e1646",
-        "d237e0623a764581c582ae0b750ce3bc0273d18297ea838a5bc1b5f3f4ef97ac",
-        "7513afab7211d39b6250935f783b8ba37dfbbf61b4c4217583ee689dbb5a0488",
-        "fcc09c15273a651cc0a29f564cc03e72d0ebd9d3cb36f014775970c59f5d2b93",
-        "0f2c0a8f569c32851f97f9d7f6e964daa200b2a92237b2decb11f8fed49fadf0",
-        "a51fe105cabf52b73e76a0a16fbb9f9c7c966a121d0474bc8de77965f0242e3d",
-        "e4bfd0ee7a4361762e280b28a78c2817474db182c91234c151f5a889c864badd",
-        "2702a01b1cb6056e7ecead6039b001ea34aa34e68127ed240525e63b201b5f1d"
+    "reference_tokenizer": "tokenizer/cl100k_base/tokenizer.json",
+    "cells": {
+      "knowledge_qa/1k": "hotpotqa",
+      "knowledge_qa/4k": "hotpotqa",
+      "knowledge_qa/32k": "longbench_pro:T3",
+      "instruction_following/1k": "vcsum+multi_if",
+      "instruction_following/4k": "vcsum+multi_if",
+      "instruction_following/32k": "vcsum+multi_if",
+      "long_context/1k": "longbench_pro:T4",
+      "long_context/4k": "longbench_pro:T4",
+      "long_context/32k": "longbench_pro:T4",
+      "math_logic/1k": "aime_2026+math_500",
+      "math_logic/4k": "aime_2026+math_500",
+      "math_logic/32k": "aime_2026+math_500",
+      "coding/1k": "humaneval",
+      "coding/4k": "longbench_v1:lcc",
+      "coding/32k": "longbench_v1:lcc+repobench",
+      "general_agent/1k": "bfcl_v4",
+      "general_agent/4k": "bfcl_v4",
+      "general_agent/32k": "bfcl_v4",
+      "search_agent/1k": "hotpotqa",
+      "search_agent/4k": "hotpotqa",
+      "search_agent/32k": "longbench_pro:T1+T5",
+      "multilingual/1k": "global_mmlu",
+      "multilingual/4k": "global_mmlu",
+      "multilingual/32k": "global_mmlu"
+    }
+  },
+  "cells": {
+    "knowledge_qa/1k": {
+      "rows": 10,
+      "dataset": "hotpotqa",
+      "langs": [
+        "en"
       ]
     },
-    "instruction_following": {
-      "dataset": "multi_if+vcsum",
-      "upstream_ids": [
-        "vcsum#e1227d725d1c6a095f099ee8e64441cda9623a9021c1df73|multi_if#2589:12:zh",
-        "vcsum#a567cc554c822f7341589fa89bb89eb47a181f53b678f294|multi_if#2567:14:zh",
-        "vcsum#bc280f86c897e0e90d6fdc5fcc3506e60031282fa1331025|multi_if#2752:10:zh",
-        "vcsum#60ff29aeea4ab42224b8153d03b5c388c0874634f9aeeed1|multi_if#1381:17:zh",
-        "vcsum#3e36b2fa83387faeada66af97e191e6a41505a80f2e2713d|multi_if#3606:12:zh",
-        "vcsum#f3cee13c2e7c1f4645db048f88006883faefd442532ef79e|multi_if#2253:17:zh",
-        "vcsum#3abd9bfd034a18a3e1fbee751bbb75e11ad79c1383533bf9|multi_if#2825:3:zh",
-        "vcsum#47fa8b64f9bb35d44f03c25f1f6925849cf52218485c3115|multi_if#2041:8:zh",
-        "vcsum#6da80c266a1306d2d3bd5d7648f19858cd0a83cac5d7af96|multi_if#1128:4:zh",
-        "vcsum#b8e16eba12e061d261859e6e878d095bc0d6508b0d8681df|multi_if#3256:8:zh"
+    "knowledge_qa/4k": {
+      "rows": 10,
+      "dataset": "hotpotqa",
+      "langs": [
+        "en"
       ]
     },
-    "long_context": {
-      "dataset": "longbench_pro:T4. Summarization & Synthesis",
-      "upstream_ids": [
-        "4c06bdd9c563bca46314fa04fd3f911a9debb2a86aa4a0da2b25ef760736923f",
-        "6da3ddec33e82a6849421744c35b17770ff9b34eff9382c9bdbc609aeabdffed",
-        "8d6f2bfb4cbdd1bc652b13052d953b57cc76daeb50fe780679dae5930cec1380",
-        "b0e29f36ad223d7a009cede19bcbe7380922eba2cdd790666e3ab49d491a0e0d",
-        "1269a18a106ab1d34fc9dd979562d23e848a5dfbb2a33891b6cbd4f8360fb259",
-        "2c4b0da9edaeb986f12d9140fc7fc7813b812825177017f1a448dabffee3c53b",
-        "f21383227be5492041e856169cfa04c9c2385553bd2117fcd7a367e9c7d8cb70",
-        "bd8e8e726e6dc3dd178ed73e5317af9d815e87a0b0c332a4e9ea1cc8e9450d48",
-        "a60727915a6053b6d53f54694f41866840d91fa6b9da6936b8abca2801b3d143",
-        "81816c9f27e2877f0c9d615cf30d32089afe592417a9d1f823042ede28135f3f"
+    "knowledge_qa/32k": {
+      "rows": 10,
+      "dataset": "longbench_pro:T3",
+      "langs": [
+        "zh"
       ]
     },
-    "math_logic": {
+    "instruction_following/1k": {
+      "rows": 10,
+      "dataset": "vcsum+multi_if",
+      "langs": [
+        "zh"
+      ]
+    },
+    "instruction_following/4k": {
+      "rows": 10,
+      "dataset": "vcsum+multi_if",
+      "langs": [
+        "zh"
+      ]
+    },
+    "instruction_following/32k": {
+      "rows": 10,
+      "dataset": "vcsum+multi_if",
+      "langs": [
+        "zh"
+      ]
+    },
+    "long_context/1k": {
+      "rows": 10,
+      "dataset": "longbench_pro:T4",
+      "langs": [
+        "en"
+      ]
+    },
+    "long_context/4k": {
+      "rows": 10,
+      "dataset": "longbench_pro:T4",
+      "langs": [
+        "en"
+      ]
+    },
+    "long_context/32k": {
+      "rows": 10,
+      "dataset": "longbench_pro:T4",
+      "langs": [
+        "en"
+      ]
+    },
+    "math_logic/1k": {
+      "rows": 10,
       "dataset": "aime_2026+math_500",
-      "upstream_ids": [
-        "aime_2026#30",
-        "aime_2026#2",
-        "aime_2026#8",
-        "aime_2026#20",
-        "aime_2026#4",
-        "aime_2026#3",
-        "aime_2026#19",
-        "aime_2026#14",
-        "aime_2026#1",
-        "aime_2026#26"
+      "langs": [
+        "en"
       ]
     },
-    "coding": {
-      "dataset": "longbench_v2:Code Repository Understanding",
-      "upstream_ids": [
-        "66f3fd3a821e116aacb30533",
-        "66fa788abb02136c067c6d75",
-        "66fa1e4cbb02136c067c5edf",
-        "66f40c5e821e116aacb30ad2",
-        "66ecf139821e116aacb1e0e1",
-        "66f2e874821e116aacb2c0af",
-        "66fa2734bb02136c067c627a",
-        "66f1dac1821e116aacb27df1",
-        "66fa6702bb02136c067c6abb",
-        "66f3df1e821e116aacb2f7be"
+    "math_logic/4k": {
+      "rows": 10,
+      "dataset": "aime_2026+math_500",
+      "langs": [
+        "en"
       ]
     },
-    "general_agent": {
-      "dataset": "bfcl_v4:simple_python+multiple",
-      "upstream_ids": [
-        "simple_python_352",
-        "simple_python_168",
-        "simple_python_306",
-        "simple_python_396",
-        "simple_python_50",
-        "simple_python_239",
-        "multiple_0",
-        "multiple_173",
-        "multiple_40",
-        "multiple_77"
+    "math_logic/32k": {
+      "rows": 10,
+      "dataset": "aime_2026+math_500",
+      "langs": [
+        "en"
       ]
     },
-    "search_agent": {
-      "dataset": "longbench_pro:T1/T5 Retrieval & Attribution",
-      "upstream_ids": [
-        "33cef05ac35f0158fffd8e8f164dbee431aab482bcf22a1b4fc50bc8357934ac",
-        "46c6903469d67d3e9cda824ca1c5967f46c7819f38b62a8ea7898734eca4ea8e",
-        "e4524b64f15c9ac410bd7b616f90565038637faa96dbf11901bc4399360a2679",
-        "057ce6f37aa11f8f8a1beaabf51ca576a925539a95689048c41fe8a3f6736047",
-        "8556e19535f48131be946b187558af8ec95521cf84e56db4023a6546113ecde6",
-        "2ad6ff148768518bb9890530988e4b586cd39c95c7169f0c68cebdddbf91fd0b",
-        "71f13d79d20df90f2a373c7c4eca8532d7511ffc47759be161d4af2c580cc932",
-        "c9a363a4cfb0e7c974dd9a69e69306f231fd6795e3826b563c5ac34306617492",
-        "9c50a44920e5d10d0ecefb1c941783d26b0a00c8ebb0daef9fc62b135ff3b592",
-        "7abd04ec7f6c9185b891d089a0224ee27b4ca302c027e3ba1c83931fe1f0e608"
+    "coding/1k": {
+      "rows": 10,
+      "dataset": "humaneval",
+      "langs": [
+        "en"
       ]
     },
-    "multilingual": {
+    "coding/4k": {
+      "rows": 10,
+      "dataset": "longbench_v1:lcc",
+      "langs": [
+        "en"
+      ]
+    },
+    "coding/32k": {
+      "rows": 10,
+      "dataset": "longbench_v1:lcc+repobench",
+      "langs": [
+        "en"
+      ]
+    },
+    "general_agent/1k": {
+      "rows": 10,
+      "dataset": "bfcl_v4",
+      "langs": [
+        "en"
+      ]
+    },
+    "general_agent/4k": {
+      "rows": 10,
+      "dataset": "bfcl_v4",
+      "langs": [
+        "en"
+      ]
+    },
+    "general_agent/32k": {
+      "rows": 10,
+      "dataset": "bfcl_v4",
+      "langs": [
+        "en"
+      ]
+    },
+    "search_agent/1k": {
+      "rows": 10,
+      "dataset": "hotpotqa",
+      "langs": [
+        "en"
+      ]
+    },
+    "search_agent/4k": {
+      "rows": 10,
+      "dataset": "hotpotqa",
+      "langs": [
+        "en"
+      ]
+    },
+    "search_agent/32k": {
+      "rows": 10,
+      "dataset": "longbench_pro:T1+T5",
+      "langs": [
+        "en"
+      ]
+    },
+    "multilingual/1k": {
+      "rows": 10,
       "dataset": "global_mmlu",
-      "upstream_ids": [
-        "zh#formal_logic/test/37",
-        "en#formal_logic/test/37",
-        "fr#formal_logic/test/37",
-        "de#formal_logic/test/37",
-        "es#formal_logic/test/37",
-        "pt#formal_logic/test/37",
-        "ru#formal_logic/test/37",
-        "ja#formal_logic/test/37",
-        "ko#formal_logic/test/37",
-        "ar#formal_logic/test/37"
+      "langs": [
+        "ar",
+        "de",
+        "en",
+        "es",
+        "fr",
+        "ja",
+        "ko",
+        "pt",
+        "ru",
+        "zh"
+      ]
+    },
+    "multilingual/4k": {
+      "rows": 10,
+      "dataset": "global_mmlu",
+      "langs": [
+        "ar",
+        "de",
+        "en",
+        "es",
+        "fr",
+        "ja",
+        "ko",
+        "pt",
+        "ru",
+        "zh"
+      ]
+    },
+    "multilingual/32k": {
+      "rows": 10,
+      "dataset": "global_mmlu",
+      "langs": [
+        "ar",
+        "de",
+        "en",
+        "es",
+        "fr",
+        "ja",
+        "ko",
+        "pt",
+        "ru",
+        "zh"
       ]
     }
   },
+  "stats": {
+    "rows": 240,
+    "cells": 24,
+    "langs": {
+      "en": 173,
+      "zh": 43,
+      "ar": 3,
+      "es": 3,
+      "ko": 3,
+      "de": 3,
+      "ja": 3,
+      "pt": 3,
+      "fr": 3,
+      "ru": 3
+    },
+    "content_chars_1k": {
+      "min": 1736,
+      "median": 7500,
+      "max": 9220
+    },
+    "content_chars_4k": {
+      "min": 6989,
+      "median": 33578,
+      "max": 35959
+    },
+    "content_chars_32k": {
+      "min": 50948,
+      "median": 267363,
+      "max": 357506
+    },
+    "primary_model_tokens": {
+      "1k": {
+        "min": 51,
+        "max": 975
+      },
+      "4k": {
+        "min": 51,
+        "max": 4053
+      },
+      "32k": {
+        "min": 51,
+        "max": 32539
+      }
+    },
+    "evidence_rows": 40
+  },
   "rows": 240,
-  "rows_sha256": "c309d05769b724099374f5e0b18648b0760facaceec5e2f27e0bced1ab907e23"
+  "rows_sha256": "fe8f84cf895d5ba1b3efe981e73c1a496d13a75351164ce170b3a7c5f41c1b7d"
 }

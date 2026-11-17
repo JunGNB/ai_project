@@ -7,7 +7,7 @@
 > 0.3.x 起支持**两种测试方法**（共用同一套测量内核与结果布局）：
 >
 > - **性能测试（`method=performance`）**：按测试集逐数据集取样本，逐样本测 TTFT / TG TPS /
->   峰值内存 / 输入上下文大小，按上下文档位（1K/8K/32K）**分别**展示平均值（不跨档位合并），
+>   峰值内存 / 输入上下文大小，按上下文档位（1K/4K/32K）**分别**展示平均值（不跨档位合并），
 >   不判分（`score` 恒 null）。
 > - **精度测试（`method=accuracy`）**：8 场景 × 250 = 2,000 条固定样本，`temperature=0` /
 >   冷缓存 / 无 decode guard / `repeats=1`，用 5 类**确定性判题器**逐样本判分，输出场景分、
@@ -149,7 +149,7 @@ docs/             # 方案/使用/架构
      **预热开关**（默认开：每个模型加载后发 1 条丢弃短请求，仿 oMLX QUICK，触发 JIT/Metal 编译；
      关闭后首个 measured 样本会包含冷启动，属非默认口径，结果不可与默认口径混算）与
      **上下文窗口**（可多选，默认不选）。上下文档位只筛选样本，且界面**只列出数据集实际存在的
-     档位**（`performance` 为 1K/8K/32K；1K 接受 0～1.5K token，其他 N 接受 N±0.5K token）；
+     档位**（`performance` 为 1K/4K/32K；1K 接受 0～1.5K token，其他 N 接受 N±0.5K token）；
      不选则测全部档位；cell 仍按场景×数据集×档位聚合。
    - **精度**：每场景样本数（留空 = 全部 250）、模型级预热开关、思考模式；其余解码协议
      （`temperature=0`/`top_p=1`/cold/无 decode guard/`repeats=1`/重试 1 次）**固定**，界面不提供
@@ -165,8 +165,8 @@ docs/             # 方案/使用/架构
    `logs/run.log`）、在 Finder 中打开 run 目录；行内带方法标签（`performance`/`accuracy`）。
 
 > 样本选择：界面只提供全局「每个场景样本数」（空 = 全部）。预构造样本**先按档位
-> （1k/8k/32k）做最大余数分配，再在每个档位内按语言（lang）做最大余数分配**，小样本量
-> 也会覆盖 1K/8K/32K（与 dry-run 计划同一实现，不会整段塌到 1K）；legacy 数据集
+> （1k/4k/32k）做最大余数分配，再在每个档位内按语言（lang）做最大余数分配**，小样本量
+> 也会覆盖 1K/4K/32K（与 dry-run 计划同一实现，不会整段塌到 1K）；legacy 数据集
 > 仍按 sample_id 取前 N。逐样本浏览/手选样本仍可通过 API
 > `GET /api/testsets/<name>/scenarios/<scenario>/samples` 与 `POST /api/run` 的
 > `scenario_samples`/`sample_ids` 使用（界面已按简洁模式移除入口）。
@@ -194,8 +194,8 @@ docs/             # 方案/使用/架构
 # 指定测试集 + 更长的生成窗口
 ./modelbench run --testset performance --models minicpm5-1b --samples 5 --max-tokens 256
 
-# 只测 1K 与 8K 上下文附近的样本（1K: 0-1.5K；8K: 7.5-8.5K），每项 5 个样本
-./modelbench run --models minicpm5-1b --samples 5 --context-windows 1024 8192 --warmup 2
+# 只测 1K 与 4K 上下文附近的样本（1K: 0-1.5K；4K: 7.5-8.5K），每项 5 个样本
+./modelbench run --models minicpm5-1b --samples 5 --context-windows 1024 4096 --warmup 2
 
 # 只打印计划
 ./modelbench run --models minicpm5-1b --samples 5 --dry-run
@@ -276,11 +276,11 @@ docs/             # 方案/使用/架构
 | 维度 | 性能（performance） | 精度（accuracy） |
 |---|---|---|
 | 回答的问题 | 多快、占多少内存 | 答得对不对 |
-| 样本 | 8 场景 × 1K/8K/32K × 10 = 240 | 8 场景 × 250 = 2,000 |
+| 样本 | 8 场景 × 1K/4K/32K × 10 = 240 | 8 场景 × 250 = 2,000 |
 | 单请求 | 统一 `perf.max_tokens=50` + decode guard | 逐行 `judge.max_new_tokens`，无 decode guard |
 | 协议 | 默认 cold、`repeats=1`、预热 1 次/模型 | **固定** cold、`temperature=0`、`top_p=1`、无 guard、`repeats=1`、重试 1 次 |
 | 判分 | 不判分（`score=null`） | 5 类确定性判题（无 LLM judge、无网络、无人工） |
-| 结论 | TTFT/TG TPS/峰值内存，按 1K/8K/32K 分档 | 场景分、8 场景宏平均、语言/数据集剖面、配对 Δ |
+| 结论 | TTFT/TG TPS/峰值内存，按 1K/4K/32K 分档 | 场景分、8 场景宏平均、语言/数据集剖面、配对 Δ |
 | run_id | `<batch>__performance__<model>` | `<batch>__accuracy__<model>` |
 
 ### 5.1 Web：方法卡片与测试集过滤
@@ -440,8 +440,8 @@ JSONL 字段：`question`、`answer`、`answer_type`（`numeric|mc|exact|...`）
   `run.json.batch_id`。`ls output/runs/` 即可看到全部结果，同批次多个模型可直接对比，
   但每个 run 的证据互不混合。
 - `aggregates.json` 的 `overall[]`：每个**模型 × 上下文档位**一行的整体平均值
-  （`context_length` 字段区分 1K/8K/32K；TTFT、TG TPS、峰值内存、输入上下文大小等）。
-  **不要跨档位再求平均**；1K/8K/32K 的 TTFT/预填充相差一个数量级。
+  （`context_length` 字段区分 1K/4K/32K；TTFT、TG TPS、峰值内存、输入上下文大小等）。
+  **不要跨档位再求平均**；1K/4K/32K 的 TTFT/预填充相差一个数量级。
 - **不可与官方榜横比**：默认模型级预热 1 次（`warmup_per_model=1`，per-cell 预热 0）、`max_tokens=50`、`repeats=1` 且逐请求冷缓存，
   与 vLLM / oMLX 官方 benchmark 的预热、生成长度、批处理口径不同；本系统数字只适合在
   **同口径、同 run 配置**下做模型间相对比较。需要更长生成时用 `--max-tokens`，但须与默认结果分开报告。

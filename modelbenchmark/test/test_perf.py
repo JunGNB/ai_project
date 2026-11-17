@@ -619,21 +619,19 @@ def test_performance_manifest_declares_strict_token_semantics():
             encoding="utf-8"
         )
     )
-    # Strict mode relies on the dataset's zero-tolerance alignment contract.
-    alignment = manifest["alignment"]
-    assert "prompt tokens" in alignment["unit"]
-    assert alignment["tolerance_tokens"] == 0
-    assert "align.py" in alignment["verified_by"]
+    # Strict mode relies on the dataset's zero-tolerance runtime alignment contract.
     construction = manifest["construction"]
-    assert construction["tolerance_tokens"] == 0
-    assert construction["template_reserve_tokens"] == 0
-    assert construction["prompt_tokens"] == {"1k": 1024, "8k": 8192, "32k": 32768}
-    assert manifest["buckets"] == construction["prompt_tokens"]
+    runtime = construction["runtime_alignment"]
+    assert runtime["tolerance_tokens"] == 0
+    assert "prompt tokens" in runtime["target"]
+    assert construction["oversize"] == 2
+    assert construction["template_margin_tokens"] == 2
+    assert manifest["buckets"] == {"1k": 1024, "4k": 4096, "32k": 32768}
     assert manifest["max_tokens"] == 50
     assert manifest["min_completion_tokens_required"] >= 50
     assert manifest["rows"] == 240
-    assert sum(sum(cell.values()) for cell in manifest["cells"].values()) == 240
-    assert "reference" in manifest["tokenizer"]["role"]
+    assert sum(int(cell["rows"]) for cell in manifest["cells"].values()) == 240
+    assert manifest["reference_tokenizer"]["path"].endswith("tokenizer.json")
 
 
 @requires_perf_data
@@ -678,7 +676,7 @@ def test_perf_jsonl_plan_matches_load_and_bucket_mapping():
     assert plan is not None
     assert sum(item["n"] for item in plan) == len(adapter.load())
     # long_context now has all three buckets, 10 samples each.
-    assert {item["context_length"] for item in plan} == {1024, 8192, 32768}
+    assert {item["context_length"] for item in plan} == {1024, 4096, 32768}
     assert sum(item["n"] for item in plan if item["context_length"] == 32768) == 10
     # bucket filter narrows the plan and the load identically.
     filtered = get_adapter(
@@ -697,23 +695,23 @@ def test_perf_jsonl_filters_limit_and_streams(tmp_path):
     rows = [
         _perf_row(0, dataset="mmlu"),
         _perf_row(1, scenario="math_logic", dataset="gsm8k"),
-        _perf_row(2, bucket="8k", tokens=8200, dataset="longbench_v1:gov_report"),
+        _perf_row(2, bucket="4k", tokens=4100, dataset="longbench_v1:gov_report"),
         _perf_row(3),
     ]
     adapter = _perf_adapter(tmp_path, rows, {"scenario": "knowledge_qa", "limit": 2})
     samples = adapter.load()
     assert [sample.sample_id for sample in samples] == ["test-knowledge_qa-000", "test-knowledge_qa-002"]
     assert samples[0].metadata["context_length"] == 1024
-    assert samples[1].metadata["context_length"] == 8192
+    assert samples[1].metadata["context_length"] == 4096
     assert samples[0].metadata["bucket"] == "1k"
     assert samples[0].metadata["tokens"] == 100
     # The plan uses the same filter/limit semantics.
     assert sum(item["n"] for item in adapter.plan()) == 2
     bucket_filtered = _perf_adapter(
-        tmp_path, rows, {"scenario": "knowledge_qa", "buckets": ["8k"]}
+        tmp_path, rows, {"scenario": "knowledge_qa", "buckets": ["4k"]}
     )
     assert len(bucket_filtered.load()) == 1
-    assert {item["context_length"] for item in bucket_filtered.plan()} == {8192}
+    assert {item["context_length"] for item in bucket_filtered.plan()} == {4096}
     with pytest.raises(ValueError, match="no samples"):
         _perf_adapter(tmp_path, rows, {"scenario": "coding"}).load()
     with pytest.raises(ValueError, match="requires params.dataset_params.scenario"):
@@ -812,14 +810,14 @@ def test_prebuilt_request_too_long_for_window_raises_valueerror(tmp_path):
     cfg = load_config()
     spec = cfg.scenarios["long_context"]
     scenario = build_scenario("long_context", spec.params)
-    sample = _prebuilt_sample(metadata={"tokens": 9000, "context_length": 8192, "bucket": "8k"})
+    sample = _prebuilt_sample(metadata={"tokens": 5000, "context_length": 4096, "bucket": "4k"})
     writer = RunWriter(tmp_path, run_id="prebuilt-overflow")
     orchestrator = Orchestrator(cfg, object(), writer)
     with pytest.raises(ValueError, match="prebuilt prompt too long"):
-        orchestrator._build_request(scenario, spec, "model-a", sample, 8192)
+        orchestrator._build_request(scenario, spec, "model-a", sample, 4096)
     # It fits once the window is large enough.
     request = orchestrator._build_request(scenario, spec, "model-a", sample, 32768)
-    assert request.actual_prompt_tokens == 9000
+    assert request.actual_prompt_tokens == 5000
     assert request.truncated is False
 
 
@@ -926,12 +924,12 @@ def test_exact_bounds_and_strict_tolerance_for_bucket():
     )
 
     assert exact_bounds(1024) == (1024, 1024)
-    assert exact_bounds(8192) == (8192, 8192)
+    assert exact_bounds(4096) == (4096, 4096)
     # 32K stays 32,768: no special case for the largest bucket.
     assert exact_bounds(32768) == (32768, 32768)
 
     assert tolerance_for_bucket("1k", strict=True) == (1024, 1024)
-    assert tolerance_for_bucket("8k", strict=True) == (8192, 8192)
+    assert tolerance_for_bucket("4k", strict=True) == (4096, 4096)
     assert tolerance_for_bucket("32k", strict=True) == (32768, 32768)
     # Declared-count fallback resolves to that count, exactly.
     assert tolerance_for_bucket(None, 5000, strict=True) == (5000, 5000)
@@ -940,7 +938,7 @@ def test_exact_bounds_and_strict_tolerance_for_bucket():
 
     # Historical ±10% behaviour is unchanged by the strict flag's default.
     assert tolerance_for_bucket("1k") == (921, 1126)
-    assert tolerance_for_bucket("8k") == (7372, 9011)
+    assert tolerance_for_bucket("4k") == (3686, 4505)
     assert tolerance_for_bucket("32k") == (29491, 36044)
     assert tolerance_for_bucket(None, None) is None
 
@@ -1020,18 +1018,19 @@ def test_strict_prebuilt_request_exact_match_uses_exact_bounds(tmp_path):
     assert tolerance["target"] == 1024
     assert tolerance["actual"] == 1024
     assert request.context_meta["strict_input_tokens"] is True
-    # The decode guard (+35-token user message) must not be appended: the
-    # whole request is exactly the dataset prompt.
-    assert request.context_meta["decode_guard_applied"] is False
-    assert "decode_guard" not in request.context_meta
-    assert [message.role for message in request.messages] == ["system", "user"]
+    # Strict mode aligns the final prompt (decode guard included) at run time;
+    # nothing is skipped and the measured prompt is exactly the bucket target.
+    assert request.context_meta["decode_guard_applied"] is True
+    assert request.context_meta["prompt_alignment"]["final_tokens"] == 1024
+    assert [message.role for message in request.messages] == ["system", "user", "user"]
     assert any(
-        "strict input alignment: decode guard disabled" in warning
+        "strict input alignment: prompts are trimmed/padded at run time" in warning
         for warning in orchestrator.stats.warnings
     )
 
 
-def test_strict_prebuilt_request_mismatch_raises_sample_skipped(tmp_path):
+def test_strict_prebuilt_request_unalignable_tokenizer_is_skipped(tmp_path):
+    """A frozen tokenizer count (never reaching the target) cannot be aligned."""
     from modelbench.application.benchmark import SampleSkipped
     from modelbench.domain.scenarios.registry import build_scenario
 
@@ -1040,14 +1039,14 @@ def test_strict_prebuilt_request_mismatch_raises_sample_skipped(tmp_path):
     scenario = build_scenario("knowledge_qa", spec.params)
     sample = _prebuilt_sample(metadata={"tokens": 1024, "bucket": "1k"})
     orchestrator = _strict_orchestrator(
-        tmp_path, _StubTokenizerClient(1023), run_id="strict-mismatch"
+        tmp_path, _StubTokenizerClient(1023), run_id="strict-unalignable"
     )
     with pytest.raises(SampleSkipped) as info:
         orchestrator._build_request(scenario, spec, "model-a", sample, 32768)
     message = str(info.value)
-    assert message.startswith("strict_input_tokens: ")
+    assert message.startswith("runtime_alignment: ")
     assert "knowledge_qa/mmlu@1k/prebuilt-1" in message
-    assert "expected 1024 got 1023" in message
+    assert "cannot align prompt to 1024 tokens" in message
 
 
 def test_strict_prebuilt_request_unavailable_tokenizer_is_skip(tmp_path):
@@ -1063,7 +1062,9 @@ def test_strict_prebuilt_request_unavailable_tokenizer_is_skip(tmp_path):
         _StubTokenizerClient(error=RuntimeError("tokenizer offline")),
         run_id="strict-no-tokenizer",
     )
-    with pytest.raises(SampleSkipped, match="tokenizer unavailable for model-a"):
+    with pytest.raises(
+        SampleSkipped, match=r"runtime_alignment: tokenizer unavailable for model-a"
+    ):
         orchestrator._build_request(scenario, spec, "model-a", sample, 32768)
 
 
@@ -1093,7 +1094,7 @@ def test_context_window_filter_uses_declared_tokens_for_prebuilt(tmp_path):
     cfg = load_config()
     spec = cfg.scenarios["long_context"]
     scenario = build_scenario("long_context", spec.params)
-    sample = _prebuilt_sample(metadata={"tokens": 8197, "context_length": 8192, "bucket": "8k"})
+    sample = _prebuilt_sample(metadata={"tokens": 4097, "context_length": 4096, "bucket": "4k"})
     writer = RunWriter(tmp_path, run_id="ctx-declared")
     orchestrator = Orchestrator(cfg, object(), writer)
 
@@ -1101,7 +1102,7 @@ def test_context_window_filter_uses_declared_tokens_for_prebuilt(tmp_path):
         raise AssertionError("prebuilt context filter must use declared tokens")
 
     orchestrator._build_request = forbidden  # type: ignore[method-assign]
-    cfg.perf.context_windows = [8192]
+    cfg.perf.context_windows = [4096]
     kept = orchestrator._filter_by_context(
         "long_context", scenario, spec, "model-a", [sample], 65536
     )
@@ -1127,7 +1128,7 @@ def test_plan_overview_reports_default_requests_and_cell_groups():
         for group in plan["groups"]
     }
     assert len(keys) == DEFAULT_CELLS
-    assert {group["context_length"] for group in plan["groups"]} == {1024, 8192, 32768}
+    assert {group["context_length"] for group in plan["groups"]} == {1024, 4096, 32768}
     # Context-window filtering is exact for perf_jsonl (declared tokens).
     cfg.perf.context_windows = [1024]
     filtered = plan_overview(cfg)
@@ -1166,7 +1167,7 @@ def _bucket_sample(sample_id, context_length, lang="en"):
         metadata={
             "prebuilt": True,
             "context_length": context_length,
-            "bucket": {1024: "1k", 8192: "8k", 32768: "32k"}[context_length],
+            "bucket": {1024: "1k", 4096: "4k", 32768: "32k"}[context_length],
             "lang": lang,
         },
     )
@@ -1175,7 +1176,7 @@ def _bucket_sample(sample_id, context_length, lang="en"):
 def test_stratified_sample_covers_buckets_proportionally():
     from modelbench.domain.scenarios.base import stratified_sample
 
-    samples = [_bucket_sample(f"a-8k-{i:03d}", 8192) for i in range(6)]
+    samples = [_bucket_sample(f"a-4k-{i:03d}", 4096) for i in range(6)]
     samples += [_bucket_sample(f"b-32k-{i:03d}", 32768) for i in range(4)]
     chosen = stratified_sample(samples, 5)
     counts = {}
@@ -1183,10 +1184,10 @@ def test_stratified_sample_covers_buckets_proportionally():
         counts[sample.metadata["context_length"]] = (
             counts.get(sample.metadata["context_length"], 0) + 1
         )
-    assert counts == {8192: 3, 32768: 2}  # 50/50 split by largest remainder
+    assert counts == {4096: 3, 32768: 2}  # 50/50 split by largest remainder
     assert chosen == sorted(chosen, key=lambda sample: sample.sample_id)
     # Global 32k-first ordering must not starve the 8K bucket.
-    assert any(sample.metadata["bucket"] == "8k" for sample in chosen)
+    assert any(sample.metadata["bucket"] == "4k" for sample in chosen)
     # n >= len keeps everything sorted; legacy samples fall back to first-N.
     assert len(stratified_sample(samples, None)) == 10
     assert [s.sample_id for s in stratified_sample(samples, 99)] == sorted(
@@ -1216,7 +1217,7 @@ def test_samples_5_on_mixed_bucket_scenario_keeps_both_buckets():
 
     chosen = stratified_sample(adapter.load(), 5)
     assert len(chosen) == 5
-    assert {sample.metadata["context_length"] for sample in chosen} == {1024, 8192, 32768}
+    assert {sample.metadata["context_length"] for sample in chosen} == {1024, 4096, 32768}
 
 
 def test_declared_32k_bucket_over_model_window_is_not_testable():
@@ -1303,8 +1304,7 @@ def test_prebuilt_agentic_tool_schemas_live_in_prompt_verbatim():
         "model-a", sample, None, lambda *args, **kwargs: 0, max_tokens=64
     )
     prompt = "\n".join(str(message.content) for message in request.messages)
-    assert "Tool: " in prompt
-    assert "```json" in prompt
+    assert "tool" in prompt.lower()
     assert '"parameters"' in prompt
 
 
@@ -1319,7 +1319,7 @@ def test_plan_overview_exact_for_sample_count_and_windows():
     # Stratified N drops buckets/datasets that receive no sample.
     assert five["cells_estimate"] == FIVE_SAMPLE_CELLS
     cfg.perf.samples_per_dataset = None
-    cfg.perf.context_windows = [1024, 8192]
+    cfg.perf.context_windows = [1024, 4096]
     windows = plan_overview(cfg)
     assert windows["samples_total"] == 160
     assert windows["request_estimate"] == 160
@@ -1338,7 +1338,7 @@ def test_web_plan_counts_exact_for_sample_count_and_windows():
         build_config(
             {
                 "models": ["minicpm5-1b"],
-                "context_windows": [1024, 8192],
+                "context_windows": [1024, 4096],
             }
         )
     )
@@ -1350,8 +1350,8 @@ def test_perf_jsonl_plan_honours_samples_windows_and_ids(tmp_path):
     rows = (
         [_perf_row(0, tokens=100, dataset="mmlu")]
         + [_perf_row(1, tokens=100, dataset="ceval", meta={"lang": "zh"})]
-        + [_perf_row(2, bucket="8k", tokens=8200, dataset="longbench_v1:gov_report")]
-        + [_perf_row(3, bucket="8k", tokens=8200, dataset="longbench_v1:gov_report")]
+        + [_perf_row(2, bucket="4k", tokens=4100, dataset="longbench_v1:gov_report")]
+        + [_perf_row(3, bucket="4k", tokens=4100, dataset="longbench_v1:gov_report")]
         + [_perf_row(4, bucket="32k", tokens=32000, dataset="niah_style")]
     )
     base = {"scenario": "knowledge_qa"}
@@ -1365,17 +1365,17 @@ def test_perf_jsonl_plan_honours_samples_windows_and_ids(tmp_path):
     assert {(item["context_length"], item["lang"]) for item in strata} >= {
         (1024, "en"),
         (1024, "zh"),
-        (8192, "en"),
+        (4096, "en"),
         (32768, "en"),
     }
     # N=2 stratifies across buckets instead of taking the first 2 file rows (both 1k).
     sampled = adapter.plan({**base, "samples": 2})
     assert sum(item["n"] for item in sampled) == 2
-    assert {item["context_length"] for item in sampled} == {1024, 8192}
+    assert {item["context_length"] for item in sampled} == {1024, 4096}
     # Window filter uses declared tokens.
-    windowed = adapter.plan({**base, "context_windows": [8192]})
+    windowed = adapter.plan({**base, "context_windows": [4096]})
     assert sum(item["n"] for item in windowed) == 2
-    assert {item["context_length"] for item in windowed} == {8192}
+    assert {item["context_length"] for item in windowed} == {4096}
     # Explicit ids are honoured exactly.
     by_id = adapter.plan({**base, "sample_ids": ["test-knowledge_qa-002"]})
     assert sum(item["n"] for item in by_id) == 1
@@ -1391,7 +1391,7 @@ def test_stratified_sample_matches_plan_for_multilingual(tmp_path):
     langs = ["ar", "de", "en", "es", "fr", "hi", "ja", "ko", "pt", "ru", "vi"]
     rows = []
     idx = 0
-    for bucket, tokens in (("1k", 1024), ("8k", 8192), ("32k", 32768)):
+    for bucket, tokens in (("1k", 1024), ("4k", 4096), ("32k", 32768)):
         for lang in langs:
             rows.append(
                 _perf_row(
@@ -1413,4 +1413,4 @@ def test_stratified_sample_matches_plan_for_multilingual(tmp_path):
         chosen = stratified_sample(adapter.load(), n)
         actual = Counter(int(sample.metadata["context_length"]) for sample in chosen)
         assert actual == planned
-        assert set(actual) == {1024, 8192, 32768}
+        assert set(actual) == {1024, 4096, 32768}

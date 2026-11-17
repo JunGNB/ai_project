@@ -326,7 +326,7 @@ class OverallAggregate(BaseModel):
     """
 
     model: str
-    #: Declared bucket (1024/8192/32768); None = legacy/no declared bucket.
+    #: Declared bucket (1024/4096/32768); None = legacy/no declared bucket.
     context_length: Optional[int] = None
     n_datasets: int = 0
     n_samples: int = 0
@@ -368,7 +368,7 @@ class SampleResult(BaseModel):
     model_id: Optional[str] = None
     scenario: str
     dataset: str
-    #: Declared bucket size in tokens (1024/8192/32768); None for legacy samples.
+    #: Declared bucket size in tokens (1024/4096/32768); None for legacy samples.
     context_length: Optional[int] = None
     sample_id: str
     subtask: Optional[str] = None

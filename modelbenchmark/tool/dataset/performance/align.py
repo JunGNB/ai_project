@@ -149,6 +149,10 @@ def render(
     buckets: List[str],
 ) -> tuple[List[Dict[str, Any]], Dict[tuple, str], Dict[str, List[Dict[str, Any]]]]:
     builder.CONTENT_RESERVE = reserve
+    # Pre-flight alignment renders exact-length rows (the committed test set is
+    # built oversized and trimmed by the runner); this keeps the verification
+    # semantically identical to a run whose prompts need no trimming.
+    builder.OVERSIZE = 1
     targets_by_scenario = builder.build_targets(counter, scenarios)
     rows: List[Dict[str, Any]] = []
     bodies: Dict[tuple, str] = {}

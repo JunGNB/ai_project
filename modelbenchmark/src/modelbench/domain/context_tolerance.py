@@ -29,7 +29,7 @@ from __future__ import annotations
 from typing import Optional, Tuple
 
 #: Nominal bucket targets in content tokens (the dataset's declared value).
-BUCKET_TARGETS = {"1k": 1024, "8k": 8192, "32k": 32768}
+BUCKET_TARGETS = {"1k": 1024, "4k": 4096, "32k": 32768}
 TOLERANCE_RATIO = 0.10
 
 __all__ = [

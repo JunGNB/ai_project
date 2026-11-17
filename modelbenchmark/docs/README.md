@@ -10,11 +10,11 @@
 
 | 文档 | 状态 | 内容 | 维护时机 |
 |---|---|---|---|
-| [11-performance-testset.md](spec/11-performance-testset.md) | current v2.0 | 性能样本集设计：8 场景 × 1K/8K/32K × 10 的固定设计；通用 cl100k 基线构建 + 运行前按目标模型 tokenizer 严格对齐（0 容差）；抽样/来源/复现 | 性能样本/构造/对齐口径变化 |
+| [11-performance-testset.md](spec/11-performance-testset.md) | current v3.0 | 性能样本集设计：8 场景 × 1K/4K/32K × 10；primary+filler 构造、2× 超量材料 + 运行期按目标 tokenizer 精确对齐（0 容差）；抽样/来源/复现 | 性能样本/构造/对齐口径变化 |
 | [12-accuracy-testset.md](spec/12-accuracy-testset.md) | current v1.2 | 精度样本集设计：固定一套 8 场景选型、抽样、5 类判题、构造/移植；`method=accuracy` 已接入（`testset.yaml` + `runner=accuracy`） | 精度样本/判题/数据构造变化 |
 | [13-testset-portability.md](spec/13-testset-portability.md) | current v2.0 | **固定设计指纹 vs 测试系统职责** + 跨设备/跨系统比较准入（设计指纹、按目标 tokenizer 严格对齐、协议参数；非 strict 集保留 ±10% 带） | 样本交付/移植/比较口径变化 |
 | [20-methodology.md](spec/20-methodology.md) | current | 测量方法学：指标公式、TG TPS 有效性、actual ISL 与 strict 精确对齐（非 strict 保留 ±10% 入带聚合）、缓存治理、环境采集、可复现性 | 指标/缓存/样本语义变化 |
-| [21-test-plan.md](spec/21-test-plan.md) | current v2.5 | **性能测试方案**：固定设计 + 运行前按目标 tokenizer 严格对齐（0 容差）、strict skip 语义、TG TPS 有效性、ci95、执行流程、AC-1…AC-11；与精度方案的边界见 22 | 性能测试范围/样本/指标/验收变化 |
+| [21-test-plan.md](spec/21-test-plan.md) | current v2.6 | **性能测试方案**：固定设计 + 2× 超量构建 + 运行期按目标 tokenizer 严格对齐（0 容差、不跳过）、TG TPS 有效性、ci95、执行流程、AC-1…AC-11；与精度方案的边界见 22 | 性能测试范围/样本/指标/验收变化 |
 | [22-accuracy-test-plan.md](spec/22-accuracy-test-plan.md) | current v1.0 | **精度测试方案**：运行协议（cold/temp0/no-guard/repeats=1）、5 类确定性判题、场景分/宏平均/Wilson/配对分析、AC-A1…AC-A10、与性能的验收边界 | 精度协议/判题/指标/验收变化 |
 
 ## 设计 design/（怎么实现、对外契约）

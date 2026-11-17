@@ -791,7 +791,7 @@ def _sheet_averages(wb: Any, runs: List[Dict[str, Any]]) -> None:
 
 
 def _bucket_label(context_length: Any) -> str:
-    """Render a declared context bucket (1024/8192/32768) as 1K/8K/32K."""
+    """Render a declared context bucket (1024/4096/32768) as 1K/4K/32K."""
     try:
         value = int(context_length)
     except (TypeError, ValueError):

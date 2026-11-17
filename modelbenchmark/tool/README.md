@@ -11,14 +11,14 @@ tool/
 ├── dataset/
 │   ├── accuracy/                # 隐藏精度集（8 × 250）
 │   │   ├── fetch.py             # 下载/校验 → dataset/raw/
-│   │   ├── raw_spec.json        # 50 个文件的 path/url/bytes/sha256
+│   │   ├── raw_spec.json        # 精度集 50 个文件的 path/url/bytes/sha256
 │   │   ├── build.py             # 2,000 行 + manifest（不写 testset.yaml）
 │   │   └── {sampling,sources,prompts}.py
-│   └── performance/             # 性能集（8 场景 × 1K/8K/32K × 10 = 240）
+│   └── performance/             # 性能集（8 场景 × 1K/4K/32K × 10 = 240）
 │       ├── fetch.py             # 下载/校验/派生 cl100k → dataset/raw/
 │       ├── derive_cl100k.py     # 由官方 tiktoken blob 确定性生成参考 tokenizer
-│       ├── build.py             # 240 行 + manifest + testset.yaml（cl100k 基线）
-│       ├── align.py             # 运行前按目标模型 tokenizer 重建并逐条校验（0 容差）
+│       ├── build.py             # 240 行 + manifest + testset.yaml（cl100k 超量基线）
+│       ├── align.py             # 可选预检：按目标模型 tokenizer 验证 240 行能否精确对齐
 │       └── {sampling,sources}.py
 ├── migrate/
 │   └── legacy_v2_to_v3.py       # 一次性：把 archive/legacy-v2 的 schema-2.x bundle 重序列化为 3.0
@@ -41,11 +41,13 @@ $PY tool/dataset/performance/align.py \\
     --tokenizer /path/to/model/tokenizer.json --base-url http://127.0.0.1:8000 --model <model-id>
 ```
 
-`build.py` 用通用参考 tokenizer（cl100k_base）产出可审查的基线；**正式跑分前必须用 `align.py`
-按目标模型 tokenizer 重建同一设计**并逐条校验 prompt token == 1,024/8,192/32,768（容差 0），
-报告写 `dataset/.cache/performance/alignment-*.json`；runner 声明 `strict_input_tokens: true`，
-发送前复核，不等即 skip（不截断、不做 ±10% 误差带）。oMLX 有鉴权时，`align.py` 取 `--api-key`、
-`OMLX_API_KEY` 或 `modelbench` 配置中的 `server` key（与 runner 同源）。
+`build.py` 用通用参考 tokenizer（cl100k_base）把正文**超量**构建到 2× 档位
+（1K→2,048、4K→8,192、32K→65,536 token），任务块单独成第二条 user 消息；**runner 在发送前按目标
+模型 tokenizer 把 body 裁剪/补齐**到 1,024/8,192/32,768 精确等值（0 容差，含 warmup 学到的
+`usage.prompt_tokens - /v1/tokenize` 常量偏移），不跳过、不做 ±10% 误差带；结果逐样本记录
+`context_meta.prompt_alignment`。`align.py` 仅作可选预检（离线/服务器两种模式），不再是跑分前置条件；
+只有 tokenizer 不可用/无法对齐才记 `runtime_alignment` skip。oMLX 有鉴权时，`align.py` 取
+`--api-key`、`OMLX_API_KEY` 或 `modelbench` 配置中的 `server` key（与 runner 同源）。
 
 产物：`dataset/test/performance/{testset.jsonl,manifest.json,testset.yaml}`；
 `testset.jsonl` 与 `dataset/raw/` 不提交 git。场景 8 为 Global-MMLU `multilingual`（10 语种）。
@@ -77,6 +79,6 @@ $PY tool/dataset/accuracy/build.py --check
 
 - 所有构造器通过 `tool/common/fs.py` 的 `DATA_DIR` / `RAW_DIR` / `TEST_DIR` 定位数据，
   rename 数据根时只需改这一处；
-- 参考 tokenizer 由两个 `fetch.py` 下载到 `dataset/raw/tokenizer/MiniCPM5-1B/tokenizer.json`；
+- 性能集参考 tokenizer 为通用 `cl100k_base`（`dataset/raw/tokenizer/cl100k_base/tokenizer.json`，由官方 tiktoken blob 确定性派生）；精度集参考 tokenizer 见其 `sources.py`；
 - `dataset/raw/` 里保留的历史/备用数据集文件不属于当前两套测试集，manifest 只记录
-  `raw_spec.json` 中实际使用的文件。
+  `sources.py`（性能）与 `raw_spec.json`（精度）中实际使用的文件。

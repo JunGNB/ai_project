@@ -649,9 +649,9 @@ class RunWriter:
         guard = perf.get("decode_guard")
         if strict:
             lines.append(
-                "- 解码窗口保障（decode guard）：关闭（strict 集不追加长输出指令，"
-                "以保持 prompt token 严格等于档位目标；长回答由任务块与 max_tokens 保证；"
-                "响应不判分）"
+                "- 解码窗口保障（decode guard）：开启（strict 集先追加长输出指令，"
+                "再按目标模型 tokenizer 将整条 prompt 裁剪/补齐到档位目标；"
+                "长回答与精确输入同时满足；响应不判分）"
             )
         else:
             lines.append(
@@ -917,8 +917,8 @@ class RunWriter:
         lines.append(
             "> （`completion_tokens < 16` 时为 null）。"
             + (
-                "strict 集不开启 decode guard（保持 prompt token 精确对齐），"
-                "长回答由任务块与 max_tokens 保证；"
+                "strict 集先追加 decode guard，再按目标模型 tokenizer "
+                "把整条 prompt 裁剪/补齐到档位目标；"
                 if strict
                 else "性能模式默认开启 decode guard，在原始样本后追加长输出指令，"
                 "避免以 `Answer:` 结尾的样本 1 token 结束；"
@@ -1200,5 +1200,5 @@ def _num(value: Optional[float]) -> str:
 
 
 def _bucket_label(context_length: Optional[int]) -> str:
-    """Render a declared context bucket (1024/8192/32768) as ``1K``/``8K``/``32K``."""
+    """Render a declared context bucket (1024/4096/32768) as ``1K``/``4K``/``32K``."""
     return f"{context_length // 1024}K" if context_length else "native"

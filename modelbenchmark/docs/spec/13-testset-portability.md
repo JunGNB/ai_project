@@ -11,10 +11,11 @@
 ## 1. 一句话结论
 
 **同一套样本设计是唯一稳定的输入契约**；模型、tokenizer、后端、机器可以不同，但必须：
-同一设计指纹（target 集合 / 抽样 seed / 构造算法 / manifest `rows_sha256`）、同一目标长度
-（1,024 / 8,192 / 32,768，**容差 0**）、同一测量协议参数，并在运行前用**目标模型 tokenizer**
-重建/校验对齐（`align.py` 报告随结果留存）。因为长度是对齐到目标模型的，**最终 `testset.jsonl`
-的 SHA-256 允许逐模型不同**——它是"该模型上的对齐产物"，不是跨模型契约；跨模型契约是设计指纹。
+同一设计指纹（target 集合 / 抽样 seed / 构造算法 / manifest `design_sha256`）、同一目标长度
+（1,024 / 4,096 / 32,768，**容差 0**）、同一测量协议参数，并在运行期由 runner 按**目标模型 tokenizer**
+裁剪/补齐对齐（逐样本 `context_meta.prompt_alignment` 随结果留存）。因为长度是对齐到目标模型的，
+**最终 `testset.jsonl` 的 SHA-256 允许逐模型不同**——它是"该模型上的对齐产物"，不是跨模型契约；
+跨模型契约是设计指纹。
 精度方法另需**同一 judge 契约版本**与同一判题协议（§4.2）。
 
 两种方法（`method=performance` / `method=accuracy`）是**两套准入条件**：性能看设计指纹 + 对齐报告 +
@@ -22,31 +23,32 @@ TTFT/TPS 协议，精度看 testset SHA + 判题契约 + 解码协议；两者�
 
 ## 2. 样本侧（设计契约，一次定义、逐模型对齐）
 
-固定一套性能样本设计（默认 `dataset/test/performance/`，240 行 = 8 场景 × 1K/8K/32K × 10），
+固定一套性能样本设计（默认 `dataset/test/performance/`，240 行 = 8 场景 × 1K/4K/32K × 10），
 **所有设备/模型/后端复用同一设计，长度按目标模型对齐**：
 
 - **不做 per-model 抽样**：target 集合、单元流、任务块、抽样 seed 由 manifest 固定；换模型只改变
   "前缀长度"，不换样本。
-- **不做运行时裁剪/补齐**：对齐发生在**运行前**（`align.py` 重建同一设计并逐条校验），runner 原样发送。
-- **32K target 固定 32,768，无特殊处理**：1K/8K/32K 是对称的三种 bucket，没有"32K 特殊构造"。
+- **运行时只裁剪/补齐长度，不换样本**：对齐发生在发送前（`prompt_align.align_messages` 在 body 上
+  裁剪/平铺，任务块不动），抽样与 target 集合不变。
+- **32K target 固定 32,768，无特殊处理**：1K/4K/32K 是对称的三种 bucket，没有"32K 特殊构造"。
 - **不含性能判分**：性能 testset 不携带 gold/score；精度 testset 自带判题契约（`judge` 字段），
   只用于 `method=accuracy` 的独立 run，**不接入性能 run**（见
   [12-accuracy-testset.md](12-accuracy-testset.md) 与
   [22-accuracy-test-plan.md](22-accuracy-test-plan.md)）。二者共享的只是"固定设计"原则。
 - **字段契约**（性能 testset 单行，详见 [11-performance-testset.md](11-performance-testset.md) §6.2）：
-  `id`、`scenario`、`bucket`（1k/8k/32k）、`target_id`、`dataset`、`tokens`（**目标 prompt token**，
-  含 chat template；构建期用通用 cl100k 参考 tokenizer 定稿，生产 run 由 `align.py` 按目标模型重建，
-  见 [11-performance-testset.md](11-performance-testset.md) §4）、`messages`、`tools`、
-  `constructed`、`meta`（`lang`、`content_tokens`、`template_reserve_tokens`、`task_sha256`、
-  `body_sha256` 等）。
+  `id`、`scenario`、`bucket`（1k/4k/32k）、`target_id`、`dataset`、`tokens`（**目标 prompt token**，
+  含 chat template；构建期用通用 cl100k 参考 tokenizer 超量 2× 构建，生产 run 由 runner 按目标模型
+  tokenizer 裁剪/补齐，见 [11-performance-testset.md](11-performance-testset.md) §4）、`messages`、
+  `tools`、`constructed`、`meta`（`lang`、`built_content_tokens`、`body_tokens`、`task_tokens`、
+  `task_sha256`、`body_sha256` 等）。
 - **manifest/SHA**：`dataset/test/<name>/manifest.json` 记录**设计指纹**（seed、targets、
-  每档 `rows_sha256`、构造方法、`construction.tolerance_tokens=0`）与**对齐信息**
-  （`tokenizer{path,sha256,vocab_size,role}`、`alignment{tolerance_tokens:0, verified_by:align.py}`）；
-  每次 run 的最终 `testset.jsonl` SHA-256 与对齐报告（`dataset/.cache/performance/alignment-*.json`）
-  随结果留存。仓库提交 `testset.yaml` 与 `manifest.json`，`testset.jsonl` 由 `build.py`（参考基线）
-  或 `align.py`（目标模型对齐产物）确定性生成（seed 固定、无时间戳）。
-- **跨设备"样本同一"的定义**：**同一设计指纹 + 同一目标长度 + 各自的对齐报告（tokenizer SHA 与
-  校验结果）**。最终文件 SHA 可以不同，这是严格对齐的必然结果。
+  每档 `rows_sha256`、构造方法、`construction.tolerance_tokens=0`、`oversize=2`）与**对齐信息**
+  （`tokenizer{path,sha256,role}`、`runtime_alignment{mode:"trim+pad", aligner, tolerance_tokens:0}`）；
+  每次 run 逐样本记录 `prompt_alignment`（实际发送文本即 `request.messages`，随 run 结果留存）。
+  仓库提交 `testset.yaml` 与 `manifest.json`，`testset.jsonl` 由 `build.py` 确定性生成（seed 固定、
+  无时间戳）。
+- **跨设备"样本同一"的定义**：**同一设计指纹 + 同一目标长度 + 各自 run 的 `prompt_alignment` 统计
+  （对齐方式与 0 容差校验结果）**。最终文件 SHA 可以不同，这是运行期对齐的必然结果。
 
 ## 3. 系统侧（测试系统职责，各系统可不同实现）
 
@@ -54,7 +56,7 @@ TTFT/TPS 协议，精度看 testset SHA + 判题契约 + 解码协议；两者�
 
 | 职责 | 要求 | 记录位置 |
 |---|---|---|
-| 运行前对齐 | 用目标模型 tokenizer 按同一设计重建并逐条校验 `prompt_tokens == bucket`（0 容差）；报告含 tokenizer SHA-256、探针 reserve、每轮 attempts | `dataset/.cache/performance/alignment-<slug>.json` |
+| 运行期对齐 | runner 在发送前用目标模型 tokenizer 把 body 裁剪/平铺到 `prompt_tokens == bucket`（0 容差；含 warmup 学习的 `usage.prompt_tokens - /v1/tokenize` 常量偏移）；逐样本记录 mode/trim/pad/iterations | `context_meta.prompt_alignment` + `records.jsonl` 的 `usage.prompt_tokens` |
 | actual token 计数 | 请求前用**目标模型** `POST /v1/tokenize` 对最终 messages 计数；strict 集必须等于 bucket | `request.tokenized_prompt_tokens`、`context_meta.isl_tolerance{target,low,high,actual,ok}` |
 | 模型窗口判定 | 用 actual + `max_tokens` + `context_safety_margin` 对比模型窗口；**不足才 skip**（32K 需窗口 ≥32,946） | `run.json.outcome.skipped`、`context_meta.window_check_basis` |
 | 冷缓存 | measured 请求前清 hot+SSD 并校验 `cached_tokens==0`（fail-closed） | `records[].cache` |
@@ -72,7 +74,7 @@ TTFT/TPS 协议，精度看 testset SHA + 判题契约 + 解码协议；两者�
 
 1. **同一设计指纹**：`manifest.json` 的 seed / target 集合 / 每档 `rows_sha256` / 构造方法一致
    （"同一套设计"的凭据）；最终 `testset.jsonl` SHA 允许逐模型不同，但必须能追溯到同一设计指纹；
-2. **同一目标长度、0 容差**：1K=1,024、8K=8,192、32K=32,768，运行期 `tokenized_prompt_tokens` 必须
+2. **同一目标长度、0 容差**：1K=1,024、4K=4,096、32K=32,768，运行期 `tokenized_prompt_tokens` 必须
    精确相等（`align.py` 重建 + runner 复核，见 [11-performance-testset.md](11-performance-testset.md) §4），
    不含模型特定改造；
 3. **同一对齐与协议参数**：对齐报告（目标 tokenizer SHA-256、reserve、校验通过）随结果留存；
@@ -82,7 +84,7 @@ TTFT/TPS 协议，精度看 testset SHA + 判题契约 + 解码协议；两者�
    `insufficient_samples` 标记；
 5. **比较范围**：
    - **跨模型（同设计、不同 tokenizer）**：可声明"同一套设计、长度已按各自 tokenizer 精确对齐到
-     1K/8K/32K"，因此 TTFT/内存的差异可归因于模型/后端本身；仍不得把结果说成"官方榜同口径"。
+     1K/4K/32K"，因此 TTFT/内存的差异可归因于模型/后端本身；仍不得把结果说成"官方榜同口径"。
    - **同模型跨设备/后端**：同一 tokenizer 下对齐到同一长度，可直接比较；
 6. **不满足以上任一条件**：结果只能作为"该次运行"的证据，不能横向合并/平均/排名。
 

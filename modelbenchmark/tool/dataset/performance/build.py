@@ -1,58 +1,54 @@
-"""Build ``dataset/test/performance`` — 8 scenarios x 1K/8K/32K x 10 targets.
+"""Build ``dataset/test/performance`` — 8 scenarios x 1K/4K/32K x 10 targets.
 
 The set measures performance only (TTFT / TG TPS / peak memory), never accuracy.
-Design contract (see ``docs/spec/11-performance-testset.md``):
 
-* every scenario contributes **10 targets**; the same 10 targets are rendered in the
-  three buckets, so a bucket difference isolates context length only;
-* a target owns an **ordered unit stream** (documents / worked examples / tool schemas /
-  multiple-choice demonstrations) plus a **fixed task block** appended at the end.  A
-  bucket row is ``prefix(unit-stream, budget) + SEP + task``, so the three rows of one
-  target are strictly nested (1K subset 8K subset 32K);
-* ``tokens`` on a row is the **prompt token target** (1024 / 8192 / 32768); the build
-  reaches it exactly with one reference tokenizer (default: the generic ``cl100k_base``,
-  never a model under test).  ``--reserve`` accounts for the chat-template overhead of
-  the tokenizer used for the build, so the *content* is ``bucket - reserve`` tokens;
-* production runs do not use this reference build directly: ``align.py`` rebuilds the
-  same 240 rows with the target model tokenizer and verifies ``prompt_tokens == bucket``;
-* sampling is deterministic: ``sha256(seed|id)`` ordering + stratified largest remainder.
+Construction policy ("primary + filler", see ``docs/spec/11-performance-testset.md``):
+
+* a row has two user messages: a **body** (material) and a **task** (question/instruction);
+* the body starts with the scenario's **primary units** — whole documents, whole
+  worked examples, whole tool schemas, or a sentence-aligned excerpt that provably
+  contains the evidence — and then appends **filler units** of the same family;
+* the body is built at ``OVERSIZE x bucket`` reference tokens, so the run-time
+  aligner can trim it down to the exact bucket target with *any* model tokenizer and
+  only ever cut filler material;
+* every row is validated at build time: primary units are complete and present at the
+  start of the body, evidence strings of evidence-critical scenarios occur in the
+  primary part, and ``max_over_known_tokenizers(primary) + task + template <= bucket``
+  holds, i.e. trimming can never reach the primary part;
+* sampling is deterministic (``sha256(seed|id)`` order + stratified largest remainder).
+
+``build.py --check`` re-validates the committed artifacts without any model.
 
 Usage::
 
-    python tool/dataset/performance/build.py                  # reference build (240 rows)
+    python tool/dataset/performance/build.py                 # reference build
     python tool/dataset/performance/build.py --scenarios knowledge_qa --buckets 1k
-    python tool/dataset/performance/build.py --dry-run        # render, print stats, write nothing
+    python tool/dataset/performance/build.py --dry-run       # render only, write nothing
+    python tool/dataset/performance/build.py --check         # validate committed files
 """
 from __future__ import annotations
 
 import argparse
+import csv
+import glob
 import hashlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from tool.dataset.performance.sampling import allocate, deterministic_pick  # noqa: E402
-from tool.dataset.performance.sources import SCENARIO_SOURCE  # noqa: E402
 
 RAW_DIR = PROJECT_ROOT / "dataset" / "raw"
 OUT_DIR = PROJECT_ROOT / "dataset" / "test" / "performance"
-#: generic reference tokenizer used for the committed build; never a model under test
 REFERENCE_TOKENIZER_REL = "tokenizer/cl100k_base/tokenizer.json"
-#: chat-template token overhead reserved by the build tokenizer (set from --reserve);
-#: production alignment measures it for the real model instead
-CONTENT_RESERVE = 0
 
-BUCKETS: Dict[str, int] = {"1k": 1024, "8k": 8192, "32k": 32768}
-
-
-def content_goal(bucket: str) -> int:
-    """Content tokens a row must carry: prompt target minus template reserve."""
-    return BUCKETS[bucket] - CONTENT_RESERVE
+BUCKETS: Dict[str, int] = {"1k": 1024, "4k": 4096, "32k": 32768}
 SCENARIOS: Tuple[str, ...] = (
     "knowledge_qa",
     "instruction_following",
@@ -65,80 +61,84 @@ SCENARIOS: Tuple[str, ...] = (
 )
 TARGETS_PER_SCENARIO = 10
 SEED = 42
-#: Output window for TG TPS: every sample decodes at most this many tokens.
-#: Product default 50; a test set can declare another value and CLI/Web can
-#: override it per run, but the measured TG TPS is always a fixed-window figure.
 OSL = 50
-#: Completion tokens a sample is expected to reach before the window closes.
 MIN_COMPLETION_TOKENS = 50
-
-#: each unit stream must exceed 32K + task block, so the 32K row is a real prefix
-STREAM_MIN_TOKENS = 36_000
-#: a target's task block must leave >=600 content tokens in the 1K bucket
-TASK_MAX_TOKENS = 400
 SEP = "\n\n"
 
-#: join candidates tried in order; each costs a different number of tokens at the join, which
-#: is what closes the 1-2 token gaps a tokenizer boundary effect can leave open
-SEPARATOR_CANDIDATES = (SEP, "\n", " ", "", "\n\n\n", "\n ", "\n\n ", "\n \n", " \n\n")
-#: last-resort joins: whitespace pads of a known token cost inserted between the body prefix
-#: and the task block (the body stays a pure stream prefix so the nesting check still holds)
-PAD_CANDIDATES = ("", " ", "\n", "\n ", "  ", "\n\n ", "\n\n\n", "* * *")
+#: the run-time aligner trims the body with the model's own tokenizer; the body must
+#: therefore carry at least two reference tokens per bucket token (some tokenizers pack
+#: Chinese into ~0.5 reference tokens).
+OVERSIZE = 2
+#: worst-case expansion used when no local model tokenizers are available (validated
+#: tokenizers pack English up to ~1.15x; Chinese is always below 1.0x)
+FALLBACK_EXPANSION = {"en": 1.25, "zh": 0.85, "multi": 1.25}
 
-#: scenario -> language tag used by the perf_jsonl index / docs
-SCENARIO_LANG: Dict[str, str] = {
-    "knowledge_qa": "zh",
-    "instruction_following": "zh",
-    "long_context": "en",
-    "math_logic": "en",
-    "coding": "en",
-    "general_agent": "en",
-    "search_agent": "en",
-    "multilingual": "multi",
-}
-
-#: scenario -> stable ``dataset`` label on every row (one label per scenario keeps the
-#: plan at 24 cells; the precise upstream unit lives in ``meta.source`` / ``upstream_id``)
-SCENARIO_DATASET: Dict[str, str] = {
-    "knowledge_qa": "longbench_pro",
-    "instruction_following": "longbench_v1+multi_if",
-    "long_context": "longbench_pro",
-    "math_logic": "aime_2026+math_500",
-    "coding": "longbench_v2:code_repository",
-    "general_agent": "bfcl_v4",
-    "search_agent": "longbench_pro",
-    "multilingual": "global_mmlu",
-}
+#: fixed margin for chat-template / special tokens added by the server
+TEMPLATE_MARGIN = 2
+#: the task block must stay small so that the 1K bucket still holds material
+TASK_MAX_TOKENS = 420
+SHORTLIST_PER_STRATUM = 60
 
 MULTILINGUAL_LANGS: Tuple[str, ...] = ("zh", "en", "fr", "de", "es", "pt", "ru", "ja", "ko", "ar")
 
-#: per-language instruction tail (the payload itself is already in that language)
-ML_TASK: Dict[str, str] = {
-    "zh": "请选择正确选项，并用不少于 80 字说明理由，最后以「答案：X」结束。",
-    "en": "Answer with the correct option, explain in at least 80 words, then finish with 'Answer: X'.",
-    "fr": "Choisissez la bonne option, justifiez en au moins 80 mots, puis terminez par « Réponse : X ».",
-    "de": "Wähle die richtige Option, begründe in mindestens 80 Wörtern und ende mit „Antwort: X“.",
-    "es": "Elige la opción correcta, explica en al menos 80 palabras y termina con «Respuesta: X».",
-    "pt": "Escolha a opção correta, explique em pelo menos 80 palavras e finalize com «Resposta: X».",
-    "ru": "Выберите правильный вариант, объясните не менее чем в 80 словах и завершите «Ответ: X».",
-    "ja": "正しい選択肢を選び、80 語以上で理由を説明し、最後に「答え：X」で終えてください。",
-    "ko": "올바른 선택지를 고르고 80단어 이상으로 이유를 설명한 뒤 '답: X'로 끝내세요.",
-    "ar": "اختر الخيار الصحيح، واشرح في 80 كلمة على الأقل، ثم اختم بـ«الإجابة: X».",
+#: scenario x bucket -> stable ``dataset`` label (cell grouping label; the exact unit
+#: lives in ``meta.source`` / ``meta.upstream_id``)
+SCENARIO_DATASET: Dict[Tuple[str, str], str] = {
+    ("knowledge_qa", "1k"): "hotpotqa",
+    ("knowledge_qa", "4k"): "hotpotqa",
+    ("knowledge_qa", "32k"): "longbench_pro:T3",
+    ("instruction_following", "1k"): "vcsum+multi_if",
+    ("instruction_following", "4k"): "vcsum+multi_if",
+    ("instruction_following", "32k"): "vcsum+multi_if",
+    ("long_context", "1k"): "longbench_pro:T4",
+    ("long_context", "4k"): "longbench_pro:T4",
+    ("long_context", "32k"): "longbench_pro:T4",
+    ("math_logic", "1k"): "aime_2026+math_500",
+    ("math_logic", "4k"): "aime_2026+math_500",
+    ("math_logic", "32k"): "aime_2026+math_500",
+    ("coding", "1k"): "humaneval",
+    ("coding", "4k"): "longbench_v1:lcc",
+    ("coding", "32k"): "longbench_v1:lcc+repobench",
+    ("general_agent", "1k"): "bfcl_v4",
+    ("general_agent", "4k"): "bfcl_v4",
+    ("general_agent", "32k"): "bfcl_v4",
+    ("search_agent", "1k"): "hotpotqa",
+    ("search_agent", "4k"): "hotpotqa",
+    ("search_agent", "32k"): "longbench_pro:T1+T5",
+    ("multilingual", "1k"): "global_mmlu",
+    ("multilingual", "4k"): "global_mmlu",
+    ("multilingual", "32k"): "global_mmlu",
 }
 
+#: languages per scenario x bucket (used both for construction and validation)
+def scenario_langs(scenario: str, bucket: str) -> Tuple[str, ...]:
+    if scenario == "multilingual":
+        return MULTILINGUAL_LANGS
+    if scenario == "knowledge_qa":
+        # 1K/4K: HotpotQA gold paragraphs (en); 32K: LongBench-Pro T3 (zh)
+        return ("zh",) if bucket == "32k" else ("en",)
+    if scenario == "instruction_following":
+        return ("zh",)
+    return ("en",)
+
+
+def content_goal(bucket: str) -> int:
+    """Reference-token count the committed body carries (bucket x oversize)."""
+    return BUCKETS[bucket] * OVERSIZE
+
 
 # --------------------------------------------------------------------------- #
-# tokenizer wrapper
+# tokenizers
 # --------------------------------------------------------------------------- #
 class Counter:
-    """Token counter for the *reference* tokenizer (content only, no specials)."""
+    """Reference tokenizer wrapper (content only, no special tokens)."""
 
     def __init__(self, path: Path) -> None:
         from tokenizers import Tokenizer  # noqa: PLC0415 - optional dependency
 
         self.path = path
         self._tok = Tokenizer.from_file(str(path))
-        self._cache: Dict[int, int] = {}
+        self._cache: Dict[str, int] = {}
 
     def ids(self, text: str) -> List[int]:
         return self._tok.encode(text, add_special_tokens=False).ids
@@ -147,14 +147,58 @@ class Counter:
         return self._tok.decode(list(ids))
 
     def n(self, text: str) -> int:
-        key = hash(text)
-        value = self._cache.get(key)
+        value = self._cache.get(text)
         if value is None:
             value = len(self.ids(text))
-            self._cache[key] = value
+            self._cache[text] = value
         return value
 
 
+class MaxModelCounter:
+    """Worst-case token count over every tokenizer found under ``~/.omlx/models``.
+
+    The performance set is shared by many models; a build-time check against the
+    local model zoo proves that the primary part survives run-time trimming for all
+    of them. When no tokenizer is present (CI), a documented per-language expansion
+    factor is used instead.
+    """
+
+    def __init__(self, root: Optional[Path] = None) -> None:
+        from tokenizers import Tokenizer  # noqa: PLC0415
+
+        root = root or Path(os.path.expanduser("~/.omlx/models"))
+        self.models: Dict[str, Any] = {}
+        for path in sorted(glob.glob(str(root / "**" / "tokenizer.json"), recursive=True)):
+            name = path.split("/models/")[-1].removesuffix("/tokenizer.json")
+            try:
+                self.models[name] = Tokenizer.from_file(path)
+            except Exception:  # pragma: no cover - unreadable tokenizer, skip
+                continue
+        self._cache: Dict[str, int] = {}
+
+    def n(self, text: str) -> int:
+        value = self._cache.get(text)
+        if value is None:
+            value = max(
+                (len(tok.encode(text, add_special_tokens=False).ids) for tok in self.models.values()),
+                default=-1,
+            )
+            self._cache[text] = value
+        return value
+
+    def tokens(self, text: str, lang: str) -> int:
+        if self.models:
+            return self.n(text)
+        base = len(text)
+        return int(base * FALLBACK_EXPANSION.get(lang, 1.25) / 4) + 1
+
+    def describe(self) -> Dict[str, Any]:
+        return {"models": sorted(self.models), "fallback": FALLBACK_EXPANSION}
+
+
+# --------------------------------------------------------------------------- #
+# small helpers
+# --------------------------------------------------------------------------- #
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -167,16 +211,12 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-# --------------------------------------------------------------------------- #
-# raw loaders
-# --------------------------------------------------------------------------- #
 def load_jsonl(path: Path) -> List[Dict[str, Any]]:
     with path.open(encoding="utf-8") as fh:
         return [json.loads(line) for line in fh if line.strip()]
 
 
 def load_json_rows(path: Path) -> List[Dict[str, Any]]:
-    """Read a JSON array, or JSONL when the upstream file is line-delimited."""
     text = path.read_text(encoding="utf-8").strip()
     if text.startswith("["):
         data = json.loads(text)
@@ -184,7 +224,7 @@ def load_json_rows(path: Path) -> List[Dict[str, Any]]:
     return [json.loads(line) for line in text.splitlines() if line.strip()]
 
 
-def iter_json_array(path: Path, chunk_size: int = 8 << 20):
+def iter_json_array(path: Path, chunk_size: int = 8 << 20) -> Iterator[Any]:
     """Yield elements of a large top-level JSON array without loading it fully."""
     decoder = json.JSONDecoder()
     with path.open(encoding="utf-8") as fh:
@@ -220,519 +260,613 @@ def iter_json_array(path: Path, chunk_size: int = 8 << 20):
 def load_parquet(path: Path) -> List[Dict[str, Any]]:
     import pyarrow.parquet as pq  # noqa: PLC0415
 
-    table = pq.read_table(path)
-    return table.to_pylist()
+    return pq.read_table(path).to_pylist()
 
 
-# --------------------------------------------------------------------------- #
-# length alignment
-# --------------------------------------------------------------------------- #
-def fit_prefix(counter: Counter, units: Sequence[str], budget: int) -> Tuple[str, int]:
-    """Token-exact prefix of ``SEP.join(units)`` with exactly ``budget`` tokens."""
-    ids = counter.ids(SEP.join(units))
-    if len(ids) < budget:
-        raise ValueError(f"unit stream too short: {len(ids)} < {budget} tokens")
-    n = budget
-    for _ in range(12):
-        text = counter.decode(ids[:n])
-        got = counter.n(text)
-        if got == budget:
-            return text, got
-        n = max(1, min(n + (budget - got), len(ids)))
-    return text, counter.n(text)
+def cut_at_boundary(text: str, limit_chars: int) -> str:
+    """Cut ``text`` to <= ``limit_chars`` at the last sentence/paragraph boundary."""
+    if len(text) <= limit_chars:
+        return text
+    head = text[:limit_chars]
+    positions = [head.rfind(mark) for mark in ("\n\n", "\n", "。", "！", "？", ". ", "! ", "? ")]
+    cut = max(positions)
+    if cut <= 0:
+        return head
+    return head[: cut + 1]
+
+
+def trim_to_goal(counter: Counter, text: str, goal: int) -> str:
+    """Cut ``text`` to exactly ``goal`` reference tokens.
+
+    The cut is taken in id space (one encode of the material) so a 32K body costs a
+    couple of encodes instead of a binary search over characters; a short tail scan
+    covers the byte-pair boundary where re-encoding lands one or two tokens off.
+    """
+    ids = counter.ids(text)
+    if len(ids) < goal:
+        raise ValueError(f"material too short: {len(ids)} < {goal}")
+    body = counter.decode(ids[:goal]).rstrip("\ufffd").rstrip()
+    count = counter.n(body)
+    if count == goal:
+        return body
+    if count < goal:
+        for tail in (" ", "\n", "\t", "  ", "\n\n", "。"):
+            candidate = body + tail
+            if counter.n(candidate) == goal:
+                return candidate
+        # a byte-pair boundary can leave the exact count unreachable; one or two
+        # reference tokens out of an oversize body are immaterial (the runtime
+        # aligner still lands on the exact prompt target).
+        if goal - count <= 2:
+            return body
+        raise ValueError(f"cannot trim material to {goal} tokens (nearest below={count})")
+    for cut in range(1, 13):
+        candidate = body[:-cut].rstrip()
+        got = counter.n(candidate)
+        if got == goal:
+            return candidate
+        if got < goal:
+            if goal - got <= 2:
+                return candidate
+            break
+    raise ValueError(f"cannot trim material to {goal} tokens (body count={count})")
+
+
+def _normalized(text: str) -> str:
+    return " ".join(text.casefold().split())
+
+
+def _evidence_present(evidence: str, primary_text: str) -> bool:
+    return _normalized(evidence) in _normalized(primary_text)
 
 
 def make_row(
     counter: Counter,
-    scenario: str,
+    max_model: MaxModelCounter,
     target: Dict[str, Any],
     bucket: str,
     index: int,
 ) -> Dict[str, Any]:
+    """Compose one row: body = primary units + filler units, then the task block."""
+    scenario = target["scenario"]
+    lang = target["lang"]
     goal = content_goal(bucket)
-    task = target["task"]
-    task_tokens = counter.n(task)
-    if goal - task_tokens <= 0:
-        raise ValueError(f"{scenario}: task block longer than bucket {bucket}")
-    stream_ids = counter.ids(SEP.join(target["units"]))
-    last_n = max(1, goal - task_tokens)
-
-    def attempt(sep: str) -> Tuple[str, int]:
-        """Return (body, rendered token count) for the best cut under ``sep``."""
-        nonlocal last_n
-        n = goal - task_tokens
-        body = counter.decode(stream_ids[:n]).rstrip("\ufffd")
-        total = counter.n(body + sep + task)
-        for _ in range(40):
-            if total == goal:
-                last_n = n
-                return body, total
-            n = max(1, min(n + (goal - total), len(stream_ids)))
-            body = counter.decode(stream_ids[:n]).rstrip("\ufffd")
-            total = counter.n(body + sep + task)
-        last_n = n
-        return body, total
-
-    body, sep, total = "", SEP, -1
-    # Different separators consume a different number of tokens at the join, which is what
-    # makes an exact alignment possible when the tokenizer's boundary effect skips a value.
-    for candidate in SEPARATOR_CANDIDATES:
-        body, total = attempt(candidate)
-        if total == goal:
-            sep = candidate
+    primary = list(target["primary"])
+    primary_text = SEP.join(primary)
+    primary_ref = counter.n(primary_text)
+    if primary_ref <= 0:
+        raise ValueError(f"{scenario}/{bucket}: empty primary part")
+    if primary_ref >= goal:
+        raise ValueError(
+            f"{scenario}/{bucket}: primary part ({primary_ref}) >= content goal ({goal})"
+        )
+    # append filler units until the body is comfortably over the goal, then cut exactly
+    parts = list(primary)
+    text = primary_text
+    for unit in target["filler"]:
+        if counter.n(text) >= goal:
             break
-    if total != goal:
-        # Last resort: a boundary effect can leave a 1-2 token gap that no single separator
-        # closes.  Vary the body cut by +-2 stream tokens and append a whitespace pad, which
-        # shifts the join by a measured number of tokens.  The pad is part of the join, not of
-        # the body, so same-target rows keep the strict prefix relationship.
-        body, sep, total = "", SEP, -1
-        for n in (last_n - 2, last_n - 1, last_n, last_n + 1, last_n + 2):
-            if n < 1 or n > len(stream_ids):
-                continue
-            prefix = counter.decode(stream_ids[:n]).rstrip("\ufffd")
-            for pad in PAD_CANDIDATES:
-                for candidate in SEPARATOR_CANDIDATES:
-                    total = counter.n(prefix + candidate + pad + task)
-                    if total == goal:
-                        body, sep = prefix, candidate + pad
-                        break
-                if total == goal:
-                    break
-            if total == goal:
-                break
-    if total != goal:
-        raise ValueError(f"{scenario}/{bucket}/{target['target_id']}: cannot align to {goal} ({total})")
+        parts.append(unit)
+        text = SEP.join(parts)
+    if counter.n(text) < goal:
+        raise ValueError(f"{scenario}/{bucket}: filler too short ({counter.n(text)} < {goal})")
+    body = trim_to_goal(counter, text, goal)
+    if not body.startswith(primary_text):
+        raise ValueError(f"{scenario}/{bucket}: trimming cut into the primary part")
 
-    content = body + sep + task
+    task = target["task"]
+    task_ref = counter.n(task)
+    # build-time validity: the primary part plus the task must still fit the bucket for
+    # every known tokenizer once the run-time aligner has trimmed the filler away
+    primary_model = max_model.tokens(primary_text, lang)
+    task_model = max_model.tokens(task, lang)
+    fits = primary_model + task_model + TEMPLATE_MARGIN <= BUCKETS[bucket]
+    if not fits:
+        raise ValueError(
+            f"{scenario}/{bucket}/{target['target_id']}: primary {primary_model} + task "
+            f"{task_model} exceeds bucket {BUCKETS[bucket]}"
+        )
+    evidence = target.get("evidence")
+    evidence_ok = True if evidence is None else _evidence_present(evidence, primary_text)
+    if not evidence_ok:
+        raise ValueError(f"{scenario}/{bucket}/{target['target_id']}: evidence not in primary part")
+
     body_tokens = counter.n(body)
     meta = {
-        "lang": SCENARIO_LANG[scenario],
+        "lang": lang,
         "source": target["source"],
         "upstream_id": target["upstream_id"],
         "target_tokens": BUCKETS[bucket],
-        "content_tokens": total,
-        "template_reserve_tokens": CONTENT_RESERVE,
-        "task_tokens": counter.n(task),
-        "stream_tokens": target["stream_tokens"],
-        "stream_units": len(target["units"]),
-        "alignment": "prefix+token-cut",
+        "content_tokens": body_tokens + task_ref,
+        "body_tokens": body_tokens,
+        "task_tokens": task_ref,
+        "primary_units": len(primary),
+        "primary_tokens": primary_ref,
+        "filler_units": len(parts) - len(primary),
+        "primary_share": round(primary_ref / goal, 3),
+        "primary_model_tokens": primary_model,
+        "task_model_tokens": task_model,
+        "fits_bucket": fits,
+        "evidence_in_primary": evidence_ok,
+        "primary_complete": True,
+        "cut_policy": target.get("cut_policy", "document"),
+        "alignment": "primary+filler body",
+        "runtime_alignment": "trim+pad",
+        "oversize": OVERSIZE,
         "task_sha256": sha256_text(task)[:16],
         "body_sha256": sha256_text(body)[:16],
     }
+    if evidence is not None:
+        meta["evidence_sha256"] = sha256_text(evidence)[:16]
     meta.update(target.get("meta") or {})
-    row = {
+    return {
         "id": f"perf-{scenario}-{bucket}-{index:03d}",
         "scenario": scenario,
         "bucket": bucket,
         "target_id": target["target_id"],
-        "dataset": SCENARIO_DATASET[scenario],
+        "dataset": SCENARIO_DATASET[(scenario, bucket)],
         "tokens": BUCKETS[bucket],
         "messages_tokens": BUCKETS[bucket],
         "tools_tokens": 0,
-        "messages": [{"role": "user", "content": content}],
+        "messages": [
+            {"role": "user", "content": body},
+            {"role": "user", "content": task},
+        ],
         "tools": [],
         "constructed": True,
         "meta": meta,
     }
-    return row, body
 
 
-# --------------------------------------------------------------------------- #
-# helpers shared by scenario builders
-# --------------------------------------------------------------------------- #
-def pick_stratified(strata: Dict[str, List[str]], k: int, min_each: int = 1) -> List[str]:
-    pools = {name: sorted(ids) for name, ids in strata.items() if ids}
-    quota = allocate({name: len(ids) for name, ids in pools.items()}, k, min_each=min_each, seed=SEED)
-    picked: List[str] = []
+def pick_targets(candidates: Sequence[Dict[str, Any]], k: int) -> List[Dict[str, Any]]:
+    """Deterministic, stratum-aware pick of ``k`` targets out of ``candidates``."""
+    strata: Dict[str, List[int]] = {}
+    for position, target in enumerate(candidates):
+        strata.setdefault(str(target.get("stratum") or "all"), []).append(position)
+    pools = {name: sorted(values) for name, values in strata.items()}
+    quota = allocate(
+        {name: len(values) for name, values in pools.items()}, k, min_each=1, seed=SEED
+    )
+    picked: List[int] = []
     for name in sorted(pools):
-        picked.extend(deterministic_pick(pools[name], quota[name], SEED))
-    return sorted(picked, key=lambda i: sha256_text(f"{SEED}|{i}"))
+        order = sorted(pools[name], key=lambda i: sha256_text(f"{SEED}|{candidates[i]['target_id']}"))
+        picked.extend(order[: quota[name]])
+    picked = sorted(set(picked), key=lambda i: sha256_text(f"{SEED}|{candidates[i]['target_id']}"))
+    if len(picked) < k:
+        raise ValueError(f"only {len(picked)} candidates, need {k}")
+    return [candidates[i] for i in picked[:k]]
 
 
-def extend_stream(
-    counter: Counter,
-    units: List[str],
-    pool: Iterable[Tuple[str, str]],
-    min_tokens: int = STREAM_MIN_TOKENS,
-) -> int:
-    """Append pool units (id, text) in deterministic order until the stream is long enough."""
-    total = counter.n(SEP.join(units))
-    for _id, text in pool:
-        if total >= min_tokens:
-            break
-        units.append(text)
-        total += counter.n(text) + 2
-    if total < min_tokens:
-        raise ValueError(f"stream too short after exhausting pool: {total} < {min_tokens}")
-    return total
+# --------------------------------------------------------------------------- #
+# scenario pools
+# --------------------------------------------------------------------------- #
+def _hotpotqa_rows() -> List[Dict[str, Any]]:
+    rows = load_parquet(RAW_DIR / "hotpotqa" / "distractor" / "validation-00000-of-00001.parquet")
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        ctx = row["context"]
+        if isinstance(ctx, str):
+            ctx = json.loads(ctx.replace("'", '"'))
+        sf = row["supporting_facts"]
+        if isinstance(sf, str):
+            sf = json.loads(sf.replace("'", '"'))
+        paragraphs = ctx.get("paragraphs")
+        if paragraphs is None:
+            paragraphs = [" ".join(sentences) for sentences in ctx["sentences"]]
+        gold_titles = set(sf["title"])
+        gold = [p for title, p in zip(ctx["title"], paragraphs) if title in gold_titles]
+        distract = [p for title, p in zip(ctx["title"], paragraphs) if title not in gold_titles]
+        if len(gold) < 2 or len(distract) < 4:
+            continue
+        out.append(
+            {
+                "id": str(row["id"]),
+                "question": str(row["question"]),
+                "answer": str(row["answer"]),
+                "type": str(row.get("type") or ""),
+                "level": str(row.get("level") or ""),
+                "gold": gold,
+                "distract": distract,
+            }
+        )
+    return out
 
 
-def choice_block(row: Dict[str, Any]) -> str:
-    return "\n".join(
-        f"{letter}. {row[f'choice_{letter}']}" for letter in "ABCD" if row.get(f"choice_{letter}")
+def _hotpotqa_filler_pool(rows: Sequence[Dict[str, Any]], limit: int = 600) -> List[str]:
+    """Distractor paragraphs from the whole pool, used to pad short hotpot passages."""
+    pool: List[str] = []
+    seen = set()
+    for row in rows:
+        for paragraph in row["distract"]:
+            key = paragraph[:64]
+            if key in seen:
+                continue
+            seen.add(key)
+            pool.append(paragraph)
+            if len(pool) >= limit:
+                return pool
+    return pool
+
+
+def _multifieldqa_zh_rows() -> List[Dict[str, Any]]:
+    rows = load_jsonl(RAW_DIR / "longbench_v1" / "data" / "multifieldqa_zh.jsonl")
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        ctx = (row.get("context") or "").strip()
+        if not ctx:
+            continue
+        answers = row.get("answers") or []
+        out.append(
+            {
+                "id": str(row["_id"]),
+                "question": str(row.get("input") or "").strip(),
+                "answers": [str(a) for a in answers],
+                "context": ctx,
+                "length": str(row.get("length") or ""),
+            }
+        )
+    return out
+
+
+_LBPRO_CACHE: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+
+
+def _lbpro_rows(tasks: Sequence[str], lang: str) -> List[Dict[str, Any]]:
+    key = (",".join(tasks), lang)
+    if key in _LBPRO_CACHE:
+        return _LBPRO_CACHE[key]
+    out: List[Dict[str, Any]] = []
+    for row in iter_json_array(RAW_DIR / "longbench_pro" / "longbench_pro.json"):
+        if str(row.get("language")) != lang:
+            continue
+        if str(row.get("primary_task", "")).split(".")[0] not in tasks:
+            continue
+        out.append(
+            {
+                "id": str(row.get("id")),
+                "context": str(row.get("context") or ""),
+                "question": str(row.get("question_nonthinking") or row.get("question_thinking") or ""),
+                "answer": [str(a) for a in (row.get("answer") or [])],
+                "band": str(row.get("token_length")),
+                "primary_task": str(row.get("primary_task")),
+                "secondary_task": str(row.get("secondary_task")),
+                "requirement": str(row.get("contextual_requirement")),
+            }
+        )
+    _LBPRO_CACHE[key] = out
+    return out
+
+
+def _vcsum_rows() -> List[Dict[str, Any]]:
+    rows = load_jsonl(RAW_DIR / "longbench_v1" / "data" / "vcsum.jsonl")
+    out = []
+    for row in rows:
+        ctx = (row.get("context") or "").strip()
+        if not ctx:
+            continue
+        out.append({"id": str(row["_id"]), "context": ctx, "input": str(row.get("input") or "")})
+    return out
+
+
+def _check_constraint_text() -> Dict[str, Any]:
+    return {
+        "punctuation:no_comma": lambda kw: "全文不得出现逗号",
+        "length_constraints:number_words": lambda kw: (
+            f"全文不少于 {kw.get('num_words', 300)} 字"
+            if kw.get("relation", "at least") == "at least"
+            else f"全文不超过 {kw.get('num_words', 300)} 字"
+        ),
+        "length_constraints:number_sentences": lambda kw: (
+            f"全文不少于 {kw.get('num_sentences', 10)} 句"
+            if kw.get("relation", "at least") == "at least"
+            else f"全文不超过 {kw.get('num_sentences', 10)} 句"
+        ),
+        "length_constraints:number_paragraphs": lambda kw: f"全文分为 {kw.get('num_paragraphs', 3)} 段",
+        "detectable_format:number_highlighted_sections": lambda kw: (
+            f"用 ** 标出 {kw.get('num_highlights', 3)} 个小标题"
+        ),
+        "detectable_format:number_bullet_lists": lambda kw: (
+            f"至少包含 {kw.get('num_bullets', 3)} 条项目符号列表"
+        ),
+        "detectable_format:title": lambda kw: "以《》包裹的标题开头",
+        "detectable_format:json_format": lambda kw: "最终只输出一个合法 JSON 对象",
+        "startend:end_checker": lambda kw: f"结尾必须是「{kw.get('end_phrase', '')}」",
+        "startend:quotation": lambda kw: "全文用双引号包裹",
+        "keywords:existence": lambda kw: "必须包含关键词：" + "、".join(kw.get("keywords") or []),
+        "keywords:forbidden_words": lambda kw: "禁止出现词语：" + "、".join(kw.get("forbidden_words") or []),
+        "keywords:frequency": lambda kw: (
+            f"关键词「{kw.get('keyword', '')}」至少出现 {kw.get('frequency', 2)} 次"
+        ),
+    }
+
+
+CONSTRAINT_TEXT = _check_constraint_text()
+
+
+def _multi_if_zh() -> List[Dict[str, Any]]:
+    with (RAW_DIR / "multi_if" / "multiIF_20241018.csv").open(encoding="utf-8") as fh:
+        rows = [row for row in csv.DictReader(fh) if row.get("language") == "Chinese"]
+    out = []
+    for row in rows:
+        ids = json.loads(row["turn_1_instruction_id_list"] or "[]")
+        if not ids or any(i not in CONSTRAINT_TEXT for i in ids):
+            continue
+        kwargs = json.loads(row["turn_1_kwargs"] or "[]")
+        out.append({"key": row["key"], "ids": ids, "kwargs": kwargs})
+    return out
+
+
+def _lbv1_ctx(task: str) -> List[Dict[str, Any]]:
+    rows = load_jsonl(RAW_DIR / "longbench_v1" / "data" / f"{task}.jsonl")
+    out = []
+    for row in rows:
+        ctx = (row.get("context") or "").strip()
+        if not ctx:
+            continue
+        out.append(
+            {
+                "id": str(row.get("_id")),
+                "context": ctx,
+                "question": str(row.get("input") or "").strip(),
+                "answers": [str(a) for a in (row.get("answers") or [])],
+                "length": str(row.get("length") or ""),
+            }
+        )
+    return out
+
+
+def _aime_problems() -> List[Dict[str, Any]]:
+    rows = load_parquet(RAW_DIR / "aime2026" / "data" / "train-00000-of-00001.parquet")
+    return [
+        {
+            "id": str(row.get("problem_idx")),
+            "problem": str(row.get("problem") or "").strip(),
+            "answer": str(row.get("answer") or "").strip(),
+        }
+        for row in rows
+    ]
+
+
+def _math500_demos() -> List[Dict[str, Any]]:
+    rows = load_jsonl(RAW_DIR / "math_500" / "test.jsonl")
+    out = []
+    for row in rows:
+        problem = str(row.get("problem") or "").strip()
+        solution = str(row.get("solution") or "").strip()
+        answer = str(row.get("answer") or "").strip()
+        if not problem or not solution:
+            continue
+        out.append(
+            {
+                "id": str(row.get("unique_id") or sha256_text(problem)[:12]),
+                "problem": problem,
+                "solution": solution,
+                "answer": answer,
+                "subject": str(row.get("subject") or ""),
+            }
+        )
+    return out
+
+
+def _bfcl_rows() -> List[Dict[str, Any]]:
+    out = []
+    for name in ("BFCL_v4_simple_python.json", "BFCL_v4_multiple.json"):
+        for row in load_json_rows(RAW_DIR / "bfcl" / name):
+            funcs = row.get("function")
+            if isinstance(funcs, str):
+                funcs = json.loads(funcs)
+            if not funcs:
+                continue
+            question = row.get("question")
+            if isinstance(question, str):
+                question = json.loads(question)
+            user_text = " ".join(
+                str(message.get("content") or "")
+                for message in (question if isinstance(question, list) else [])
+                if isinstance(message, dict) and message.get("role") == "user"
+            ).strip()
+            out.append(
+                {
+                    "id": str(row.get("id")),
+                    "tools": [json.dumps(tool, ensure_ascii=False, sort_keys=True) for tool in funcs],
+                    "tool_names": [
+                        str((tool.get("name") or (tool.get("function") or {}).get("name") or ""))
+                        for tool in funcs
+                    ],
+                    "request": user_text or str(question),
+                }
+            )
+    return out
+
+
+def _humaneval_rows() -> List[Dict[str, Any]]:
+    rows = load_parquet(
+        RAW_DIR / "humaneval" / "openai_humaneval" / "test-00000-of-00001.parquet"
+    )
+    out = []
+    for row in rows:
+        prompt = str(row.get("prompt") or "")
+        solution = str(row.get("canonical_solution") or "")
+        out.append(
+            {
+                "id": str(row.get("task_id")),
+                "code": prompt + solution,
+                "prompt": prompt,
+                "solution": solution,
+                "test": str(row.get("test") or ""),
+            }
+        )
+    return out
+
+
+def _lcc_rows() -> List[Dict[str, Any]]:
+    return _lbv1_ctx("lcc")
+
+
+def _repobench_rows() -> List[Dict[str, Any]]:
+    return _lbv1_ctx("repobench-p")
+
+
+def _two_wiki_rows() -> List[Dict[str, Any]]:
+    return _lbv1_ctx("2wikimqa")
+
+
+def _global_mmlu_rows(lang: str) -> List[Dict[str, Any]]:
+    return load_parquet(RAW_DIR / "global_mmlu" / lang / "test.parquet")
+
+
+# --------------------------------------------------------------------------- #
+# target builders (one per scenario x bucket family)
+# --------------------------------------------------------------------------- #
+def _task_answer_en(question: str) -> str:
+    return (
+        f"{question}\n\n"
+        "Answer the question above using the material. First state the answer, then explain "
+        "why in at least 80 words."
     )
 
 
-# --------------------------------------------------------------------------- #
-# scenario 1-4: native long document prefix (doc-first, task-last)
-# --------------------------------------------------------------------------- #
-DOC_TASKS: Dict[str, str] = {
-    "knowledge_qa": (
-        "请仅根据以上材料回答问题：{question}\n\n"
-        "要求：先给出明确答案，再用不少于 100 字说明依据（引用材料中的原文片段）。"
-    ),
-    "long_context": (
-        "Question: {question}\n\nChoices:\n{choices}\n\n"
-        "Answer using only the long structured data above. Explain your reasoning in at "
-        "least 80 words, then finish with 'Answer: <letter>'."
-    ),
-    "coding": (
-        "The code repository above is the full context.\n\nQuestion: {question}\n\nChoices:\n{choices}\n\n"
-        "Answer with the file/function evidence you used, in at least 80 words, then finish with "
-        "'Answer: <letter>'."
-    ),
-    "search_agent": (
-        "The blocks above are the search results retrieved for the question "
-        "(one block per retrieved document).\n\nQuestion: {question}\n\nChoices:\n{choices}\n\n"
-        "Answer citing the result blocks you used, in at least 80 words, then finish with "
-        "'Answer: <letter>'."
-    ),
-}
+def _task_summarize_en() -> str:
+    return (
+        "Summarize the main points of the material above. Cover the key entities, numbers and "
+        "conclusions, and write at least 150 words."
+    )
 
 
-def build_doc_scenario(
-    counter: Counter,
-    scenario: str,
-    docs: List[Dict[str, Any]],
-    doc_text,
-    question,
-    source: str,
-    strata_key,
-) -> List[Dict[str, Any]]:
-    """Pick targets from a long-document corpus (question at the end of the prompt).
+def _task_explain_code_en() -> str:
+    return (
+        "Explain what the code above does: its purpose, main data structures, control flow and any "
+        "correctness or performance risks. Write at least 120 words."
+    )
 
-    Candidates whose question block would eat the 1K bucket are dropped first, so
-    every kept target has at least ``1024 - TASK_MAX_TOKENS`` tokens of context even
-    in the shortest bucket.
-    """
-    by_id = {str(doc["_id"]): doc for doc in docs}
-    tasks: Dict[str, str] = {}
-    strata: Dict[str, List[str]] = {}
-    for doc in docs:
-        task = DOC_TASKS[scenario].format(
-            question=str(question(doc)).strip(), choices=choice_block(doc)
-        )
-        if counter.n(task) > TASK_MAX_TOKENS:
-            continue
-        doc_id = str(doc["_id"])
-        tasks[doc_id] = task
-        strata.setdefault(str(strata_key(doc)), []).append(doc_id)
-    picked = pick_stratified(strata, TARGETS_PER_SCENARIO)
 
-    targets: List[Dict[str, Any]] = []
-    for index, doc_id in enumerate(picked):
-        doc = by_id[doc_id]
-        units = [doc_text(doc)]
-        order = sorted(by_id, key=lambda i: sha256_text(f"{SEED}|ctx|{i}"))
-        same = [
-            (other, doc_text(by_id[other]))
-            for other in order
-            if other != doc_id and str(strata_key(by_id[other])) == str(strata_key(doc))
-        ]
-        rest = [(other, doc_text(by_id[other])) for other in order if other != doc_id]
-        # same-stratum documents first, then every other document of the same corpus
-        total = extend_stream(counter, units, same + rest)
-        targets.append(
+def _task_search_en(question: str) -> str:
+    return (
+        f"Search question: {question}\n\n"
+        "Using only the material above, identify the passages that answer the question, cite them "
+        "briefly, then give the final answer. Write at least 100 words."
+    )
+
+
+def build_knowledge_qa(bucket: str) -> List[Dict[str, Any]]:
+    counter_free: List[Dict[str, Any]] = []
+    if bucket == "1k":
+        rows = _hotpotqa_rows()
+        for row in rows:
+            primary = row["gold"]
+            if not _evidence_present(row["answer"], SEP.join(primary)):
+                continue
+            candidates = [
+                {
+                    "target_id": f"tgt-knowledge_qa-1k-{row['id'][:8]}",
+                    "scenario": "knowledge_qa",
+                    "bucket": bucket,
+                    "lang": "en",
+                    "source": "hotpotqa:distractor",
+                    "upstream_id": row["id"],
+                    "primary": primary,
+                    "filler": row["distract"],
+                    "task": _task_answer_en(row["question"]),
+                    "evidence": row["answer"],
+                    "cut_policy": "document",
+                    "stratum": row["type"] or "unknown",
+                    "meta": {"level": row["level"], "gold_paragraphs": len(primary)},
+                }
+            ]
+            counter_free.extend(candidates)
+        return counter_free
+
+    if bucket == "4k":
+        # HotpotQA again: the gold paragraphs are small, so the whole document fits
+        # inside the 4K bucket with room for distractor paragraphs as filler.
+        rows = _hotpotqa_rows()
+        pool = _hotpotqa_filler_pool(rows)
+        targets = []
+        for row in rows:
+            if not _evidence_present(row["answer"], SEP.join(row["gold"])):
+                continue
+            targets.append(
+                {
+                    "target_id": f"tgt-knowledge_qa-4k-{row['id'][:8]}",
+                    "scenario": "knowledge_qa",
+                    "bucket": bucket,
+                    "lang": "en",
+                    "source": "hotpotqa:distractor",
+                    "upstream_id": row["id"],
+                    "primary": row["gold"],
+                    "filler": row["distract"] + pool,
+                    "task": _task_answer_en(row["question"]),
+                    "evidence": row["answer"],
+                    "cut_policy": "document",
+                    "stratum": row["type"] or "unknown",
+                    "meta": {"level": row["level"], "gold_paragraphs": len(row["gold"])},
+                }
+            )
+        return targets
+
+    # 32K: LongBench-Pro T3, complete Chinese document as primary
+    rows = _lbpro_rows(("T3",), "Chinese")
+    pool = []
+    for row in rows:
+        answers = [a for a in row["answer"] if a]
+        pool.append(
             {
-                "target_id": f"tgt-{scenario}-{index:03d}",
-                "units": units,
-                "stream_tokens": total,
-                "source": source,
-                "upstream_id": doc_id,
-                "task": tasks[doc_id],
-                "meta": {"sub_domain": str(strata_key(doc))},
-            }
-        )
-    return targets
-
-
-# --------------------------------------------------------------------------- #
-# scenario 5: math & logic — AIME 2026 problem, MATH-500 worked examples
-# --------------------------------------------------------------------------- #
-# --------------------------------------------------------------------------- #
-# LongBench-Pro (2026): native 8K/32K/64K bilingual long documents
-# --------------------------------------------------------------------------- #
-LBP_TASKS: Dict[str, str] = {
-    "knowledge_qa": (
-        "请仅根据以上材料回答问题：\n\n{q}\n\n"
-        "要求：先给出明确答案，再用不少于 100 字说明依据（引用材料中的原文片段）。"
-    ),
-    "long_context": (
-        "Question: {q}\n\nAnswer using only the material above. Explain your reasoning in at "
-        "least 80 words, then state the final answer on its own line."
-    ),
-    "search_agent": (
-        "You are given the retrieved documents above. Query: {q}\n\n"
-        "Locate the supporting evidence, cite the document fragments you used, and answer in at "
-        "least 80 words; finish with 'Answer: ...'."
-    ),
-}
-
-LBP_PRIMARY_TASKS: Dict[str, Tuple[str, ...]] = {
-    "knowledge_qa": ("T3. Evidence-Grounded QA",),
-    "long_context": ("T4. Summarization & Synthesis",),
-    "search_agent": ("T1. Retrieval & Ranking", "T5. Attribution & Citation Alignment"),
-}
-
-LBP_LANGUAGE: Dict[str, str] = {"knowledge_qa": "Chinese", "long_context": "English", "search_agent": "English"}
-
-#: native length buckets kept as candidate targets (all three exceed the 32K bucket, so the
-#: 32K row is a real prefix of a natively long document; the pool must stay >= 10 rows)
-LBP_NATIVE_LENGTHS: Tuple[str, ...] = ("32k", "64k", "128k")
-
-
-def build_lbp_scenario(counter: Counter, scenario: str) -> List[Dict[str, Any]]:
-    """Targets from LongBench-Pro: one native long document per target, question at the end."""
-    path = RAW_DIR / "longbench_pro" / "longbench_pro.json"
-    language = LBP_LANGUAGE[scenario]
-    tasks = LBP_PRIMARY_TASKS[scenario]
-    rows: List[Dict[str, Any]] = []
-    tasks_by_id: Dict[str, str] = {}
-    strata: Dict[str, List[str]] = {}
-    for row in iter_json_array(path):
-        if row.get("language") != language or row.get("primary_task") not in tasks:
-            continue
-        if str(row.get("token_length")) not in LBP_NATIVE_LENGTHS:
-            continue
-        task = LBP_TASKS[scenario].format(q=str(row["question_nonthinking"]).strip())
-        if counter.n(task) > TASK_MAX_TOKENS:
-            continue
-        doc_id = str(row["id"])
-        tasks_by_id[doc_id] = task
-        strata.setdefault(str(row.get("secondary_task")), []).append(doc_id)
-        rows.append(row)
-    by_id = {str(row["id"]): row for row in rows}
-    picked = pick_stratified(strata, TARGETS_PER_SCENARIO)
-
-    targets: List[Dict[str, Any]] = []
-    for index, doc_id in enumerate(picked):
-        row = by_id[doc_id]
-        units = [str(row["context"]).strip()]
-        order = sorted(by_id, key=lambda i: sha256_text(f"{SEED}|lbp|{i}"))
-        same = [
-            (other, str(by_id[other]["context"]).strip())
-            for other in order
-            if other != doc_id and str(by_id[other].get("secondary_task")) == str(row.get("secondary_task"))
-        ]
-        rest = [(other, str(by_id[other]["context"]).strip()) for other in order if other != doc_id]
-        total = extend_stream(counter, units, same + rest)
-        targets.append(
-            {
-                "target_id": f"tgt-{scenario}-{index:03d}",
-                "dataset": f"longbench_pro:{row.get('primary_task')}",
-                "units": units,
-                "stream_tokens": total,
-                "source": f"longbench_pro:{row.get('primary_task')}",
-                "upstream_id": doc_id,
-                "task": tasks_by_id[doc_id],
+                "target_id": f"tgt-knowledge_qa-32k-{row['id'][:8]}",
+                "scenario": "knowledge_qa",
+                "bucket": bucket,
+                "lang": "zh",
+                "source": "longbench_pro:T3",
+                "upstream_id": row["id"],
+                "primary": [row["context"]],
+                "filler": [],
+                "task": f"{row['question']}\n\n请根据上述材料回答问题，先给出答案，再用不少于 100 字说明依据。",
+                "evidence": None,
+                "cut_policy": "document",
+                "stratum": row["secondary_task"] or "T3",
                 "meta": {
-                    "sub_domain": str(row.get("secondary_task")),
-                    "native_token_length": str(row.get("token_length")),
-                    "difficulty": str(row.get("difficulty")),
+                    "primary_task": row["primary_task"],
+                    "band": row["band"],
+                    "answer": answers[0] if answers else None,
+                    "evidence_check": "complete-document",
                 },
             }
         )
-    return targets
+    return pool
 
 
-def build_math_logic(counter: Counter) -> List[Dict[str, Any]]:
-    aime = load_parquet(RAW_DIR / "aime2026" / "data" / "train-00000-of-00001.parquet")
-    by_idx = {str(row["problem_idx"]): row for row in aime}
-    picked = pick_stratified({"aime": sorted(by_idx)}, TARGETS_PER_SCENARIO, min_each=1)
-
-    math500 = load_jsonl(RAW_DIR / "math_500" / "test.jsonl")
-    demos = [
-        (str(row["unique_id"]), f"Problem: {row['problem'].strip()}\n\nSolution: {row['solution'].strip()}")
-        for row in math500
-    ]
-    demos.sort(key=lambda item: sha256_text(f"{SEED}|demo|{item[0]}"))
-
-    targets: List[Dict[str, Any]] = []
-    for index, problem_idx in enumerate(picked):
-        row = by_idx[problem_idx]
-        units: List[str] = []
-        total = extend_stream(counter, units, demos)
-        targets.append(
+def build_instruction_following(bucket: str) -> List[Dict[str, Any]]:
+    docs = _vcsum_rows()
+    constraints = _multi_if_zh()
+    if not docs or not constraints:
+        return []
+    picked_docs = pick_targets(
+        [
             {
-                "target_id": f"tgt-math_logic-{index:03d}",
-                "units": units,
-                "stream_tokens": total,
-                "source": "aime_2026+math_500",
-                "upstream_id": f"aime_2026#{problem_idx}",
-                "task": (
-                    f"Problem: {row['problem'].strip()}\n\n"
-                    "The examples above are worked solutions in the same format. Solve the new problem "
-                    "step by step, explain your reasoning in at least 80 words, and finish with "
-                    "'Final answer: <value>'."
-                ),
-                "meta": {"answer_type": "numeric"},
+                "target_id": f"vcsum#{doc['id']}",
+                "stratum": doc["id"][:1],
+                "doc": doc,
             }
-        )
-    return targets
-
-
-# --------------------------------------------------------------------------- #
-# scenario 6: general agent — BFCL tool catalog + user request
-# --------------------------------------------------------------------------- #
-def _bfcl_question(row: Dict[str, Any]) -> str:
-    question = row["question"]
-    if isinstance(question, str):
-        question = json.loads(question)
-    turns = question if isinstance(question, list) else [question]
-    flat: List[str] = []
-    for turn in turns:
-        if isinstance(turn, list):
-            for item in turn:
-                if isinstance(item, dict) and item.get("content"):
-                    flat.append(str(item["content"]).strip())
-        elif isinstance(turn, dict) and turn.get("content"):
-            flat.append(str(turn["content"]).strip())
-    return "\n".join(flat)
-
-
-def _bfcl_tools(row: Dict[str, Any]) -> List[Dict[str, Any]]:
-    tools = row.get("function")
-    if isinstance(tools, str):
-        tools = json.loads(tools)
-    return list(tools or [])
-
-
-def _tool_text(tool: Dict[str, Any]) -> str:
-    return "Tool: {name}\n```json\n{schema}\n```".format(
-        name=tool.get("name", "unknown"),
-        schema=json.dumps(tool, ensure_ascii=False, indent=2),
+            for doc in docs
+        ],
+        TARGETS_PER_SCENARIO,
     )
-
-
-def build_general_agent(counter: Counter) -> List[Dict[str, Any]]:
-    simple = load_json_rows(RAW_DIR / "bfcl" / "BFCL_v4_simple_python.json")
-    multiple = load_json_rows(RAW_DIR / "bfcl" / "BFCL_v4_multiple.json")
-    pools: Dict[str, List[Dict[str, Any]]] = {"simple_python": simple, "multiple": multiple}
-    strata = {name: sorted(str(row["id"]) for row in rows) for name, rows in pools.items()}
-    picked = pick_stratified(strata, TARGETS_PER_SCENARIO)
-    by_id = {str(row["id"]): row for rows in pools.values() for row in rows}
-
-    # deterministic distractor order over every tool schema in the catalog
-    catalog: List[Tuple[str, str]] = []
-    seen: set = set()
-    for rows in (simple, multiple):
-        for row in rows:
-            for tool in _bfcl_tools(row):
-                name = tool.get("name")
-                if name in seen:
-                    continue
-                seen.add(name)
-                catalog.append((f"{row['id']}|{name}", _tool_text(tool)))
-    catalog.sort(key=lambda item: sha256_text(f"{SEED}|tool|{item[0]}"))
-
-    targets: List[Dict[str, Any]] = []
-    for index, bfcl_id in enumerate(picked):
-        row = by_id[bfcl_id]
-        own = [_tool_text(tool) for tool in _bfcl_tools(row)]
-        own_names = {tool.get("name") for tool in _bfcl_tools(row)}
-        units = list(own)
-        pool = [(name, text) for name, text in catalog if name.split("|")[-1] not in own_names]
-        total = extend_stream(counter, units, pool)
-        targets.append(
+    picked_cons = pick_targets(
+        [
             {
-                "target_id": f"tgt-general_agent-{index:03d}",
-                "units": units,
-                "stream_tokens": total,
-                "source": "bfcl_v4:simple_python+multiple",
-                "upstream_id": bfcl_id,
-                "task": (
-                    f"User request: {_bfcl_question(row)}\n\n"
-                    "The tool library above is the MCP server's full catalog (the first tools are the "
-                    "most relevant candidates). Reply with the tool name and the complete argument JSON "
-                    "you would call, then justify in at least 80 words."
-                ),
-                "meta": {"tool_count": len(own_names)},
+                "target_id": f"multi_if#{row['key']}",
+                "stratum": row["ids"][0],
+                "row": row,
             }
-        )
-    return targets
-
-
-# --------------------------------------------------------------------------- #
-# scenario 7: instruction following — Chinese meeting transcript + constraint set
-# --------------------------------------------------------------------------- #
-CONSTRAINT_TEXT = {
-    "punctuation:no_comma": lambda kw: "全文不得出现逗号",
-    "length_constraints:number_words": lambda kw: (
-        f"全文不少于 {kw.get('num_words', 300)} 字"
-        if kw.get("relation", "at least") == "at least"
-        else f"全文不超过 {kw.get('num_words', 300)} 字"
-    ),
-    "length_constraints:number_sentences": lambda kw: (
-        f"全文不少于 {kw.get('num_sentences', 10)} 句"
-        if kw.get("relation", "at least") == "at least"
-        else f"全文不超过 {kw.get('num_sentences', 10)} 句"
-    ),
-    "length_constraints:number_paragraphs": lambda kw: f"全文分为 {kw.get('num_paragraphs', 3)} 段",
-    "detectable_format:number_highlighted_sections": lambda kw: (
-        f"用 ** 标出 {kw.get('num_highlights', 3)} 个小标题"
-    ),
-    "detectable_format:number_bullet_lists": lambda kw: (
-        f"至少包含 {kw.get('num_bullets', 3)} 条项目符号列表"
-    ),
-    "detectable_format:title": lambda kw: "以《》包裹的标题开头",
-    "detectable_format:json_format": lambda kw: "最终只输出一个合法 JSON 对象",
-    "startend:end_checker": lambda kw: f"结尾必须是「{kw.get('end_phrase', '')}」",
-    "startend:quotation": lambda kw: "全文用双引号包裹",
-    "keywords:existence": lambda kw: "必须包含关键词：" + "、".join(kw.get("keywords") or []),
-    "keywords:forbidden_words": lambda kw: "禁止出现词语：" + "、".join(kw.get("forbidden_words") or []),
-    "keywords:frequency": lambda kw: (
-        f"关键词「{kw.get('keyword', '')}」至少出现 {kw.get('frequency', 2)} 次"
-    ),
-}
-
-
-def build_instruction_following(counter: Counter) -> List[Dict[str, Any]]:
-    import csv  # noqa: PLC0415
-
-    transcripts = load_jsonl(RAW_DIR / "longbench_v1" / "data" / "vcsum.jsonl")
-    by_id = {str(row["_id"]): row for row in transcripts}
-    strata: Dict[str, List[str]] = {}
-    for row in transcripts:
-        strata.setdefault(str(row.get("length") or "unknown"), []).append(str(row["_id"]))
-    picked_docs = pick_stratified(strata, TARGETS_PER_SCENARIO)
-
-    with (RAW_DIR / "multi_if" / "multiIF_20241018.csv").open(encoding="utf-8") as fh:
-        rows = [row for row in csv.DictReader(fh) if row.get("language") == "Chinese"]
-    constraints: Dict[str, Tuple[str, ...]] = {}
-    for row in rows:
-        ids = json.loads(row["turn_1_instruction_id_list"])
-        if not ids or any(i not in CONSTRAINT_TEXT for i in ids):
-            continue
-        constraints.setdefault(row["key"], tuple(ids))
-    picked_cons = pick_stratified({"zh": sorted(constraints)}, TARGETS_PER_SCENARIO, min_each=1)
-    kw_by_key = {row["key"]: json.loads(row["turn_1_kwargs"]) for row in rows}
-
-    targets: List[Dict[str, Any]] = []
-    for index, (doc_id, con_key) in enumerate(zip(picked_docs, picked_cons)):
-        units = [f"【会议记录片段 1】\n{by_id[doc_id]['context'].strip()}"]
-        pool = [
-            (other, f"【会议记录片段 {n}】\n{by_id[other]['context'].strip()}")
-            for n, other in enumerate(
-                sorted(by_id, key=lambda i: sha256_text(f"{SEED}|ctx|{i}")), start=2
-            )
-            if other != doc_id
-        ]
-        total = extend_stream(counter, units, pool)
-
-        kws = kw_by_key[con_key]
+            for row in constraints
+        ],
+        TARGETS_PER_SCENARIO,
+    )
+    pool = []
+    for doc_target, con_target in zip(picked_docs, picked_cons):
+        doc = doc_target["doc"]
+        con = con_target["row"]
         lines = []
-        for position, (instruction_id, kw) in enumerate(zip(constraints[con_key], kws), start=1):
+        for position, (instruction_id, kw) in enumerate(zip(con["ids"], con["kwargs"]), start=1):
             if isinstance(kw, str):
                 kw = json.loads(kw or "{}")
             lines.append(f"{position}. {CONSTRAINT_TEXT[instruction_id](kw)}")
@@ -741,499 +875,738 @@ def build_instruction_following(counter: Counter) -> List[Dict[str, Any]]:
             + "\n".join(lines)
             + "\n\n必须同时满足上述全部要求，不要复述要求本身。"
         )
-        targets.append(
+        pool.append(
             {
-                "target_id": f"tgt-instruction_following-{index:03d}",
-                "units": units,
-                "stream_tokens": total,
-                "source": "multi_if_zh+vcsum",
-                "upstream_id": f"vcsum#{doc_id}|multi_if#{con_key}",
+                "target_id": f"tgt-instruction_following-{bucket}-{sha256_text(doc['id'] + con['key'])[:8]}",
+                "scenario": "instruction_following",
+                "bucket": bucket,
+                "lang": "zh",
+                "source": "vcsum+multi_if_zh",
+                "upstream_id": f"vcsum#{doc['id']}|multi_if#{con['key']}",
+                "primary": [doc["context"]],
+                "filler": [],
                 "task": task,
-                "meta": {"constraint_ids": list(constraints[con_key])},
+                "evidence": None,
+                "cut_policy": "sentence",
+                "stratum": con["ids"][0],
+                "meta": {"constraint_ids": list(con["ids"]), "doc_id": doc["id"]},
             }
         )
-    return targets
+    return pool
 
 
-# --------------------------------------------------------------------------- #
-# scenario 8: multilingual — Global-MMLU demonstrations, one language per target
-# --------------------------------------------------------------------------- #
-def build_multilingual(counter: Counter) -> List[Dict[str, Any]]:
-    targets: List[Dict[str, Any]] = []
-    for index, lang in enumerate(MULTILINGUAL_LANGS):
-        rows = load_parquet(RAW_DIR / "global_mmlu" / lang / "test.parquet")
-        by_id = {str(row["sample_id"]): row for row in rows}
-        picked = deterministic_pick(sorted(by_id), 1, SEED)[0]
+def build_long_context(bucket: str) -> List[Dict[str, Any]]:
+    rows = _lbpro_rows(("T4",), "English")
+    pool = []
+    for row in rows:
+        pool.append(
+            {
+                "target_id": f"tgt-long_context-{bucket}-{row['id'][:8]}",
+                "scenario": "long_context",
+                "bucket": bucket,
+                "lang": "en",
+                "source": "longbench_pro:T4",
+                "upstream_id": row["id"],
+                "primary": [row["context"]],
+                "filler": [],
+                "task": _task_summarize_en(),
+                "evidence": None,
+                "cut_policy": "paragraph",
+                "stratum": row["secondary_task"] or "T4",
+                "meta": {"primary_task": row["primary_task"], "band": row["band"]},
+            }
+        )
+    return pool
+
+
+def build_math_logic(bucket: str) -> List[Dict[str, Any]]:
+    problems = _aime_problems()
+    demos = _math500_demos()
+    if not problems or not demos:
+        return []
+
+    def demo_text(row: Dict[str, Any]) -> str:
+        return (
+            f"Problem: {row['problem']}\n"
+            f"Solution: {row['solution']}\n"
+            f"Final answer: {row['answer']}"
+        )
+
+    picked = pick_targets(
+        [
+            {
+                "target_id": f"aime#{row['id']}",
+                "stratum": row["id"],
+                "row": row,
+            }
+            for row in problems
+        ],
+        TARGETS_PER_SCENARIO,
+    )
+    pool = []
+    for target in picked:
+        row = target["row"]
+        pool.append(
+            {
+                "target_id": f"tgt-math_logic-{bucket}-{row['id']}",
+                "scenario": "math_logic",
+                "bucket": bucket,
+                "lang": "en",
+                "source": "aime_2026+math_500",
+                "upstream_id": f"aime_2026#{row['id']}",
+                "primary": [demo_text(demos[0])],
+                "filler": [demo_text(d) for d in demos[1:]],
+                "task": (
+                    f"Solve the final problem below step by step and explain the reasoning in at "
+                    f"least 100 words.\n\nProblem: {row['problem']}"
+                ),
+                "evidence": None,
+                "cut_policy": "example",
+                "stratum": row["id"],
+                "meta": {"aime_problem_idx": row["id"], "demos": len(demos)},
+            }
+        )
+    return pool
+
+
+def build_coding(bucket: str) -> List[Dict[str, Any]]:
+    if bucket == "1k":
+        rows = _humaneval_rows()
+        return [
+            {
+                "target_id": f"tgt-coding-1k-{sha256_text(row['id'])[:8]}",
+                "scenario": "coding",
+                "bucket": bucket,
+                "lang": "en",
+                "source": "humaneval",
+                "upstream_id": row["id"],
+                "primary": [row["code"]],
+                "filler": [],
+                "task": _task_explain_code_en(),
+                "evidence": None,
+                "cut_policy": "document",
+                "stratum": "humaneval",
+                "meta": {"prompt_tokens": None},
+            }
+            for row in rows
+        ]
+    if bucket == "4k":
+        rows = _lcc_rows()
+        return [
+            {
+                "target_id": f"tgt-coding-4k-{sha256_text(row['id'])[:8]}",
+                "scenario": "coding",
+                "bucket": bucket,
+                "lang": "en",
+                "source": "longbench_v1:lcc",
+                "upstream_id": row["id"],
+                "primary": [row["context"]],
+                "filler": [],
+                "task": _task_explain_code_en(),
+                "evidence": None,
+                "cut_policy": "paragraph",
+                "stratum": "lcc",
+                "meta": {"repo": "lcc"},
+            }
+            for row in rows
+        ]
+    rows = _lcc_rows() + _repobench_rows()
+    return [
+        {
+            "target_id": f"tgt-coding-32k-{sha256_text(row['id'])[:8]}",
+            "scenario": "coding",
+            "bucket": bucket,
+            "lang": "en",
+            "source": "longbench_v1:lcc" if "lcc" in row.get("id", "") else "longbench_v1:repobench-p",
+            "upstream_id": row["id"],
+            "primary": [row["context"]],
+            "filler": [],
+            "task": _task_explain_code_en(),
+            "evidence": None,
+            "cut_policy": "paragraph",
+            "stratum": "code",
+            "meta": {},
+        }
+        for row in rows
+    ]
+
+
+def build_general_agent(bucket: str) -> List[Dict[str, Any]]:
+    rows = _bfcl_rows()
+    if not rows:
+        return []
+    # one shared catalog of tool schemas; each target keeps its own tools as primary
+    catalog: List[str] = []
+    seen = set()
+    for row in rows:
+        for tool in row["tools"]:
+            digest = sha256_text(tool)[:16]
+            if digest in seen:
+                continue
+            seen.add(digest)
+            catalog.append(tool)
+    pool = []
+    for row in rows:
+        own = {sha256_text(tool)[:16] for tool in row["tools"]}
+        filler = [tool for tool in catalog if sha256_text(tool)[:16] not in own]
+        pool.append(
+            {
+                "target_id": f"tgt-general_agent-{bucket}-{sha256_text(row['id'])[:8]}",
+                "scenario": "general_agent",
+                "bucket": bucket,
+                "lang": "en",
+                "source": "bfcl_v4",
+                "upstream_id": row["id"],
+                "primary": list(row["tools"]),
+                "filler": filler,
+                "task": (
+                    f"User request: {row['request']}\n\n"
+                    "The tool library above is the MCP server's catalog. Name the tool you would "
+                    "call, give the full argument JSON, then justify in at least 80 words."
+                ),
+                "evidence": None,
+                "cut_policy": "tool",
+                "stratum": "multiple" if len(row["tools"]) > 1 else "simple",
+                "meta": {"tool_count": len(row["tools"]), "catalog_size": len(catalog)},
+            }
+        )
+    return pool
+
+
+def build_search_agent(bucket: str) -> List[Dict[str, Any]]:
+    if bucket == "1k":
+        rows = [
+            row
+            for row in _hotpotqa_rows()
+            if _evidence_present(row["answer"], SEP.join(row["gold"]))
+        ]
+        return [
+            {
+                "target_id": f"tgt-search_agent-1k-{row['id'][:8]}",
+                "scenario": "search_agent",
+                "bucket": bucket,
+                "lang": "en",
+                "source": "hotpotqa:distractor",
+                "upstream_id": row["id"],
+                "primary": row["gold"],
+                "filler": row["distract"],
+                "task": _task_search_en(row["question"]),
+                "evidence": row["answer"],
+                "cut_policy": "document",
+                "stratum": row["type"] or "unknown",
+                "meta": {"level": row["level"], "gold_paragraphs": len(row["gold"])},
+            }
+            for row in rows
+        ]
+    if bucket == "4k":
+        rows = [
+            row
+            for row in _hotpotqa_rows()
+            if _evidence_present(row["answer"], SEP.join(row["gold"]))
+        ]
+        pool_filler = _hotpotqa_filler_pool(rows)
+        return [
+            {
+                "target_id": f"tgt-search_agent-4k-{row['id'][:8]}",
+                "scenario": "search_agent",
+                "bucket": bucket,
+                "lang": "en",
+                "source": "hotpotqa:distractor",
+                "upstream_id": row["id"],
+                "primary": row["gold"],
+                "filler": row["distract"] + pool_filler,
+                "task": _task_search_en(row["question"]),
+                "evidence": row["answer"],
+                "cut_policy": "document",
+                "stratum": row["type"] or "unknown",
+                "meta": {"level": row["level"], "gold_paragraphs": len(row["gold"])},
+            }
+            for row in rows
+        ]
+    rows = _lbpro_rows(("T1", "T5"), "English")
+    pool = []
+    for row in rows:
+        answers = [a for a in row["answer"] if a]
+        pool.append(
+            {
+                "target_id": f"tgt-search_agent-32k-{row['id'][:8]}",
+                "scenario": "search_agent",
+                "bucket": bucket,
+                "lang": "en",
+                "source": "longbench_pro:T1+T5",
+                "upstream_id": row["id"],
+                "primary": [row["context"]],
+                "filler": [],
+                "task": _task_search_en(row["question"]),
+                "evidence": None,
+                "cut_policy": "document",
+                "stratum": row["secondary_task"] or "T1/T5",
+                "meta": {
+                    "primary_task": row["primary_task"],
+                    "band": row["band"],
+                    "answer": answers[0] if answers else None,
+                    "evidence_check": "complete-document",
+                },
+            }
+        )
+    return pool
+
+
+def build_multilingual(bucket: str) -> List[Dict[str, Any]]:
+    pool = []
+    for lang in MULTILINGUAL_LANGS:
+        rows = _global_mmlu_rows(lang)
 
         def demo(row: Dict[str, Any]) -> str:
             return (
                 f"Question: {row['question'].strip()}\n"
-                f"A. {row['option_a']}\nB. {row['option_b']}\nC. {row['option_c']}\nD. {row['option_d']}\n"
-                f"Answer: {row['answer']}"
+                f"A. {row['option_a']}\nB. {row['option_b']}\nC. {row['option_c']}\n"
+                f"D. {row['option_d']}\nAnswer: {row['answer']}"
             )
 
-        pool = [
-            (other, demo(by_id[other]))
-            for other in sorted(by_id, key=lambda i: sha256_text(f"{SEED}|demo|{i}"))
-            if other != picked
-        ]
-        units: List[str] = []
-        total = extend_stream(counter, units, pool)
-        row = by_id[picked]
-        task = (
-            f"Question: {row['question'].strip()}\n"
-            f"A. {row['option_a']}\nB. {row['option_b']}\nC. {row['option_c']}\nD. {row['option_d']}\n\n"
-            + ML_TASK[lang]
-        )
-        targets.append(
+        target_row = deterministic_pick(
+            sorted((str(row["sample_id"]) for row in rows)), 1, SEED
+        )[0]
+        by_id = {str(row["sample_id"]): row for row in rows}
+        row = by_id[target_row]
+        pool.append(
             {
-                "target_id": f"tgt-multilingual-{index:03d}",
-                "units": units,
-                "stream_tokens": total,
-                "source": f"global_mmlu:{lang}",
-                "upstream_id": f"{lang}#{picked}",
-                "task": task,
-                "meta": {"lang": lang, "subject": str(row.get("subject"))},
+                "target_id": f"tgt-multilingual-{bucket}-{lang}",
+                "scenario": "multilingual",
+                "bucket": bucket,
                 "lang": lang,
+                "source": f"global_mmlu:{lang}",
+                "upstream_id": f"{lang}#{target_row}",
+                "primary": [demo(next(
+                    by_id[i] for i in sorted(by_id) if i != target_row
+                ))],
+                "filler": [
+                    demo(other)
+                    for other in (by_id[i] for i in sorted(by_id))
+                    if str(other["sample_id"]) not in {target_row, next(i for i in sorted(by_id) if i != target_row)}
+                ],
+                "task": (
+                    f"Question: {row['question'].strip()}\n"
+                    f"A. {row['option_a']}\nB. {row['option_b']}\nC. {row['option_c']}\n"
+                    f"D. {row['option_d']}\n\n"
+                    + {
+                        "zh": "请选择正确选项，并用不少于 80 字说明理由，最后以「答案：X」结束。",
+                        "en": "Answer with the correct option, explain in at least 80 words, then finish with 'Answer: X'.",
+                        "fr": "Choisissez la bonne option, justifiez en au moins 80 mots, puis terminez par « Réponse : X ».",
+                        "de": "Wähle die richtige Option, begründe in mindestens 80 Wörtern und ende mit „Antwort: X“.",
+                        "es": "Elige la opción correcta, explica en al menos 80 palabras y termina con «Respuesta: X».",
+                        "pt": "Escolha a opção correta, explique em pelo menos 80 palavras e finalize com «Resposta: X».",
+                        "ru": "Выберите правильный вариант, объясните не менее чем в 80 словах и завершите «Ответ: X».",
+                        "ja": "正しい選択肢を選び、80 語以上で理由を説明し、最後に「答え：X」で終えてください。",
+                        "ko": "올바른 선택지를 고르고 80단어 이상으로 이유를 설명한 뒤 '답: X'로 끝내세요.",
+                        "ar": "اختر الخيار الصحيح، واشرح في 80 كلمة على الأقل، ثم اختم بـ«الإجابة: X».",
+                    }[lang]
+                ),
+                "evidence": None,
+                "cut_policy": "example",
+                "stratum": lang,
+                "meta": {"lang": lang, "subject": str(row.get("subject"))},
             }
         )
-    return targets
+    return pool
+
+
+BUILDERS = {
+    "knowledge_qa": build_knowledge_qa,
+    "instruction_following": build_instruction_following,
+    "long_context": build_long_context,
+    "math_logic": build_math_logic,
+    "coding": build_coding,
+    "general_agent": build_general_agent,
+    "search_agent": build_search_agent,
+    "multilingual": build_multilingual,
+}
 
 
 # --------------------------------------------------------------------------- #
 # build / validate / emit
 # --------------------------------------------------------------------------- #
-def build_targets(counter: Counter, scenarios: Sequence[str]) -> Dict[str, List[Dict[str, Any]]]:
-    out: Dict[str, List[Dict[str, Any]]] = {}
-    lb2 = load_json_rows(RAW_DIR / "longbench_v2" / "data.json")
-    by_domain: Dict[str, List[Dict[str, Any]]] = {}
-    for row in lb2:
-        by_domain.setdefault(str(row["domain"]), []).append(row)
-
-    for scenario in scenarios:
-        t0 = time.time()
-        if scenario in LBP_PRIMARY_TASKS:
-            out[scenario] = build_lbp_scenario(counter, scenario)
-        elif scenario == "coding":
-            out[scenario] = build_doc_scenario(
-                counter,
-                scenario,
-                by_domain["Code Repository Understanding"],
-                doc_text=lambda row: row["context"].strip(),
-                question=lambda row: row["question"],
-                source="longbench_v2:Code Repository Understanding",
-                strata_key=lambda row: str(row["sub_domain"]),
-            )
-        elif scenario == "math_logic":
-            out[scenario] = build_math_logic(counter)
-        elif scenario == "general_agent":
-            out[scenario] = build_general_agent(counter)
-        elif scenario == "instruction_following":
-            out[scenario] = build_instruction_following(counter)
-        elif scenario == "multilingual":
-            out[scenario] = build_multilingual(counter)
-        else:  # pragma: no cover - guarded by argparse choices
-            raise ValueError(f"unknown scenario {scenario}")
-        seen = {target["target_id"] for target in out[scenario]}
-        if len(seen) != TARGETS_PER_SCENARIO or len(out[scenario]) != TARGETS_PER_SCENARIO:
-            raise ValueError(f"{scenario}: expected {TARGETS_PER_SCENARIO} unique targets")
-        print(f"  [targets] {scenario:<22} {len(out[scenario])} targets  ({time.time() - t0:.1f}s)")
-    return out
-
-
-def validate_rows(
-    rows: Sequence[Dict[str, Any]],
-    targets_by_scenario: Dict[str, List[Dict[str, Any]]],
-    buckets: Sequence[str],
-    bodies: Optional[Dict[Tuple[str, str], str]] = None,
-) -> Dict[str, Any]:
-    problems: List[str] = []
-    cells: Dict[str, Dict[str, int]] = {}
-    by_target: Dict[str, Dict[str, Dict[str, Any]]] = {}
-    for row in rows:
-        cell = (row["scenario"], row["bucket"])
-        cells.setdefault(row["scenario"], {}).setdefault(row["bucket"], 0)
-        cells[row["scenario"]][row["bucket"]] += 1
-        if row["tokens"] != BUCKETS[row["bucket"]]:
-            problems.append(f"{row['id']}: tokens {row['tokens']} != {BUCKETS[row['bucket']]}")
-        if row["meta"].get("content_tokens") != content_goal(row["bucket"]):
-            problems.append(
-                f"{row['id']}: content {row['meta'].get('content_tokens')} != "
-                f"{content_goal(row['bucket'])}"
-            )
-        if row["messages_tokens"] != row["tokens"] or row["tools_tokens"] != 0 or row["tools"]:
-            problems.append(f"{row['id']}: messages/tools accounting mismatch")
-        if not row["messages"] or row["messages"][0]["role"] != "user":
-            problems.append(f"{row['id']}: expected one user message")
-        by_target.setdefault(row["target_id"], {})[row["bucket"]] = row
-
-    for scenario in targets_by_scenario:
-        for bucket in buckets:
-            count = cells.get(scenario, {}).get(bucket, 0)
-            if count != TARGETS_PER_SCENARIO and bucket in BUCKETS:
-                problems.append(f"{scenario}/{bucket}: {count} rows != {TARGETS_PER_SCENARIO}")
-
-    # strict nesting: same target => same task block, and the shorter row's context is a
-    # prefix of the longer one.  The task block sits at the end of the content, so the full
-    # rendered strings are not prefixes of each other; nesting is checked on the contexts.
-    order = [b for b in ("1k", "8k", "32k") if b in buckets]
-    for target_id, per_bucket in by_target.items():
-        task_hashes = {per_bucket[b]["meta"]["task_sha256"] for b in order if b in per_bucket}
-        if len(task_hashes) > 1:
-            problems.append(f"{target_id}: task block differs across buckets")
-        if bodies is None:
-            continue
-        texts = [bodies.get((target_id, b), "") for b in order if b in per_bucket]
-        for short, long in zip(texts, texts[1:]):
-            if not short or not long.startswith(short):
-                problems.append(f"{target_id}: context rows are not nested prefixes")
-                break
-
-    langs: Dict[str, int] = {}
-    for row in rows:
-        langs[row["meta"].get("lang", "?")] = langs.get(row["meta"].get("lang", "?"), 0) + 1
-    if len(targets_by_scenario) == len(SCENARIOS) and langs.get("zh", 0) == 0:
-        problems.append("no Chinese sample in the test set")
-    return {"problems": problems, "cells": cells, "langs": langs}
-
-
-def write_outputs(
-    rows: List[Dict[str, Any]],
+def _fit_primary(
     counter: Counter,
-    targets_by_scenario: Dict[str, List[Dict[str, Any]]],
-    out_dir: Path,
-    report: Dict[str, Any],
-) -> None:
+    max_model: MaxModelCounter,
+    target: Dict[str, Any],
+    bucket: str,
+) -> Dict[str, Any]:
+    """Guarantee that the primary part stays complete and fits the bucket.
+
+    The primary must fit in the bucket for every known tokenizer (after the runtime
+    aligner trimmed the filler away) and must leave room for filler in the reference
+    count.  Prefix-safe units are shortened at a boundary; whole-document units are
+    dropped when they cannot fit.
+    """
+    lang = target["lang"]
+    task = target["task"]
+    model_budget = BUCKETS[bucket] - max_model.tokens(task, lang) - TEMPLATE_MARGIN
+    ref_budget = int(content_goal(bucket) * 0.92)
+    policy = target.get("cut_policy", "document")
+    units = list(target["primary"])
+    if not units:
+        return target
+
+    def fits() -> bool:
+        text = SEP.join(units)
+        ref_tokens = counter.n(text)
+        if ref_tokens >= ref_budget:
+            return False
+        # model/cl100k ratio is >= ~0.98 for the English sources and <= 0.6 for the
+        # Chinese ones; reject by the cheap reference count before running eleven
+        # model tokenizers over a 100 KB document.
+        if ref_tokens * 0.98 > model_budget:
+            return False
+        return max_model.tokens(text, lang) <= model_budget
+
+    if not fits():
+        if policy == "document":
+            return {}
+        # shrink the tail unit at a boundary until both budgets are satisfied;
+        # each pass removes at least an eighth so a near-1.0 ratio cannot stall
+        for _ in range(200):
+            if not units:
+                break
+            text = SEP.join(units)
+            if fits():
+                break
+            model_tokens = max_model.tokens(text, lang)
+            ref_tokens = counter.n(text)
+            ratio = min(
+                model_budget / max(1, model_tokens),
+                (ref_budget - 1) / max(1, ref_tokens),
+                0.87,
+            )
+            allowed = max(1, int(len(units[-1]) * ratio))
+            if allowed >= len(units[-1]):
+                allowed = max(1, len(units[-1]) - 1)
+            shortened = cut_at_boundary(units[-1], allowed)
+            if shortened == units[-1]:
+                shortened = units[-1][:allowed]
+            units[-1] = shortened
+            if not units[-1]:
+                units.pop()
+        if not units or not fits():
+            return {}
+    target["primary"] = units
+    return target
+
+
+def build_rows(
+    counter: Counter,
+    max_model: MaxModelCounter,
+    scenarios: Sequence[str],
+    buckets: Sequence[str],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    rows: List[Dict[str, Any]] = []
+    targets_all: List[Dict[str, Any]] = []
+    for scenario in scenarios:
+        builder = BUILDERS[scenario]
+        for bucket in buckets:
+            started = time.time()
+            candidates = builder(bucket)
+            print(
+                f"[cell] {scenario}/{bucket}: {len(candidates)} candidates "
+                f"({time.time() - started:.1f}s)",
+                file=sys.stderr,
+                flush=True,
+            )
+            if not candidates:
+                raise ValueError(f"{scenario}/{bucket}: no candidates")
+            # Deterministic shortlist: fitting runs every local model tokenizer, so
+            # thousands of HotpotQA/Global-MMLU candidates would dominate build time.
+            # Keep the first SHORTLIST_PER_STRATUM per stratum in hash order; the
+            # final 10 are still drawn across all strata by largest remainder.
+            grouped: Dict[str, List[Dict[str, Any]]] = {}
+            for candidate in candidates:
+                grouped.setdefault(str(candidate.get("stratum") or "all"), []).append(candidate)
+            shortlist: List[Dict[str, Any]] = []
+            for key in sorted(grouped):
+                items = sorted(
+                    grouped[key],
+                    key=lambda item: sha256_text(f"{SEED}|shortlist|{item['upstream_id']}"),
+                )
+                shortlist.extend(items[:SHORTLIST_PER_STRATUM])
+            candidates = shortlist
+            fitted = []
+            for target in candidates:
+                target = dict(target)
+                target.setdefault("scenario", scenario)
+                target.setdefault("bucket", bucket)
+                fitted.append(_fit_primary(counter, max_model, target, bucket))
+            fitted = [t for t in fitted if t]
+            if len(fitted) < TARGETS_PER_SCENARIO:
+                raise ValueError(
+                    f"{scenario}/{bucket}: only {len(fitted)} fitted candidates, need "
+                    f"{TARGETS_PER_SCENARIO}"
+                )
+            # fill the filler pool from the remaining fitted candidates (same family)
+            family = fitted
+            picked = pick_targets(family, TARGETS_PER_SCENARIO)
+            chars_budget = content_goal(bucket) * 12
+            for index, target in enumerate(picked):
+                filler = list(target["filler"])
+                chars = sum(len(unit) for unit in filler)
+                others = [t for t in family if t is not target]
+                for other in sorted(others, key=lambda t: sha256_text(f"{SEED}|filler|{t['target_id']}")):
+                    if chars >= chars_budget:
+                        break
+                    for unit in other.get("filler") or other.get("primary") or []:
+                        filler.append(unit)
+                        chars += len(unit)
+                        if chars >= chars_budget:
+                            break
+                target["filler"] = filler
+                target["target_id"] = f"{target['target_id']}"
+                rows.append(make_row(counter, max_model, target, bucket, index))
+                targets_all.append(target)
+            print(
+                f"[cell] {scenario}/{bucket}: built {len(picked)} rows "
+                f"({time.time() - started:.1f}s total)",
+                file=sys.stderr,
+                flush=True,
+            )
+    return rows, targets_all
+
+
+def validate_rows(rows: Sequence[Dict[str, Any]], targets: Sequence[Dict[str, Any]]) -> None:
+    by_cell: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    for row in rows:
+        by_cell.setdefault((row["scenario"], row["bucket"]), []).append(row)
+    expected_cells = {(s, b) for s in SCENARIOS for b in BUCKETS}
+    if set(by_cell) != expected_cells:
+        raise ValueError(f"cells mismatch: {sorted(set(by_cell) ^ expected_cells)}")
+    ids = set()
+    for (scenario, bucket), cell_rows in sorted(by_cell.items()):
+        if len(cell_rows) != TARGETS_PER_SCENARIO:
+            raise ValueError(f"{scenario}/{bucket}: {len(cell_rows)} rows != {TARGETS_PER_SCENARIO}")
+        for row in cell_rows:
+            if row["id"] in ids:
+                raise ValueError(f"duplicate row id {row['id']}")
+            ids.add(row["id"])
+            if row["tokens"] != BUCKETS[bucket]:
+                raise ValueError(f"{row['id']}: tokens != bucket")
+            messages = row["messages"]
+            if [m["role"] for m in messages] != ["user", "user"] or row["tools"]:
+                raise ValueError(f"{row['id']}: expected two user messages and no tools")
+            meta = row["meta"]
+            goal = content_goal(bucket)
+            # content is 2x oversize material; only the runtime alignment is exact.
+            # Allow the boundary slack that trimming to a paragraph edge can leave.
+            if not (goal * 0.90 <= meta["content_tokens"] <= goal * 1.20):
+                raise ValueError(
+                    f"{row['id']}: content_tokens {meta['content_tokens']} outside {goal}"
+                )
+            if meta["body_tokens"] + meta["task_tokens"] != meta["content_tokens"]:
+                raise ValueError(f"{row['id']}: body+task accounting mismatch")
+            if not meta["primary_complete"]:
+                raise ValueError(f"{row['id']}: primary validation failed")
+            if meta.get("evidence_in_primary") is False:
+                raise ValueError(f"{row['id']}: evidence validation failed")
+            if not meta["fits_bucket"]:
+                raise ValueError(f"{row['id']}: primary+task do not fit the bucket")
+            if meta["primary_model_tokens"] + meta["task_model_tokens"] + TEMPLATE_MARGIN > BUCKETS[bucket]:
+                raise ValueError(f"{row['id']}: model-token margin violated")
+            if meta["lang"] not in scenario_langs(scenario, bucket):
+                raise ValueError(f"{row['id']}: unexpected language {meta['lang']}")
+    zh = sum(1 for row in rows if row["meta"]["lang"] == "zh")
+    if zh < 40:
+        raise ValueError(f"only {zh} Chinese rows")
+
+
+def build_stats(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    stats: Dict[str, Any] = {"rows": len(rows), "cells": len({(r["scenario"], r["bucket"]) for r in rows})}
+    stats["langs"] = {}
+    for row in rows:
+        lang = row["meta"]["lang"]
+        stats["langs"][lang] = stats["langs"].get(lang, 0) + 1
+    for bucket in BUCKETS:
+        sizes = [len(row["messages"][0]["content"]) for row in rows if row["bucket"] == bucket]
+        stats[f"content_chars_{bucket}"] = {
+            "min": min(sizes),
+            "median": sorted(sizes)[len(sizes) // 2],
+            "max": max(sizes),
+        }
+    stats["primary_model_tokens"] = {
+        bucket: {
+            "min": min(r["meta"]["primary_model_tokens"] for r in rows if r["bucket"] == bucket),
+            "max": max(r["meta"]["primary_model_tokens"] for r in rows if r["bucket"] == bucket),
+        }
+        for bucket in BUCKETS
+    }
+    stats["evidence_rows"] = sum(1 for row in rows if row["meta"].get("evidence_sha256"))
+    return stats
+
+
+def write_outputs(rows: Sequence[Dict[str, Any]], manifest_extra: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
     import yaml  # noqa: PLC0415
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    jsonl = out_dir / "testset.jsonl"
+    jsonl_path = out_dir / "testset.jsonl"
     payload = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
-    jsonl.write_text(payload, encoding="utf-8")
-
-    sources: Dict[str, Dict[str, Any]] = {}
-    for scenario, targets in targets_by_scenario.items():
-        ids = [target["upstream_id"] for target in targets]
-        sources[scenario] = {"dataset": SCENARIO_SOURCE[scenario], "upstream_ids": ids}
-
+    jsonl_path.write_text(payload, encoding="utf-8")
+    rows_sha = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    tokenizer_path = RAW_DIR / REFERENCE_TOKENIZER_REL
     manifest = {
         "name": "performance",
-        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "builder": "tool/dataset/performance/build.py",
         "seed": SEED,
         "targets_per_scenario": TARGETS_PER_SCENARIO,
         "buckets": BUCKETS,
         "max_tokens": OSL,
         "min_completion_tokens_required": MIN_COMPLETION_TOKENS,
-        "tokenizer": {
-            "path": str(counter.path),
-            "sha256": sha256_file(counter.path),
-            "vocab_size": counter._tok.get_vocab_size(),
-            "role": "reference (never a model under test; production runs use align.py)",
+        "reference_tokenizer": {
+            "path": REFERENCE_TOKENIZER_REL,
+            "sha256": sha256_file(tokenizer_path) if tokenizer_path.exists() else None,
         },
         "construction": {
-            "prompt_tokens": BUCKETS,
-            "template_reserve_tokens": CONTENT_RESERVE,
-            "content_tokens": {b: content_goal(b) for b in BUCKETS},
-            "tolerance_tokens": 0,
-            "method": "ordered unit stream prefix + token-boundary cut + fixed task block",
-            "stream_min_tokens": STREAM_MIN_TOKENS,
-        },
-        "alignment": {
-            "unit": "prompt tokens of the rendered chat request (chat template included)",
-            "tolerance_tokens": 0,
-            "verified_by": "tool/dataset/performance/align.py against the target model",
-        },
-        "cells": report["cells"],
-        "langs": report["langs"],
-        "stats": {
-            "task_tokens_min": min(row["meta"]["task_tokens"] for row in rows),
-            "task_tokens_max": max(row["meta"]["task_tokens"] for row in rows),
-            "content_chars": {
-                bucket: {
-                    "min": min(sizes),
-                    "median": sizes[len(sizes) // 2],
-                    "max": max(sizes),
-                }
-                for bucket in BUCKETS
-                for sizes in [[
-                    len(row["messages"][0]["content"]) for row in rows if row["bucket"] == bucket
-                ]]
-                if sizes
+            "policy": "primary + filler",
+            "oversize": OVERSIZE,
+            "content_tokens": {bucket: content_goal(bucket) for bucket in BUCKETS},
+            "template_margin_tokens": TEMPLATE_MARGIN,
+            "runtime_alignment": {
+                "mode": "trim+pad",
+                "target": "prompt tokens of the rendered chat request",
+                "tolerance_tokens": 0,
+                "skipped_on_mismatch": False,
+                "aligner": "src/modelbench/application/prompt_align.py",
             },
         },
-        "sources": sources,
+        "validation": manifest_extra.get("validation") or {},
+        "sources": manifest_extra.get("sources") or {},
+        "cells": {
+            f"{scenario}/{bucket}": {
+                "rows": sum(1 for r in rows if r["scenario"] == scenario and r["bucket"] == bucket),
+                "dataset": SCENARIO_DATASET[(scenario, bucket)],
+                "langs": sorted({r["meta"]["lang"] for r in rows if r["scenario"] == scenario and r["bucket"] == bucket}),
+            }
+            for scenario in SCENARIOS
+            for bucket in BUCKETS
+        },
+        "stats": build_stats(rows),
         "rows": len(rows),
-        "rows_sha256": hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+        "rows_sha256": rows_sha,
     }
     (out_dir / "manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-
-    scenarios = {}
-    for scenario in SCENARIOS:
-        if scenario not in targets_by_scenario:
-            continue
-        scenarios[scenario] = {
-            "dataset": "perf_jsonl",
-            "dataset_params": {
-                "scenario": scenario,
-                "path": f"dataset/test/{out_dir.name}/testset.jsonl",
-            },
-        }
     yaml_doc = {
         "name": "performance",
-        "title": "性能测试（8 场景 × 1K/8K/32K × 10 target，240 measured）",
+        "title": "性能测试（8 场景 × 1K/4K/32K × 10 样本）",
         "description": (
-            "性能测试集：每个场景 10 个 target，同一 target 渲染 1K/8K/32K 三档；"
-            "样本由 tool/dataset/performance/build.py 从 dataset/raw 的上游数据确定性构建，"
-            "并由 tool/dataset/performance/align.py 在运行前用目标模型 tokenizer "
-            "对齐到精确的 prompt token 数（1024/8192/32768，0 容差）。"
-            "strict_input_tokens=true 时运行器要求逐样本 prompt token 数严格等于目标值，"
-            "不等即跳过记录，不做误差带统计。含中文场景；生成长度 max_tokens=50。"
+            "性能专用样本集：每个样本由「完整主材料 + 可裁剪补充材料」构成，"
+            "运行前由 runner 按目标模型 tokenizer 把 prompt 精确对齐到 1K/4K/32K（0 容差）；"
+            "固定 50-token 解码窗口（可在 testset/CLI/Web 覆盖）。"
         ),
-        "scenarios": scenarios,
+        "scenarios": {
+            scenario: {
+                "dataset": "perf_jsonl",
+                "dataset_params": {"scenario": scenario, "path": "dataset/test/performance/testset.jsonl"},
+            }
+            for scenario in SCENARIOS
+        },
         "sampling": {
             "seed": SEED,
             "targets_per_scenario": TARGETS_PER_SCENARIO,
-            "method": "sha256(seed|id) + stratified largest remainder",
+            "method": "sha256(seed|upstream_id) order + stratified largest remainder",
         },
         "buckets": BUCKETS,
-        # Strict input alignment: the runner skips any sample whose measured prompt
-        # token count differs from the bucket target (no tolerance band).
-        "strict_input_tokens": True,
-        # Declared OSL: apply_testset() copies this into perf.max_tokens so the set
-        # cannot be run at the 50-token default (which makes TG TPS unmeasurable).
         "max_tokens": OSL,
+        "strict_input_tokens": True,
     }
     (out_dir / "testset.yaml").write_text(
         yaml.safe_dump(yaml_doc, allow_unicode=True, sort_keys=False), encoding="utf-8"
     )
-    print(f"[out] {jsonl}  ({len(payload.encode('utf-8')) / 1e6:.1f} MB, {len(rows)} rows)")
+    return manifest
 
 
-def check_outputs(out_dir: Path) -> int:
-    """Validate on-disk build artefacts without rebuilding (gate ``--check``).
-
-    Accepts both artefacts:
-    * the committed reference build (``testset.jsonl`` SHA == manifest ``rows_sha256``,
-      verified with the manifest's reference tokenizer), and
-    * a per-model aligned build written by ``align.py`` (SHA recorded in
-      ``dataset/.cache/performance/alignment-*.json``, verified with the model tokenizer
-      recorded there; every row must still hit the exact bucket target).
-    """
+def check_outputs(out_dir: Optional[Path] = None) -> int:
+    out_dir = out_dir or OUT_DIR
+    rows = load_jsonl(out_dir / "testset.jsonl")
+    manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
     import yaml  # noqa: PLC0415
 
+    yaml_doc = yaml.safe_load((out_dir / "testset.yaml").read_text(encoding="utf-8"))
     problems: List[str] = []
-    jsonl = out_dir / "testset.jsonl"
-    manifest_path = out_dir / "manifest.json"
-    yaml_path = out_dir / "testset.yaml"
-    for path in (jsonl, manifest_path, yaml_path):
-        if not path.is_file():
-            print(f"[check] missing {path}")
-            return 1
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    yaml_doc = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
-    rows = load_jsonl(jsonl)
-    file_sha = sha256_file(jsonl)
-
-    if manifest.get("name") != "performance":
-        problems.append(f"manifest name {manifest.get('name')!r} != 'performance'")
-    if manifest.get("buckets") != BUCKETS:
-        problems.append(f"manifest buckets {manifest.get('buckets')} != {BUCKETS}")
-    construction = manifest.get("construction") or {}
-    if construction.get("tolerance_tokens") != 0:
-        problems.append("manifest construction.tolerance_tokens != 0")
-    if manifest.get("max_tokens") != OSL:
-        problems.append(f"manifest max_tokens {manifest.get('max_tokens')} != {OSL}")
-    if len(rows) != len(SCENARIOS) * len(BUCKETS) * TARGETS_PER_SCENARIO:
-        problems.append(f"{len(rows)} rows != {len(SCENARIOS) * len(BUCKETS) * TARGETS_PER_SCENARIO}")
-
-    ids = set()
-    cells: Dict[str, Dict[str, int]] = {}
-    targets = set()
-    langs: Dict[str, int] = {}
-    for row in rows:
-        rid = row.get("id")
-        if rid in ids:
-            problems.append(f"duplicate id {rid}")
-        ids.add(rid)
-        scenario, bucket = row.get("scenario"), row.get("bucket")
-        if scenario not in SCENARIOS:
-            problems.append(f"{rid}: unknown scenario {scenario!r}")
-            continue
-        if bucket not in BUCKETS:
-            problems.append(f"{rid}: unknown bucket {bucket!r}")
-            continue
-        cells.setdefault(scenario, {}).setdefault(bucket, 0)
-        cells[scenario][bucket] += 1
-        targets.add((scenario, row.get("target_id")))
-        langs[row.get("meta", {}).get("lang", "?")] = langs.get(row.get("meta", {}).get("lang", "?"), 0) + 1
-        if row.get("tokens") != BUCKETS[bucket]:
-            problems.append(f"{rid}: tokens {row.get('tokens')} != {BUCKETS[bucket]}")
-        if row.get("messages_tokens") != row.get("tokens") or row.get("tools_tokens") != 0:
-            problems.append(f"{rid}: messages/tools accounting mismatch")
-        if row.get("tools"):
-            problems.append(f"{rid}: tools must stay empty (text-only tool catalogue)")
-        messages = row.get("messages") or []
-        if len(messages) != 1 or messages[0].get("role") != "user":
-            problems.append(f"{rid}: expected exactly one user message")
-        meta = row.get("meta") or {}
-        for key in ("lang", "source", "upstream_id", "task_tokens", "content_tokens", "task_sha256", "body_sha256"):
-            if key not in meta:
-                problems.append(f"{rid}: meta.{key} missing")
-    for scenario in SCENARIOS:
-        for bucket in BUCKETS:
-            count = cells.get(scenario, {}).get(bucket, 0)
-            if count != TARGETS_PER_SCENARIO:
-                problems.append(f"{scenario}/{bucket}: {count} rows != {TARGETS_PER_SCENARIO}")
-    if len(targets) != len(SCENARIOS) * TARGETS_PER_SCENARIO:
-        problems.append(f"{len(targets)} distinct targets != {len(SCENARIOS) * TARGETS_PER_SCENARIO}")
-    if langs.get("zh", 0) == 0:
-        problems.append("no Chinese sample in the test set")
-
-    if yaml_doc.get("name") != "performance":
-        problems.append(f"testset.yaml name {yaml_doc.get('name')!r} != 'performance'")
-    if yaml_doc.get("buckets") != BUCKETS:
-        problems.append(f"testset.yaml buckets {yaml_doc.get('buckets')} != {BUCKETS}")
-    if yaml_doc.get("strict_input_tokens") is not True:
-        problems.append("testset.yaml strict_input_tokens must be true")
-    if yaml_doc.get("max_tokens") != OSL:
-        problems.append(f"testset.yaml max_tokens {yaml_doc.get('max_tokens')} != {OSL}")
+    if manifest.get("name") != "performance" or yaml_doc.get("name") != "performance":
+        problems.append("name != performance")
+    if manifest.get("buckets") != BUCKETS or yaml_doc.get("buckets") != BUCKETS:
+        problems.append("buckets mismatch")
+    if yaml_doc.get("max_tokens") != OSL or not yaml_doc.get("strict_input_tokens"):
+        problems.append("yaml max_tokens/strict_input_tokens mismatch")
     if "osl" in yaml_doc:
-        problems.append("testset.yaml must not use the legacy 'osl' key")
-    if set((yaml_doc.get("scenarios") or {}).keys()) != set(SCENARIOS):
-        problems.append("testset.yaml scenarios differ from the 8 design scenarios")
-    for name, spec in (yaml_doc.get("scenarios") or {}).items():
-        params = (spec or {}).get("dataset_params") or {}
-        if spec.get("dataset") != "perf_jsonl" or params.get("scenario") != name:
-            problems.append(f"testset.yaml scenarios.{name} wiring is wrong")
-        path = str(params.get("path", ""))
-        if not path.endswith("dataset/test/performance/testset.jsonl"):
-            problems.append(f"testset.yaml scenarios.{name} path {path!r} is wrong")
-
-    # ---- tokenizer oracle: reference build, or an aligned build recorded by align.py
-    tokenizer_path: Optional[Path] = None
-    reserve = int(construction.get("template_reserve_tokens") or 0)
-    if file_sha == manifest.get("rows_sha256"):
-        raw = (manifest.get("tokenizer") or {}).get("path")
-        if raw:
-            tokenizer_path = Path(raw)
-        source = "manifest (reference build)"
-    else:
-        source = "missing"
-        report_dir = PROJECT_ROOT / "dataset" / ".cache" / "performance"
-        for report_path in sorted(report_dir.glob("alignment-*.json")):
-            try:
-                report = json.loads(report_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            if report.get("rows_sha256") != file_sha:
-                continue
-            raw = (report.get("tokenizer") or {}).get("path")
-            if raw:
-                tokenizer_path = Path(raw)
-            reserve = int(report.get("reserve_tokens") or 0)
-            source = f"alignment report {report_path.name}"
-            break
-        if tokenizer_path is None:
-            problems.append(
-                "testset.jsonl SHA does not match manifest rows_sha256 and no alignment report "
-                "records it; rebuild with build.py or align.py"
-            )
-    if tokenizer_path is not None:
-        if not tokenizer_path.is_file():
-            problems.append(f"verification tokenizer missing: {tokenizer_path}")
-        else:
-            counter = Counter(tokenizer_path)
-            for row in rows:
-                content = (row.get("messages") or [{}])[0].get("content", "")
-                got = counter.n(content)
-                expected = row.get("tokens")
-                if got + reserve != expected:
-                    problems.append(
-                        f"{row.get('id')}: content tokens {got} + reserve {reserve} != {expected}"
-                    )
-            print(f"[check] tokenizer oracle: {tokenizer_path} ({source})")
-
-    for problem in problems:
-        print(f"  [FAIL] {problem}")
+        problems.append("yaml still declares osl")
+    validate_rows(rows, [])
+    if manifest.get("rows") != len(rows):
+        problems.append("manifest rows mismatch")
+    if manifest.get("rows_sha256") != sha256_file(out_dir / "testset.jsonl"):
+        problems.append("manifest rows_sha256 mismatch")
+    stats = manifest.get("stats") or {}
+    if stats.get("rows") != len(rows) or stats.get("cells") != len(BUCKETS) * len(SCENARIOS):
+        problems.append("manifest stats mismatch")
     if problems:
-        print(f"[check] {len(problems)} problem(s)")
+        for problem in problems:
+            print(f"[check] FAIL: {problem}")
         return 1
-    print(f"[check] ok: {len(rows)} rows, {len(SCENARIOS) * len(BUCKETS)} cells, sha {file_sha[:16]}…")
+    print(f"[check] ok: {len(rows)} rows, {len(BUCKETS) * len(SCENARIOS)} cells, sha {manifest['rows_sha256'][:16]}...")
     return 0
 
 
-def main(argv=None) -> int:
-    global RAW_DIR, OUT_DIR, CONTENT_RESERVE
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    global RAW_DIR
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--raw-dir", default=str(RAW_DIR))
-    parser.add_argument("--out-dir", default=str(OUT_DIR))
-    parser.add_argument(
-        "--tokenizer",
-        default=str(RAW_DIR / REFERENCE_TOKENIZER_REL),
-        help="tokenizer.json used for the build (generic reference by default)",
-    )
-    parser.add_argument(
-        "--reserve",
-        type=int,
-        default=0,
-        help="chat-template token overhead to reserve (content = bucket - reserve)",
-    )
-    parser.add_argument("--seed", type=int, default=SEED)
-    parser.add_argument("--targets", type=int, default=TARGETS_PER_SCENARIO)
-    parser.add_argument("--scenarios", default=",".join(SCENARIOS))
-    parser.add_argument("--buckets", default=",".join(BUCKETS))
+    parser.add_argument("--raw-dir", type=Path, default=RAW_DIR)
+    parser.add_argument("--out-dir", type=Path, default=OUT_DIR)
+    parser.add_argument("--scenarios", nargs="*", default=list(SCENARIOS))
+    parser.add_argument("--buckets", nargs="*", default=list(BUCKETS))
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument(
-        "--check",
-        action="store_true",
-        help="validate the on-disk build (row/cell/token/SHA/yaml contract) without rebuilding",
-    )
+    parser.add_argument("--check", action="store_true")
     args = parser.parse_args(argv)
-
-    RAW_DIR = Path(args.raw_dir)
-    OUT_DIR = Path(args.out_dir)
-    CONTENT_RESERVE = int(args.reserve)
-    if CONTENT_RESERVE < 0:
-        parser.error("--reserve must be >= 0")
-    scenarios = [s.strip() for s in args.scenarios.split(",") if s.strip()]
-    buckets = [b.strip() for b in args.buckets.split(",") if b.strip()]
-    for name in scenarios:
-        if name not in SCENARIOS:
-            parser.error(f"unknown scenario {name}")
-    for name in buckets:
-        if name not in BUCKETS:
-            parser.error(f"unknown bucket {name}")
-
     if args.check:
-        return check_outputs(OUT_DIR)
-
-    counter = Counter(Path(args.tokenizer))
-    print(f"[tokenizer] {args.tokenizer} (reserve={CONTENT_RESERVE})")
-    targets_by_scenario = build_targets(counter, scenarios)
-
-    rows: List[Dict[str, Any]] = []
-    bodies: Dict[Tuple[str, str], str] = {}
-    for scenario in scenarios:
-        for index, target in enumerate(targets_by_scenario[scenario]):
-            for bucket in buckets:
-                row, body = make_row(counter, scenario, target, bucket, index)
-                rows.append(row)
-                bodies[(row["target_id"], bucket)] = body
-
-    report = validate_rows(rows, targets_by_scenario, buckets, bodies)
-    for problem in report["problems"]:
-        print(f"  [FAIL] {problem}")
-    print(f"[stats] rows={len(rows)} langs={report['langs']}")
-    print(f"[stats] cells={ {s: dict(v) for s, v in sorted(report['cells'].items())} }")
-    if report["problems"]:
-        return 1
+        return check_outputs(args.out_dir)
+    for scenario in args.scenarios:
+        if scenario not in BUILDERS:
+            parser.error(f"unknown scenario {scenario}")
+    for bucket in args.buckets:
+        if bucket not in BUCKETS:
+            parser.error(f"unknown bucket {bucket}")
+    RAW_DIR = args.raw_dir
+    counter = Counter(RAW_DIR / REFERENCE_TOKENIZER_REL)
+    max_model = MaxModelCounter()
+    started = time.time()
+    rows, targets = build_rows(counter, max_model, args.scenarios, args.buckets)
+    print(
+        f"[build] scenarios={args.scenarios} buckets={args.buckets} rows={len(rows)} "
+        f"models={len(max_model.models)} elapsed={time.time() - started:.1f}s"
+    )
     if args.dry_run:
-        print("[dry-run] nothing written")
+        for row in rows[:3]:
+            meta = row["meta"]
+            print(
+                f"  {row['id']} avg_content={meta['content_tokens']} primary={meta['primary_tokens']} "
+                f"filler={meta['filler_units']} lang={meta['lang']} evidence={meta['evidence_in_primary']}"
+            )
         return 0
-    write_outputs(rows, counter, targets_by_scenario, OUT_DIR, report)
+    validate_rows(rows, targets)
+    sources = {
+        "reference_tokenizer": REFERENCE_TOKENIZER_REL,
+        "cells": {f"{s}/{b}": SCENARIO_DATASET[(s, b)] for s in SCENARIOS for b in BUCKETS},
+    }
+    validation = {
+        "checks": [
+            "primary units complete and present at body start",
+            "evidence string present in primary for evidence-critical scenarios",
+            "max known-tokenizer(primary) + max known-tokenizer(task) + template <= bucket",
+            "body content tokens == bucket x oversize (reference tokenizer)",
+            "two user messages, no tools, 10 rows per cell",
+        ],
+        "tokenizer_probe": max_model.describe(),
+        "evidence_rows": sum(1 for row in rows if row["meta"].get("evidence_sha256")),
+    }
+    manifest = write_outputs(rows, {"validation": validation, "sources": sources}, args.out_dir)
+    print(f"[build] wrote {args.out_dir} rows={len(rows)} sha={manifest['rows_sha256'][:16]}...")
     return 0
 
 

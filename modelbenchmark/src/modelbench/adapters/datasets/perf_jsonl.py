@@ -37,7 +37,7 @@ from ...domain.scenarios.base import largest_remainder_allocation
 from .base import DatasetAdapter, read_jsonl, resolve_project_path
 
 #: Bucket label -> declared context length in tokens.
-BUCKET_TOKENS: Dict[str, int] = {"1k": 1024, "8k": 8192, "32k": 32768}
+BUCKET_TOKENS: Dict[str, int] = {"1k": 1024, "4k": 4096, "32k": 32768}
 _TOKENS_TO_BUCKET = {tokens: bucket for bucket, tokens in BUCKET_TOKENS.items()}
 
 #: Scenario -> evaluator answer type (scoring is not wired into run mode).
@@ -248,7 +248,7 @@ class PerfJSONLAdapter(DatasetAdapter):
         if windows:
             # Calibrated declared tokens intentionally sit below the raw bucket
             # for inflating scenarios (see the dataset budget model), so the
-            # window selector matches the bucket's ISL target (1024/8192/32768)
+            # window selector matches the bucket's ISL target (1024/4096/32768)
             # -- the window the row is actually aimed at. Rows without a known
             # bucket fall back to their raw declared token count.
             wanted_buckets = {
@@ -452,7 +452,7 @@ class PerfJSONLAdapter(DatasetAdapter):
             scenario=scenario,
             subtask=row_meta.get("task") or row_meta.get("category"),
             question=question,
-            context=None,
+            context=(str(row.get("context")) if row.get("context") else None),
             choices=None,
             answer=str(gold) if gold is not None else None,
             answer_type=_ANSWER_TYPES.get(scenario, AnswerType.EXACT),

@@ -5,7 +5,7 @@
 
 | 测试集 | 产物 | 规模 | 状态 |
 |---|---|---|---|
-| 性能 `performance` | `dataset/test/performance/{testset.jsonl,manifest.json,testset.yaml}` | 240 = 8 场景 × 1K/8K/32K × 10，24 cells | 默认参与 run（`method=performance`） |
+| 性能 `performance` | `dataset/test/performance/{testset.jsonl,manifest.json,testset.yaml}` | 240 = 8 场景 × 1K/4K/32K × 10，24 cells | 默认参与 run（`method=performance`） |
 | 精度 `accuracy` | `dataset/test/accuracy/{testset.jsonl,manifest.json,testset.yaml}` | 2,000 = 8 场景 × 250 | **已接入**（`manifest.status=wired` / `runner=accuracy` / `hidden=false`；`method=accuracy` 独立 run） |
 
 ## 1. 目录
@@ -27,13 +27,13 @@ dataset/
 
 `dataset/raw/` 与 `dataset/test/**/testset.jsonl` 不提交 git；新 clone 先按 §2 下载 raw，
 再用 §3 重建。`dataset/raw/` 里保留历史/备用数据集（CEval、MMLU 等），
-但当前两套测试集只读取各自的 `raw_spec.json`；这些额外目录不进入 manifest。
+但当前两套测试集只读取各自的源清单（`tool/dataset/*/sources.py`）；这些额外目录不进入 manifest。
 
 ## 2. 下载并校验 raw
 
 ```bash
 PY=.venv/bin/python                       # Windows: .venv\Scripts\python.exe
-$PY tool/dataset/performance/fetch.py             # 18 个文件（默认 hf-mirror.com）
+$PY tool/dataset/performance/fetch.py             # 15 个源 / 24 个文件（默认 hf-mirror.com）
 $PY tool/dataset/performance/fetch.py --verify    # 只读 size + SHA-256
 $PY tool/dataset/accuracy/fetch.py                # 50 个文件（含 tokenizer / NLTK）
 $PY tool/dataset/accuracy/fetch.py --verify
@@ -45,10 +45,11 @@ $PY tool/dataset/accuracy/fetch.py --verify
 ## 3. 重建测试集
 
 ```bash
-$PY tool/dataset/performance/build.py            # 240 行 + manifest + testset.yaml（cl100k 基线）
-$PY tool/dataset/performance/build.py --check    # 行数/target/三档/token 等值/SHA/yaml 契约复算
+$PY tool/dataset/performance/build.py            # 240 行 + manifest + testset.yaml（cl100k 2× 超量基线）
+$PY tool/dataset/performance/build.py --check    # 行数/target/三档/primary+evidence/SHA/yaml 契约复算
+# 可选：跑分前预检（runner 会在发送前自动对齐）
 $PY tool/dataset/performance/align.py --tokenizer <model>/tokenizer.json \\
-    --base-url http://127.0.0.1:8000 --model <id>  # 跑分前按目标模型重建，逐条校验 0 容差
+    --base-url http://127.0.0.1:8000 --model <id>  # 可选预检：验证能否精确对齐（runner 会自动对齐）
 $PY tool/dataset/accuracy/build.py               # 2,000 行 + manifest + 抽样报告（testset.yaml 为提交文件）
 $PY tool/dataset/accuracy/build.py --check       # 行数/字段/upstream_id 唯一/SHA + manifest wired 状态 + testset.yaml 契约
 ```
@@ -59,7 +60,7 @@ $PY tool/dataset/accuracy/build.py --check       # 行数/字段/upstream_id 唯
 ## 4. 使用约定
 
 - **性能 run 不判分**：`score` 恒为 null；逐请求冷缓存；按 `(model, context_length)` 分档报告，
-  1K/8K/32K 不跨档合并。
+  1K/4K/32K 不跨档合并。
 - **精度集已接入**：`testset.yaml` 声明 `method: accuracy`，CLI/Web 测试集列表可见；
   manifest 的 `status=wired` / `runner=accuracy` / `hidden=false`；判题族 5 类（确定性、无
   LLM/网络），运行协议固定 cold/`temperature=0`/无 decode guard/`repeats=1`。判题依赖

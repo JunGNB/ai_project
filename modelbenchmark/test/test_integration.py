@@ -131,7 +131,10 @@ def _agent_sse(step: int) -> bytes:
 
 
 def _sse_chunks(
-    completion_tokens: int = 20, finish_reason: str = "stop", cached_tokens: int = 0
+    completion_tokens: int = 20,
+    finish_reason: str = "stop",
+    cached_tokens: int = 0,
+    prompt_tokens: int = 100,
 ) -> bytes:
     pieces = ["答", "案：", "C"]
     lines = []
@@ -141,9 +144,9 @@ def _sse_chunks(
             delta["finish_reason"] = finish_reason
         lines.append("data: " + json.dumps({"choices": [delta]}, ensure_ascii=False))
     usage = {
-        "prompt_tokens": 100,
+        "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
-        "total_tokens": 100 + completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
         "prompt_tokens_details": {"cached_tokens": cached_tokens},
         "time_to_first_token": 0.01,
         "generation_tokens_per_second": 30.0,
@@ -151,6 +154,25 @@ def _sse_chunks(
     lines.append("data: " + json.dumps({"choices": [], "usage": usage}))
     lines.append("data: [DONE]")
     return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+
+def _fake_prompt_count(text: str, state: "FakeOMLXState") -> int:
+    """The one place that models the fake server's prompt token count.
+
+    ``/v1/tokenize`` and ``usage.prompt_tokens`` must agree: the runner aligns
+    against the former and records the latter, so an inconsistent fake server
+    would report a prompt-token offset that no real server has.
+    """
+    if state.tokenize_override is not None:
+        return int(state.tokenize_override)
+    target_marker = re.search(r"target=(\d+)", text)
+    if target_marker:
+        return int(target_marker.group(1))
+    token_marker = re.search(r"tokens=(\d+)", text)
+    if token_marker:
+        return int(token_marker.group(1))
+    return max(1, len(text) // 4 + 8)
 
 
 class FakeOMLXHandler(BaseHTTPRequestHandler):
@@ -282,17 +304,7 @@ class FakeOMLXHandler(BaseHTTPRequestHandler):
                 text += body["prompt"]
             if body.get("tools"):
                 text += json.dumps(body["tools"])
-            target_marker = re.search(r"target=(\d+)", text)
-            token_marker = re.search(r"tokens=(\d+)", text)
-            count = (
-                self.state.tokenize_override
-                if self.state.tokenize_override is not None
-                else int(target_marker.group(1))
-                if target_marker
-                else int(token_marker.group(1))
-                if token_marker
-                else max(1, len(text) // 4 + 8)
-            )
+            count = _fake_prompt_count(text, self.state)
             return self._json(
                 {"count": int(count), "max_model_len": self.state.max_window}
             )
@@ -362,10 +374,16 @@ class FakeOMLXHandler(BaseHTTPRequestHandler):
                 cached_tokens = 0
                 if self.state.cached_tokens_sequence:
                     cached_tokens = self.state.cached_tokens_sequence.pop(0)
+                prompt_text = "".join(
+                    (m or {}).get("content") or "" for m in body.get("messages") or []
+                )
+                if body.get("tools"):
+                    prompt_text += json.dumps(body["tools"])
                 payload = _sse_chunks(
                     self.state.completion_tokens,
                     self.state.finish_reason,
                     cached_tokens=cached_tokens,
+                    prompt_tokens=_fake_prompt_count(prompt_text, self.state),
                 )
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -439,6 +457,7 @@ def _perf_rows(
     bucket: str = "1k",
     prebuilt: bool = True,
     question: str | None = None,
+    context: str | None = None,
     dataset: str | None = None,
 ) -> list[dict]:
     rows: list[dict] = []
@@ -460,13 +479,15 @@ def _perf_rows(
                         "role": "user",
                         "content": (
                             f"Fixture question {scenario} {index} "
-                            f"target={ {'1k': 1024, '8k': 8192, '32k': 32768}[bucket] } "
+                            f"target={ {'1k': 1024, '4k': 4096, '32k': 32768}[bucket] } "
                             f"tokens={int(tokens)}"
                         ),
                     }
                 ]
             else:
                 row["question"] = question or f"Fixture question {scenario} {index}"
+                if context is not None:
+                    row["context"] = context
             rows.append(row)
     return rows
 
@@ -492,6 +513,7 @@ def _apply_perf_fixture(
     bucket: str = "1k",
     prebuilt: bool = True,
     question: str | None = None,
+    context: str | None = None,
     extra_rows=(),
 ):
     rows = list(extra_rows) + _perf_rows(
@@ -501,6 +523,7 @@ def _apply_perf_fixture(
         bucket=bucket,
         prebuilt=prebuilt,
         question=question,
+        context=context,
     )
     cfg.datasets.testset_dir = str(_write_perf_file(tmp_path, rows))
     cfg.selection.scenarios = list(scenarios)
@@ -519,6 +542,7 @@ def _fake_config(
     bucket: str = "1k",
     prebuilt: bool = True,
     question: str | None = None,
+    context: str | None = None,
 ):
     server, state = fake_server
     base_url = f"http://127.0.0.1:{server.server_address[1]}"
@@ -544,6 +568,7 @@ def _fake_config(
         bucket=bucket,
         prebuilt=prebuilt,
         question=question,
+        context=context,
     )
     # The fake tokenizer otherwise counts the tiny fixture text, which would
     # (correctly) look far outside the declared bucket and be skipped by the
@@ -951,7 +976,8 @@ def test_native_prompt_is_truncated_to_fit_model_window(fake_server, tmp_path):
         samples=1,
         scenarios=("long_context",),
         prebuilt=False,
-        question="long document " * 4000,
+        question="Summarize the document above in one sentence.",
+        context="long document " * 4000,
     )
     cfg.run.warmup_requests = 0
 
@@ -988,7 +1014,7 @@ def test_prebuilt_prompt_too_long_is_skipped_not_truncated(fake_server, tmp_path
         samples=2,
         scenarios=("long_context",),
         tokens=9000,
-        bucket="8k",
+        bucket="4k",
     )
     cfg.run.warmup_requests = 0
     # The fake tokenizer would count the short fixture as tiny; override so the
@@ -1014,7 +1040,7 @@ def test_strict_input_tokens_match_is_measured_with_exact_bounds(fake_server, tm
     # 8K bucket + 50-token generation exceeds the default 4K fake window.
     state.max_window = 65536
     cfg = _fake_config(
-        fake_server, tmp_path, repeats=1, samples=2, tokens=8192, bucket="8k"
+        fake_server, tmp_path, repeats=1, samples=2, tokens=4096, bucket="4k"
     )
     cfg.perf.strict_input_tokens = True
     # The fixture prompt carries ``target=8192`` and the fake tokenizer reads
@@ -1039,31 +1065,31 @@ def test_strict_input_tokens_match_is_measured_with_exact_bounds(fake_server, tm
     assert summary["n_records"] == len(records) == 3
     for record in measured:
         assert record["status"] == "ok", record.get("error")
-        assert record["context_length"] == 8192
-        assert record["request"]["actual_prompt_tokens"] == 8192
+        assert record["context_length"] == 4096
+        assert record["request"]["actual_prompt_tokens"] == 4096
         context_meta = record["request"]["context_meta"]
-        assert context_meta["tokenized_prompt_tokens"] == 8192
+        assert context_meta["tokenized_prompt_tokens"] == 4096
         assert context_meta["strict_input_tokens"] is True
-        # Strict alignment: the guard user message is not appended, so the
-        # request body is exactly the dataset prompt.
-        assert context_meta["decode_guard_applied"] is False
-        assert "decode_guard" not in context_meta
+        # Strict alignment: the guard is appended first and the whole prompt is
+        # then aligned, so the guard is part of the measured request.
+        assert context_meta["decode_guard_applied"] is True
+        assert context_meta["prompt_alignment"]["final_tokens"] == 4096
         tolerance = context_meta["isl_tolerance"]
         assert tolerance["ok"] is True
-        assert tolerance["low"] == tolerance["high"] == 8192
-        assert tolerance["target"] == 8192
-        assert tolerance["actual"] == 8192
-    # Every request actually sent (warmup + measured) carries only the single
-    # dataset user message; no decode-guard message was injected.
+        assert tolerance["low"] == tolerance["high"] == 4096
+        assert tolerance["target"] == 4096
+        assert tolerance["actual"] == 4096
+    # Every request actually sent (warmup + measured) carries the dataset body
+    # plus the injected decode-guard message, aligned to the bucket target.
     assert state.chat_requests
     for body in state.chat_requests:
         sent = body["messages"]
-        assert len(sent) == 1, sent
+        assert len(sent) == 2, sent
         assert "Fixture question" in sent[0]["content"]
-        assert "performance measurement" not in sent[0]["content"]
+        assert "performance measurement" in sent[1]["content"]
     outcome = _run_json(Path(summary["run_dir"]))["outcome"]
     assert any(
-        "strict input alignment: decode guard disabled" in warning
+        "strict input alignment: prompts are trimmed/padded at run time" in warning
         for warning in outcome["warnings"]
     )
     # Strict alignment is not a ±10% band: the run/aggregates report 0/0 and
@@ -1088,11 +1114,11 @@ def test_strict_input_tokens_match_is_measured_with_exact_bounds(fake_server, tm
     assert "ISL入带" not in report
     assert "ISL出带" not in report
     assert "（±10%过滤）" not in report
-    assert "decode guard）：关闭" in report
+    assert "decode guard）：开启" in report
 
 
-def test_strict_input_tokens_mismatch_is_skipped_not_measured(fake_server, tmp_path):
-    """Strict mode: one-token mismatch -> skipped with expected/got, run continues."""
+def test_strict_input_tokens_unalignable_is_skipped(fake_server, tmp_path):
+    """A tokenizer that can never reach the target cannot be aligned -> skipped."""
     server, state = fake_server
     cfg = _fake_config(fake_server, tmp_path, repeats=1, samples=2)
     cfg.perf.strict_input_tokens = True
@@ -1110,9 +1136,9 @@ def test_strict_input_tokens_mismatch_is_skipped_not_measured(fake_server, tmp_p
     skipped = list(summary["skipped"])
     assert len(skipped) == 2, skipped
     for item in skipped:
-        assert item.startswith("strict_input_tokens: ")
+        assert item.startswith("runtime_alignment: ")
         assert "knowledge_qa/mmlu@1k/fixture-knowledge_qa-1k-" in item
-        assert "expected 1024 got 1023" in item
+        assert "cannot align prompt to 1024 tokens" in item
     # No chat request was sent for the unaligned samples (no warmup either:
     # the warmup build hit the same strict skip and fell through).
     assert state.chat_requests == []
@@ -1121,9 +1147,9 @@ def test_strict_input_tokens_mismatch_is_skipped_not_measured(fake_server, tmp_p
     assert outcome["status"] == "ok"
     assert outcome["n_measured"] == 0
     assert outcome["n_selected"] == len(skipped) == 2
-    # Even a fully-skipped strict cell records why the guard was disabled.
+    # Even a fully-skipped strict cell states the run-time alignment protocol.
     assert any(
-        "strict input alignment: decode guard disabled" in warning
+        "strict input alignment: prompts are trimmed/padded at run time" in warning
         for warning in outcome["warnings"]
     )
 
@@ -1138,7 +1164,7 @@ def test_strict_window_overflow_skips_as_window_problem_first(fake_server, tmp_p
     # 8K prompt + generation cannot fit this window.
     state.max_window = 4096
     cfg = _fake_config(
-        fake_server, tmp_path, repeats=1, samples=1, tokens=8192, bucket="8k"
+        fake_server, tmp_path, repeats=1, samples=1, tokens=4096, bucket="4k"
     )
     cfg.perf.strict_input_tokens = True
     client = OMLXClient(base_url=cfg.server.base_url, api_key="fake-key")
@@ -1220,7 +1246,7 @@ def test_cells_split_by_dataset_and_context_length(fake_server, tmp_path):
     state.max_window = 65536
     rows = (
         _perf_rows(["knowledge_qa"], per_scenario=2, tokens=100, bucket="1k")
-        + _perf_rows(["coding"], per_scenario=2, tokens=8200, bucket="8k")
+        + _perf_rows(["coding"], per_scenario=2, tokens=4100, bucket="4k")
         + _perf_rows(["coding"], per_scenario=2, tokens=32000, bucket="32k")
     )
     cfg = load_config()
@@ -1260,7 +1286,7 @@ def test_cells_split_by_dataset_and_context_length(fake_server, tmp_path):
     }
     assert keys == {
         ("knowledge_qa", "mmlu", 1024),
-        ("coding", "longbench_v1:repobench-p", 8192),
+        ("coding", "longbench_v1:repobench-p", 4096),
         ("coding", "longbench_v1:repobench-p", 32768),
     }
     assert len(summary_json["cells"]) == 3
@@ -1277,7 +1303,7 @@ def test_cells_split_by_dataset_and_context_length(fake_server, tmp_path):
     warmups = [r for r in records if r["phase"] == "warmup"]
     assert len(warmups) == 3
     measured = [r for r in records if r["phase"] == "measured"]
-    assert {r["context_length"] for r in measured} == {1024, 8192, 32768}
+    assert {r["context_length"] for r in measured} == {1024, 4096, 32768}
 
 
 def test_persisted_acceleration_settings_are_reset_to_default(_server_mode, tmp_path):
@@ -1680,7 +1706,7 @@ def test_stratified_sampling_covers_buckets_end_to_end(fake_server, tmp_path):
     server, state = fake_server
     state.max_window = 65536
     rows = _perf_rows(
-        ["long_context"], per_scenario=4, tokens=8200, bucket="8k", dataset="longbench_v1:gov_report"
+        ["long_context"], per_scenario=4, tokens=4100, bucket="4k", dataset="longbench_v1:gov_report"
     ) + _perf_rows(
         ["long_context"], per_scenario=4, tokens=32000, bucket="32k", dataset="longbench_v1:gov_report"
     )
@@ -1709,7 +1735,7 @@ def test_stratified_sampling_covers_buckets_end_to_end(fake_server, tmp_path):
         for line in (Path(summary["run_dir"]) / "records.jsonl").read_text().splitlines()
     ]
     measured = [r for r in records if r["phase"] == "measured"]
-    assert {r["context_length"] for r in measured} == {8192, 32768}
+    assert {r["context_length"] for r in measured} == {4096, 32768}
     assert summary["n_cells"] == 2
 
 
@@ -1746,7 +1772,7 @@ def test_context_window_filter_end_to_end(fake_server, tmp_path):
 def test_context_window_filter_without_matches_skips_scenario(fake_server, tmp_path):
     server, state = fake_server
     cfg = _fake_config(fake_server, tmp_path, repeats=1, samples=2)
-    cfg.perf.context_windows = [8192]  # fake MMLU prompts are ~100 tokens
+    cfg.perf.context_windows = [4096]  # fake MMLU prompts are ~100 tokens
 
     client = OMLXClient(base_url=cfg.server.base_url, api_key="fake-key")
     writer = RunWriter(tmp_path, run_id="ctx-empty")
@@ -2009,7 +2035,7 @@ def test_actual_isl_outside_band_is_measured_but_excluded(fake_server, tmp_path)
     """Out-of-band samples are still measured; aggregates only use in-band rows."""
     server, state = fake_server
     cfg = _fake_config(
-        fake_server, tmp_path, repeats=1, samples=2, tokens=8192, bucket="8k"
+        fake_server, tmp_path, repeats=1, samples=2, tokens=4096, bucket="4k"
     )
     state.max_window = 16384
     state.tokenize_override = 5000  # outside 8K tolerance [7372, 9011]
@@ -2049,10 +2075,10 @@ def test_actual_isl_outside_band_is_measured_but_excluded(fake_server, tmp_path)
 def test_actual_isl_inside_tolerance_not_flagged(fake_server, tmp_path):
     server, state = fake_server
     cfg = _fake_config(
-        fake_server, tmp_path, repeats=1, samples=2, tokens=8192, bucket="8k"
+        fake_server, tmp_path, repeats=1, samples=2, tokens=4096, bucket="4k"
     )
     state.max_window = 16384
-    state.tokenize_override = 8000  # inside [7372, 9011]
+    state.tokenize_override = 4000  # inside [3686, 4505]
     state.stream_chunk_delay_s = 0.04
 
     client = OMLXClient(base_url=cfg.server.base_url, api_key="fake-key")

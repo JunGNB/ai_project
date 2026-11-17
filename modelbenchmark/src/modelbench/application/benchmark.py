@@ -30,6 +30,11 @@ from modelbench.adapters.omlx.environment import (
     default_settings_repair,
 )
 from modelbench.adapters.storage.writer import RunWriter, sanitize_name
+from modelbench.application.prompt_align import (
+    PromptAlignError,
+    align_messages,
+    resolve_local_tokenizer,
+)
 from modelbench.domain.models import (
     CacheMode,
     CacheState,
@@ -50,7 +55,7 @@ from modelbench.domain.context_tolerance import tolerance_for_bucket
 from modelbench.domain.context_windows import describe_windows, in_context_windows
 from modelbench.adapters.datasets.perf_jsonl import BUCKET_TOKENS as _PERF_BUCKET_TOKENS
 
-#: ISL target (1024/8192/32768) per declared pre-built bucket key (1k/8k/32k).
+#: ISL target (1024/4096/32768) per declared pre-built bucket key (1k/4k/32k).
 BUCKET_TARGETS: Dict[str, int] = dict(_PERF_BUCKET_TOKENS)
 from modelbench.domain.scenarios.base import (
     ScenarioAdapter,
@@ -198,7 +203,7 @@ class Orchestrator:
         self.progress_cb = progress_cb
         self.cancel_event = cancel_event
         self._tokenize_warning_issued = False
-        self._strict_guard_note_issued = False
+        self._strict_align_note_issued = False
         self.controller = CacheController(
             client,
             mode=cfg.run.cache_mode,
@@ -210,6 +215,11 @@ class Orchestrator:
         self._dataset_cache: Dict[str, List[Sample]] = {}
         self._adapter_cache: Dict[str, Any] = {}
         self._request_cache: Dict[Tuple[str, str, str], RequestSpec] = {}
+        #: ``usage.prompt_tokens - /v1/tokenize count`` per model: the chat
+        #: generation prompt adds a constant number of special tokens that the
+        #: tokenize endpoint does not report.  Learned from the first response
+        #: and used to align the *billed* prompt length exactly to the bucket.
+        self._prompt_token_offsets: Dict[str, int] = {}
         self._loaded_by_run: set = set()
         self._model_memory: Dict[str, Dict[str, Any]] = {}
         self._log_fh = None
@@ -887,34 +897,28 @@ class Orchestrator:
             # decode guard appended below.  They must NEVER be silently
             # truncated.
             declared = request.actual_prompt_tokens
-            # Strict input-token contract: the test set guarantees the target
-            # model's tokenizer counts exactly the bucket target, so the sample
-            # is only measured when actual == target (no ±10% band).
+            # Strict input-token contract: the committed rows are built
+            # oversized with a neutral reference tokenizer; the target model's
+            # tokenizer decides the real prompt length, so the body is trimmed
+            # or padded below until the prompt counts exactly the bucket target
+            # (no tolerance band, no skip).
             strict = bool(self.cfg.perf.strict_input_tokens)
-            if not strict:
-                self._apply_decode_guard(request)
-            # ``_apply_decode_guard`` appends a fixed +35-token user message.
-            # A strict set aligns the whole request to the bucket exactly, so
-            # the guard is intentionally NOT appended there; the long answer
-            # that makes the decode window trustworthy comes from the dataset
-            # task block plus ``max_tokens``.  Record the decision per sample
-            # so ``records.jsonl`` shows why the prompt has no guard.
+            self._apply_decode_guard(request)
             request.context_meta["decode_guard_applied"] = bool(
                 request.context_meta.get("decode_guard")
             )
             if (
                 strict
                 and self.cfg.perf.decode_guard
-                and not self._strict_guard_note_issued
+                and not self._strict_align_note_issued
             ):
                 message = (
-                    "strict input alignment: decode guard disabled for this test "
-                    "set (prompt tokens must equal the bucket target exactly; "
-                    "long output comes from the task block and max_tokens)"
+                    "strict input alignment: prompts are trimmed/padded at run "
+                    "time to the bucket target exactly (0 tolerance, no skip)"
                 )
                 self.stats.warnings.append(message)
                 self._log(f"NOTE: {message}")
-                self._strict_guard_note_issued = True
+                self._strict_align_note_issued = True
             # Tokenize the final messages+tools with the target model tokenizer.
             # The count includes the chat template (and, in historical mode, the
             # decode guard), i.e. what the server will actually charge to the
@@ -950,11 +954,57 @@ class Orchestrator:
                 (time.perf_counter() - tokenize_started) * 1000.0, 2
             )
             bucket = sample.metadata.get("bucket") or request.context_meta.get("bucket")
-            # Window check first (lead-specified order): the tokenized count is
-            # the same value strict alignment compares, so an over-long sample
-            # is reported as a window problem, not as a token mismatch.  A
-            # strict sample without a tokenizer count cannot be window-checked
-            # here; it is skipped below with the tokenizer reason instead.
+            if strict:
+                # Run-time exact alignment: the test set is built oversized with
+                # a neutral reference tokenizer, and the target model's
+                # tokenizer decides the real prompt length.  The sample body is
+                # trimmed/padded here until the rendered prompt counts exactly
+                # the bucket target -- never a skip, never a silent truncation.
+                label = self._cell_label(
+                    sample.dataset, self._context_length(sample)
+                )
+                trace = f"{scenario.name}/{label}/{sample.sample_id}"
+                strict_bounds = tolerance_for_bucket(
+                    bucket, declared, strict=True
+                )
+                if strict_bounds is None:
+                    raise SampleSkipped(
+                        f"runtime_alignment: {trace} has no token target "
+                        "(bucket/declared missing)"
+                    )
+                if tokenized is None:
+                    raise SampleSkipped(
+                        "runtime_alignment: tokenizer unavailable for "
+                        f"{model_id} ({trace})"
+                    )
+                server_offset = int(self._prompt_token_offsets.get(model_id, 0))
+                target_tokens = max(1, int(strict_bounds[0]) - server_offset)
+                align_started = time.perf_counter()
+                try:
+                    aligned, info = align_messages(
+                        request.messages,
+                        target_tokens,
+                        self._tokenizer(model_id),
+                        tools=request.tools,
+                        tokenizer_path=resolve_local_tokenizer(model_id),
+                    )
+                except PromptAlignError as exc:
+                    raise SampleSkipped(
+                        f"runtime_alignment: {trace}: {exc}"
+                    ) from exc
+                request.messages = aligned
+                tokenized = info.final_tokens
+                request.tokenized_prompt_tokens = tokenized
+                request.context_meta["tokenized_prompt_tokens"] = tokenized
+                request.context_meta["strict_input_tokens"] = True
+                request.context_meta["prompt_alignment"] = {
+                    **info.as_dict(),
+                    "server_prompt_offset": server_offset,
+                    "latency_ms": round(
+                        (time.perf_counter() - align_started) * 1000.0, 2
+                    ),
+                }
+            # Window check on the final (post-alignment) prompt.
             if server_ctx and (tokenized is not None or not strict):
                 request.context_meta["model_context_window"] = int(server_ctx)
                 if tokenized is not None:
@@ -993,36 +1043,6 @@ class Orchestrator:
                         f"{int(actual_value) + reserve} exceeds context window "
                         f"{server_ctx} (not-testable; no silent truncation)"
                     )
-            if strict:
-                # Enforce exact alignment *after* the window check: the sample
-                # must fit the model window before it can be measured, and any
-                # mismatch/unavailable tokenizer is a per-sample skip (never a
-                # run abort).  ``expected``/``got`` are kept verbatim so
-                # ``run.json.outcome.skipped`` is auditable.
-                label = self._cell_label(
-                    sample.dataset, self._context_length(sample)
-                )
-                trace = f"{scenario.name}/{label}/{sample.sample_id}"
-                if tokenized is None:
-                    raise SampleSkipped(
-                        "strict_input_tokens: tokenizer unavailable for "
-                        f"{model_id} ({trace})"
-                    )
-                strict_bounds = tolerance_for_bucket(
-                    bucket, declared, strict=True
-                )
-                if strict_bounds is None:
-                    raise SampleSkipped(
-                        f"strict_input_tokens: {trace} has no token target "
-                        "(bucket/declared missing)"
-                    )
-                strict_target = int(strict_bounds[0])
-                if tokenized != strict_target:
-                    raise SampleSkipped(
-                        f"strict_input_tokens: {trace} expected "
-                        f"{strict_target} got {tokenized}"
-                    )
-                request.context_meta["strict_input_tokens"] = True
             bounds = tolerance_for_bucket(bucket, declared, strict=strict)
             if tokenized is not None and bounds is not None:
                 low, high = bounds
@@ -1182,6 +1202,28 @@ class Orchestrator:
             ttft = stream.first_token_ts
             ttft_ms = round(ttft * 1000.0, 1) if ttft is not None else None
             completion = stream.usage.completion_tokens
+            # Learn the constant gap between the billed chat prompt and the
+            # /v1/tokenize count here, before the first measured strict sample,
+            # so the very first sample is already aligned exactly.
+            billed = stream.usage.prompt_tokens
+            if billed is not None:
+                try:
+                    counted = self.client.tokenize_messages(
+                        request.messages, model=model_id
+                    )
+                except Exception:  # noqa: BLE001 - warmup must not kill the run
+                    counted = None
+                if counted:
+                    offset = int(billed) - int(counted)
+                    if abs(offset) <= 256 and offset != self._prompt_token_offsets.get(
+                        model_id
+                    ):
+                        self._prompt_token_offsets[model_id] = offset
+                        self._log(
+                            f"prompt-token offset for {model_id}: {offset:+d} "
+                            "(usage.prompt_tokens - /v1/tokenize); "
+                            "strict targets compensate it"
+                        )
             self._log(
                 f"model warmup {model_id} {index}/{count}: "
                 f"ttft={ttft_ms}ms wall={round(wall_ms, 1)}ms "
@@ -1317,7 +1359,7 @@ class Orchestrator:
 
     @staticmethod
     def _context_length(sample: Sample) -> Optional[int]:
-        """Declared bucket size (1024/8192/32768); ``None`` for legacy samples."""
+        """Declared bucket size (1024/4096/32768); ``None`` for legacy samples."""
         value = (sample.metadata or {}).get("context_length")
         if value is None:
             return None
@@ -1396,7 +1438,7 @@ class Orchestrator:
         Pre-built performance samples carry calibrated cl100k declared budgets
         that sit below the raw bucket for inflating scenarios (see the dataset
         budget model), so the window selector matches the bucket's ISL target
-        (1024/8192/32768) -- the window the row is aimed at; pre-built rows
+        (1024/4096/32768) -- the window the row is aimed at; pre-built rows
         without a known bucket fall back to their declared token count. Legacy
         samples use the model tokenizer (``/v1/tokenize`` via
         ``_build_request``).  The filter only narrows the sample set -- it never
@@ -1918,6 +1960,29 @@ class Orchestrator:
                 metrics.cpu_samples = report.samples
                 metrics.cpu_sample_window_ms = report.window_ms
             metrics.cached_tokens = usage.cached_tokens
+
+            alignment = request.context_meta.get("prompt_alignment") or {}
+            tokenized = alignment.get("final_tokens")
+            billed = usage.prompt_tokens
+            if tokenized and billed is not None:
+                # The server bills the rendered chat prompt, which is a constant
+                # number of special tokens longer than /v1/tokenize reports.
+                # Learn that offset once and subtract it from later targets so
+                # the billed input length hits 1024/4096/32768 exactly.
+                offset = int(billed) - int(tokenized)
+                if abs(offset) <= 256 and offset != self._prompt_token_offsets.get(
+                    model_id
+                ):
+                    self._prompt_token_offsets[model_id] = offset
+                    self._log(
+                        f"prompt-token offset for {model_id}: {offset:+d} "
+                        "(usage.prompt_tokens - /v1/tokenize); "
+                        "later strict targets compensate it"
+                    )
+                tolerance = request.context_meta.get("isl_tolerance")
+                if isinstance(tolerance, dict):
+                    tolerance["actual"] = int(billed)
+                    tolerance["ok"] = int(billed) == int(tolerance.get("target", -1))
 
         record = SampleRecord(
             run_id=self.writer.run_id,

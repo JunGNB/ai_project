@@ -58,6 +58,7 @@ application/
   methods.py
   plan.py
   ports.py
+  prompt_align.py
 domain/
   __init__.py
   accuracy_metrics.py

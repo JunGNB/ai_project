@@ -96,7 +96,7 @@ _PERF_PARAMS: Tuple[Dict[str, Any], ...] = (
         "label": "上下文档位",
         "type": "multi_enum",
         "default": [],
-        "options": [1024, 8192, 32768],
+        "options": [1024, 4096, 32768],
         "hint": "空 = 不筛选；仅选择样本，不改变 cell 键",
     },
 )

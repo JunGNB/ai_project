@@ -257,7 +257,7 @@ run 目录**，互不混合；批次关系由 `batches/<batch_id>.json` 与 `ind
   "model_env_ref": "3f9c…(16)",              // → run.json.env.model_env
   "scenario": "coding",
   "dataset": "longbench_v2:Code Repository Understanding",
-  "context_length": 1024,                    // 档位（1024/8192/32768）
+  "context_length": 1024,                    // 档位（1024/4096/32768）
   "sample_id": "perf-coding-1k-000",
   "repeat": 0, "phase": "measured", "status": "ok", "error": null,
 
@@ -319,15 +319,17 @@ run 目录**，互不混合；批次关系由 `batches/<batch_id>.json` 与 `ind
   `decode_window_ms >= 50`、`finish_reason != tool_calls`、值 ≤ 10,000）；否则置 null 并在
   `metrics.gen_tps_invalid` 记录原因（完整枚举见 [20-methodology.md](../spec/20-methodology.md) §2）。
 - **实际输入大小（actual ISL）**：`request.tokenized_prompt_tokens` 是目标模型对最终
-  messages（strict 集不含 decode guard）的 tokenize 结果；`context_meta.isl_tolerance`
-  记录 `{target, low, high, actual, ok}`，`context_meta.window_check_basis` 说明窗口判定用的是
+  messages（strict 集已按目标模型 tokenizer 裁剪/补齐，含 decode guard）的计数结果；
+  `context_meta.isl_tolerance` 记录 `{target, low, high, actual, ok}`（strict 集 actual 取服务端
+  `usage.prompt_tokens`），`context_meta.window_check_basis` 说明窗口判定用的是
   `tokenized` 还是回退的 `declared`。
   - **strict 集**（testset 声明 `strict_input_tokens: true`，默认 `performance`）：
-    `low = high = target`（容差 0），`tokenized_prompt_tokens == bucket` 才 measured；不等或 tokenize
-    失败 → 该样本 skip 进 `run.json.outcome.skipped`（原因带 expected/got），不发生误差统计；
-    `n_isl_in_band == n_measured`、`n_isl_out_of_band == 0` 是恒定值，仅作对账；
-    `records[].context_meta.decode_guard_applied = false`。长度由运行前 `align.py` 按目标模型
-    tokenizer 重建保证（见 [../spec/11-performance-testset.md](../spec/11-performance-testset.md) §4）。
+    `low = high = target`（容差 0），runner 发送前按目标模型 tokenizer 把 body 裁剪/平铺到
+    `target - offset`，使 `usage.prompt_tokens == bucket` 才 measured；仅 tokenizer 不可用/无法对齐/
+    窗口不足 → 该样本 skip 进 `run.json.outcome.skipped`（原因含 `runtime_alignment`），不发生误差
+    统计；`n_isl_in_band == n_measured`、`n_isl_out_of_band == 0` 是恒定值，仅作对账；
+    `records[].context_meta.prompt_alignment` 记录 target/original/final/mode/server_calls/offset，
+    `decode_guard_applied = true`（见 [../spec/11-performance-testset.md](../spec/11-performance-testset.md) §4）。
   - **非 strict 集**（历史/精度口径）：`{target, low, high}` 为 target ±10% 带
     （区间见 [20-methodology.md](../spec/20-methodology.md) §5）；actual 不驱动跳过，聚合只使用入带
     样本，出带样本保留在 records/samples.csv（`isl_band=false`）但不进平均值。
@@ -512,7 +514,7 @@ finish_reason,cache_mode,cache_cleared,cache_polluted,prompt_sha256,timestamp
 }
 ```
 
-- `overall`：每 `(model, context_length)` 一行——1K/8K/32K 的 TTFT/预填充相差一个数量级，
+- `overall`：每 `(model, context_length)` 一行——1K/4K/32K 的 TTFT/预填充相差一个数量级，
   **绝不跨档位合并**；`peak_memory_gb_max` 是该档位全局最大值。
 - `cells`：每 `(model, scenario, dataset, context_length)` 一行。
 - `perf` / `perf_all` 是「指标名 → `Distribution`」映射，`Distribution` 含
@@ -638,7 +640,7 @@ finish_reason,cache_mode,cache_cleared,cache_polluted,prompt_sha256,timestamp
     "testset": {
       "path": "dataset/test/performance/testset.jsonl",
       "sha256": "…", "rows": 240,
-      "context_windows": [1024, 8192, 32768],
+      "context_windows": [1024, 4096, 32768],
       "decode_guard_version": 1
       // method=accuracy 时改为（无 context_windows/decode_guard）：
       // "method": "accuracy",

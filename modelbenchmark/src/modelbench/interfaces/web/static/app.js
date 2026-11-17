@@ -9,6 +9,7 @@ const state = {
   sampleModal: null,      // {scenario, testset, filter}
   openTestsets: new Set(),
   job: null,
+  jobId: null,            // job currently rendered; stale pollers compare against it
   poll: null,
   estimate: null,
   detail: null,
@@ -389,8 +390,8 @@ function renderStrictHint() {
   const strict = testsetIsStrict(ts);
   node.classList.toggle("hidden", !strict);
   if (!strict) return;
-  node.innerHTML = "严格对齐：跑分前用 <code>tool/dataset/performance/align.py</code> "
-    + "按目标模型 tokenizer 对齐样本；未对齐的样本会跳过。";
+  node.innerHTML = "严格对齐：运行时会按目标模型 tokenizer 把输入裁剪/补齐到 1K/8K/32K 精确等值"
+    + "（0 容差、不跳过）。";
 }
 
 function resetScenarioState(testset) {
@@ -443,7 +444,7 @@ function renderTestsets() {
     const unavailable = ts.available === false
       ? ` <span class="badge warn" title="数据未构建">数据缺失</span>` : "";
     const strictBadge = testsetIsStrict(ts)
-      ? ` <span class="badge" title="prompt token 必须精确等于档位目标；跑分前用 align.py 对齐">严格对齐</span>` : "";
+      ? ` <span class="badge" title="运行期按目标模型 tokenizer 裁剪/补齐到档位目标（精确等值，0 容差）">严格对齐</span>` : "";
     const maxTokens = ts.max_tokens != null ? ` · max_tokens ${esc(ts.max_tokens)}` : "";
     return `<label class="testset-item ${active ? "active" : ""}" data-testset="${esc(ts.name)}">
       <input type="checkbox" data-testset-check ${active ? "checked" : ""} title="选择该测试集">
@@ -700,6 +701,22 @@ function renderAccuracyEstimate(models, names, estimate, error) {
   $("#estimate").textContent = parts.join(" · ");
 }
 
+//: True while the rendered job still occupies the single run slot; the start button
+//: must stay disabled so the panel cannot be flipped by a second poller.
+const ACTIVE_JOB_STATUSES = ["queued", "running", "cancelling"];
+//: Statuses that still hold the run slot against a new run.  ``cancelling`` is
+//: deliberately absent: the user already asked to stop, so the next run may be
+//: queued behind it instead of waiting for the in-flight sample (up to ~90s at 32K).
+const BLOCKING_JOB_STATUSES = ["queued", "running"];
+
+function jobActive() {
+  return !!(state.job && ACTIVE_JOB_STATUSES.includes(state.job.status));
+}
+
+function jobBlocking() {
+  return !!(state.job && BLOCKING_JOB_STATUSES.includes(state.job.status));
+}
+
 async function updateEstimate() {
   const testset = currentTestset();
   if (!testset) {
@@ -709,7 +726,10 @@ async function updateEstimate() {
   }
   const names = selectedScenarioNames();
   const models = state.models.size;
-  $("#start").disabled = models === 0 || names.length === 0;
+  $("#start").disabled = models === 0 || names.length === 0 || jobBlocking();
+  $("#start").title = jobBlocking()
+    ? "同一 oMLX 实例串行执行：当前测试仍在运行/排队，结束后可再次开始"
+    : "";
   if (!models || !names.length) {
     $("#estimate").textContent = "选择模型与数据集后显示计划";
     return;
@@ -772,7 +792,7 @@ async function startRun() {
     await pollJob(res.job_id);
   } catch (err) {
     toast(`启动失败：${err.message}`, true);
-    $("#start").disabled = false;
+    $("#start").disabled = jobBlocking();
   }
 }
 
@@ -833,6 +853,9 @@ function renderJobResults(job) {
 
 function renderJob(job) {
   state.job = job;
+  // Only the newest job may paint the panel: a stopped run keeps polling until it
+  // reaches a terminal state, and its late responses must not overwrite the next run.
+  state.jobId = job.id;
   $("#job-card").classList.remove("hidden");
   $("#job-run").textContent = job.run_id || "-";
   $("#job-records").textContent = job.records ?? 0;
@@ -842,7 +865,17 @@ function renderJob(job) {
   };
   const [text, cls] = map[job.status] || [job.status, "muted"];
   setPill($("#job-pill"), text, cls);
-  $("#cancel").classList.toggle("hidden", !["running", "queued", "cancelling"].includes(job.status));
+  const active = ACTIVE_JOB_STATUSES.includes(job.status);
+  const blocking = BLOCKING_JOB_STATUSES.includes(job.status);
+  $("#cancel").classList.toggle("hidden", !active);
+  // A cancelled run may still be waiting for its in-flight sample: the user can queue
+  // the next run right away (the manager serializes it), so only queued/running block.
+  $("#start").disabled = blocking
+    || state.models.size === 0
+    || selectedScenarioNames().length === 0;
+  $("#start").title = blocking
+    ? "同一 oMLX 实例串行执行：当前测试仍在运行/排队，结束后可再次开始"
+    : "";
   const cur = job.current || {};
   const progress = job.progress || {};
   if (cur.event === "record") {
@@ -887,14 +920,24 @@ function renderJob(job) {
 }
 
 async function pollJob(jobId) {
+  // Exactly one poller may run: starting another test while the previous job is still
+  // cancelling used to leave both intervals alive, so the panel alternated between the
+  // stopped run and the new one every tick.
+  if (state.poll) { clearInterval(state.poll); state.poll = null; }
+  state.jobId = jobId;
   const tick = async () => {
+    if (state.jobId !== jobId) return;
     try {
-      renderJob(await api(`/api/jobs/${jobId}`));
+      const job = await api(`/api/jobs/${jobId}`);
+      if (state.jobId !== jobId) return;   // a newer job took over while this was in flight
+      renderJob(job);
+      if (!jobActive() && state.poll) { clearInterval(state.poll); state.poll = null; }
     } catch (err) {
-      if (state.poll) { clearInterval(state.poll); state.poll = null; }
+      if (state.jobId === jobId && state.poll) { clearInterval(state.poll); state.poll = null; }
     }
   };
   await tick();
+  if (state.jobId !== jobId || state.poll || !jobActive()) return;
   state.poll = setInterval(tick, 1200);
 }
 
@@ -1585,8 +1628,6 @@ async function restoreActiveJob() {
     const active = (data.jobs || []).find((job) =>
       ["queued", "running", "cancelling"].includes(job.status));
     if (!active) return;
-    if (state.poll) { clearInterval(state.poll); state.poll = null; }
-    renderJob(active);
     await pollJob(active.id);
   } catch (err) {
     // Job recovery is best-effort; the page still works without it.

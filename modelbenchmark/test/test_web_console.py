@@ -103,7 +103,7 @@ def test_overview_exposes_perf_defaults_without_strategies(monkeypatch):
     assert performance["directory"].startswith("dataset/test/")
     assert len(performance["scenarios"]) == 8
     # Only declared context buckets are offered as filters (no 4K/16K traps).
-    assert performance["buckets"] == [1024, 8192, 32768]
+    assert performance["buckets"] == [1024, 4096, 32768]
     # The console mirrors the declared generation length / strict contract so
     # the run form (placeholder + strict hint) matches apply_testset().
     assert performance["max_tokens"] == 50
@@ -284,7 +284,7 @@ def test_estimate_endpoint_is_exact_for_ui_controls():
         assert five["cells_total"] == 24
         windows = _post_estimate(
             port,
-            {"models": ["minicpm5-1b"], "context_windows": [1024, 8192]},
+            {"models": ["minicpm5-1b"], "context_windows": [1024, 4096]},
         )
         assert windows["samples_total"] == 160
         assert windows["cells_total"] == 16

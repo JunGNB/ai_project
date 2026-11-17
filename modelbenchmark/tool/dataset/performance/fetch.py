@@ -18,8 +18,10 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import sys
 import time
+import zipfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -46,8 +48,17 @@ def expand(spec: Dict) -> List[Dict]:
     """One (path, url) pair per concrete file; ``{lang}`` fans out to 10 languages."""
     raw = str(spec["path"])
     url = str(spec["url"])
+    extra = {key: spec[key] for key in ("member", "archive") if key in spec}
     if "{lang}" not in raw:
-        return [{"path": raw, "url": url, "license": spec.get("license"), "note": spec.get("note")}]
+        return [
+            {
+                "path": raw,
+                "url": url,
+                "license": spec.get("license"),
+                "note": spec.get("note"),
+                **extra,
+            }
+        ]
     out = []
     for lang in LANGS:
         out.append(
@@ -56,9 +67,24 @@ def expand(spec: Dict) -> List[Dict]:
                 "url": url.replace("{lang}", lang),
                 "license": spec.get("license"),
                 "note": f"{spec.get('note')} [{lang}]",
+                **extra,
             }
         )
     return out
+
+
+def extract_member(raw_dir: Path, item: Dict) -> bool:
+    """Restore a zip member (``archive`` + ``member``) into ``dataset/raw``."""
+    archive = raw_dir / str(item["archive"])
+    if not archive.is_file():
+        return False
+    dest = raw_dir / str(item["path"])
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive) as zf, zf.open(str(item["member"])) as src:
+        with dest.open("wb") as out:
+            shutil.copyfileobj(src, out)
+    print(f"  [extract] {item['archive']}:{item['member']} -> {item['path']}")
+    return True
 
 
 def mirror_url(url: str, mirror: str) -> str:
@@ -104,6 +130,8 @@ def main(argv=None) -> int:
     for key, spec in SOURCES.items():
         for item in expand(spec):
             path = raw_dir / item["path"]
+            if not path.is_file() and not args.verify and item.get("member"):
+                extract_member(raw_dir, item)
             if not path.is_file():
                 missing.append((key, item, path))
                 continue

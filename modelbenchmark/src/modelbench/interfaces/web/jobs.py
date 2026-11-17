@@ -632,7 +632,10 @@ class JobManager:
             }
         with self._run_lock:
             if job.cancel_event.is_set():
+                # Cancelled while queued: no runner ever started, so record the end
+                # here (otherwise the snapshot's duration keeps growing forever).
                 job.status = "cancelled"
+                job.finished_at = time.time()
                 return
             job.status = "running"
             job.started_at = time.time()

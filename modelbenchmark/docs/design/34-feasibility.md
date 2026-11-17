@@ -61,7 +61,7 @@ MiniCPM5-1B，同一 10,752 token prompt：
 ## 4. 运行时预算（决定默认样本数）
 
 默认测试集（`performance`）固定为 8 场景 / **240 measured 请求 / 24 cells**
-（1K/8K/32K 各 80 条），目标模型窗口不足时 32K 行转 `not-testable`（见 TEST_PLAN §8 第 2 条）。
+（1K/4K/32K 各 80 条），目标模型窗口不足时 32K 行转 `not-testable`（见 TEST_PLAN §8 第 2 条）。
 样本与 token 预算的权威来源是 [dataset/README.md](../../dataset/README.md) 与
 `dataset/test/performance/manifest.json`。
 

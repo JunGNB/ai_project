@@ -56,7 +56,7 @@ class TestSet(BaseModel):
     max_tokens: Optional[int] = Field(default=None, gt=0)
     #: Strict input-token contract for a performance set.  When true, every
     #: pre-built sample must tokenize to *exactly* its bucket target
-    #: (1024/8192/32768) with the target model's tokenizer; mismatching samples
+    #: (1024/4096/32768) with the target model's tokenizer; mismatching samples
     #: are skipped (never measured) and the aggregates use the exact bounds.
     #: ``apply_testset`` applies it to ``perf.strict_input_tokens``; accuracy
     #: sets reject it (their prompt length is not a bucket contract).
