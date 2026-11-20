@@ -5,6 +5,38 @@
 口径：仅记"变了什么、为什么"；详细证据在 `docs/records/`，规范以 `docs/` 为准。
 历史（0.3.0 之前）的任务级明细见 `harness/tasks/` 任务板与 `docs/archive/`。
 
+## 2026-11-19（判题依赖与资产内置，消除静默 0 分）
+
+### Fixed
+
+- **判题依赖改为核心依赖**：`nltk`/`langdetect`/`absl-py`/`immutabledict`/`jieba`/`rouge`
+  从 `.[eval]` 移入 `project.dependencies`，普通 `pip install -e .`（含 `./modelbench setup`）
+  即完成安装；`eval` extra 保留为空别名，旧的 `pip install -e ".[eval]"` 命令仍然可用。
+- **官方 IFEval checker 代码内置**：`src/modelbench/domain/judges/_vendor/instruction_following_eval/`
+  （6 个文件、约 96 KB，Apache-2.0），随 wheel 分发；`checker_root()` 优先用
+  `dataset/raw/ifeval`（可固定版本），缺失时回退到内置副本。新机器不会再因为没跑过
+  `fetch.py` 让 `instruction_following` 250/250 变成 `RuntimeError: IFEval checker not found`。
+- **英文 punkt 数据内置**：checker 的句数约束只用 `punkt/english.pickle` 与
+  `punkt_tab/english/`（合计约 668 KB，词切分走 `RegexpTokenizer`），已随包分发
+  （`_vendor/nltk_data/`），安装后**离线即可判分**，不需要再下载 18 MB 全语种数据。wheel
+  体积约 0.66 MB。
+- **checker 完整性校验**：`checker_root()` 现在要求 `instruction_following_eval/evaluation_lib.py`
+  真实存在，避免"目录已建但下载中断"的半成品被当成可用 checker（曾导致
+  `ImportError: cannot import name 'evaluation_lib'`）。
+- **preflight 同时检查资产**：新增 `judges.missing_assets()`（IFEval checker、NLTK punkt），
+  `run --method accuracy` 的启动告警与 `validate` 预检同时报告缺失模块与缺失资产，并给出
+  `./modelbench setup` / `fetch.py --only ifeval,nltk` 修复提示；`run.json.outcome.warnings`
+  与 `judge_dependencies` 一并记录 `missing_assets`。
+
+### Analysis
+
+- 复现 2026-11-19 精度结果中三个"无数据/0 分"场景：`instruction_following` 250/250 因缺
+  `dataset/raw/ifeval` 判 `judge_error`；`long_context` 100/250 因缺 `jieba`（74 条 `f1_zh` +
+  26 条 `rouge_zh`）判 `judge_error`；`general_agent` 2 条为模型输出格式失败。**不是样本选择
+  问题**，也无需改测试脚本；旧的 `missing_dependencies` 只探测 pip 模块、看不到磁盘资产，是
+  告警漏报的直接原因。修复后同一测试集可直接重跑；旧 bundle 的 0 分场景应重跑后再引用
+  （该轮宏平均因此被压低约 0.08）。
+
 ## 2026-11-12（精度首轮全量结果审计）
 
 ### Fixed

@@ -87,17 +87,20 @@ content 为空。不传该 kwargs 时走模板默认（空 think 块），不会
 `tool/system/judges.py` 保留为兼容转发）。判题器**只读**样本的 `judge` 字段与模型响应，
 不读网络/外部状态。gold 自检见 `tool/system/validate_judges.py`（1,750 正例 + negative controls）。
 
-### 3.2 可选依赖与失败策略
+### 3.2 判题依赖、资产与失败策略
 
-`ifeval` 需要官方 checker（`absl-py`/`nltk`/`langdetect`/`immutabledict`）；中文 F1/ROUGE 需要
-`jieba`/`rouge`。这些在 `pip install -e ".[eval]"` 中声明：
+判题依赖自 2026-11-19 起是**核心依赖**（`pip install -e .` 即安装：`absl-py`/`nltk`/
+`langdetect`/`immutabledict`/`jieba`/`rouge`）；官方 IFEval checker 代码**内置在包内**
+（`src/modelbench/domain/judges/_vendor/instruction_following_eval/`，Apache-2.0），其所需的
+英文 NLTK punkt 数据（`punkt/english.pickle` + `punkt_tab/english/`，约 668 KB）同样内置
+（`_vendor/nltk_data/`），安装后离线可用：
 
-1. run 启动时检查**本次测试集 manifest 声明的判题族**的依赖（`domain/judges/missing_dependencies`，
-   用 `importlib.util.find_spec` 探测、不 import 重模块；报告缺失的**模块名**：`absl`/`nltk`/
-   `langdetect`/`immutabledict`/`jieba`/`rouge`）。传族名时按族保守判断（`normalized_match`
-   会连带要求中文栈 `jieba`+`rouge`；如调用方持有 judge 契约，可传入契约把判断收窄到实际
-   metric，例如纯英文 `f1` 不要求中文包）。缺失时写 `run.json.outcome.warnings`（含缺失模块名与
-   `pip install -e ".[eval]"` 提示），对应样本 `status=judge_error`（不静默给分）；
+1. run 启动时检查**本次测试集 manifest 声明的判题族**的 pip 模块
+   （`domain/judges/missing_dependencies`，用 `importlib.util.find_spec` 探测、不 import 重模块）
+   与磁盘资产（`domain/judges/missing_assets`：IFEval checker、NLTK punkt）。传族名时按族保守
+   判断（`normalized_match` 会连带要求中文栈 `jieba`+`rouge`；传入 judge 契约可收窄到实际
+   metric，例如纯英文 `f1` 不要求中文包）。缺失时写 `run.json.outcome.warnings`（含缺失模块/
+   资产名与修复命令），对应样本 `status=judge_error`（不静默给分）；
 2. `judge_error` 计 0 分并计入 `n_judge_error` 与错误率；报告显式列出；
 3. 缺依赖时**不**把该场景排除出分母（否则会虚高），由错误率与 judge_error 计数暴露质量。
 
@@ -221,7 +224,8 @@ bundle 布局与性能相同（`output/runs/<run_id>/`，`run_id=<batch>__accura
    `--samples N`，但分数不得与全量结果混比。
 2. **代码执行风险**：`code_exec` 在子进程执行模型生成代码（6s + 资源限制），**不是安全沙箱**；
    仅在受控测试机运行，判题器不访问网络。
-3. **可选依赖**：缺 `[eval]` 依赖时 ifeval / 中文 F1 判题会 `judge_error`；必须按 §3.2 显式暴露。
+3. **判题依赖/资产**：判题依赖是核心依赖、IFEval checker 内置、punkt 数据由 `setup` 抓取；
+   仍缺失时 ifeval / 中文 F1 判题会 `judge_error`，必须按 §3.2 显式暴露。
 4. **难度带/污染**：样本难度由参考模型试点校准；公开数据无法排除预训练污染。本方案的主结论是
    **同一模型 bf16 vs 量化的相对比较**，污染对两版近似同向，不影响主结论，但不得与公开榜横比。
 5. **统计分辨率**：单场景 250 行约 ±6.2pp（独立近似）；双语配对/多语 25×10 行间不独立，正式报告

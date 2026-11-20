@@ -28,12 +28,15 @@ cd /d D:\path\to\modelbenchmark
 .\modelbench.cmd setup && .\modelbench.cmd validate --offline
 ```
 
-- 一键脚本会在项目内创建 `.venv` 并安装 `.[dev]`；也可手动
-  `python3.12 -m venv .venv` + `pip install -e ".[dev]"`（Windows 用 `py -3.12` 与
-  `.venv\Scripts\python.exe -m pip`）。
-- **精度测试需要额外安装 `.[eval]`**（判题依赖 `nltk`/`langdetect`/`absl-py`/`immutabledict`/
-  `jieba`/`rouge`）：`.venv/bin/pip install -e ".[eval]"`；缺失时精度 run 会显式告警并把相关
-  样本记为 `judge_error`（不静默给分），见 [docs/spec/22-accuracy-test-plan.md](docs/spec/22-accuracy-test-plan.md) §3.2。
+- 一键脚本会在项目内创建 `.venv` 并安装全部依赖（判题依赖已是**核心依赖**，无需再装
+  `.[eval]`）；也可手动 `python3.12 -m venv .venv` + `pip install -e ".[dev]"`（Windows 用
+  `py -3.12` 与 `.venv\Scripts\python.exe -m pip`）。
+- **精度判题资产已内置在包内**（`modelbench/domain/judges/_vendor/`）：官方 IFEval checker
+  （约 96 KB）与英文 NLTK punkt 数据（约 668 KB）随安装分发，新机器**无需联网下载**，也不会再
+  因为缺 `dataset/raw/ifeval` 让 `instruction_following` 整场景 0 分；`dataset/raw` 存在时仍
+  优先使用（便于固定版本 / 重建测试集）。
+- 缺失判题依赖/资产时精度 run 仍会显式告警并把相关样本记为 `judge_error`（不静默给分），
+  见 [docs/spec/22-accuracy-test-plan.md](docs/spec/22-accuracy-test-plan.md) §3.2。
 - 完整说明（支持矩阵、镜像/代理、可选 extras、安装验证、常见问题、重建）见
   [docs/guides/40-install.md](docs/guides/40-install.md)。
 - live benchmark 还需要**可达的 oMLX 服务**；Windows/Linux 上可先用离线 validate、

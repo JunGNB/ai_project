@@ -304,10 +304,11 @@ docs/             # 方案/使用/架构
 | 思考模式 | `disabled` | 按模型用 `ModelSpec.thinking_disable` 关闭（默认 `explicit_false`；MiniCPM-V-4.6 用 `omit`）；实际策略写入 `request.context_meta.thinking_control`。开启思考可能耗尽 `max_new_tokens`，空响应/截断进 `format_failure`，不得与默认口径混算 |
 | 缓存/温度/轮数/重试 | 固定 | cold、`temperature=0`、`top_p=1`、无 decode guard、`repeats=1`、传输错误重试 1 次；不通过 CLI/Web 暴露 |
 
-**判题依赖**：`ifeval` 需要官方 checker（`nltk`/`langdetect`/`absl`/`immutabledict`），中文
-F1/ROUGE 需要 `jieba`/`rouge`，来自 `pip install -e ".[eval]"`（见
-[40-install.md](40-install.md) §6）。缺失时 run 会写 `run.json.outcome.warnings`（含缺失模块名），
-相关样本 `status=judge_error`，**不静默给分**。
+**判题依赖**：`ifeval` 需要官方 checker（`nltk`/`langdetect`/`absl`/`immutabledict`）与英文
+NLTK punkt 数据，中文 F1/ROUGE 需要 `jieba`/`rouge`；pip 依赖是**核心依赖**，checker 代码与
+punkt 数据均已内置在包内，普通安装后**离线可用**，见
+[40-install.md](40-install.md) §6。仍缺失时 run 会写 `run.json.outcome.warnings`（含缺失模块/
+资产名与修复命令），相关样本 `status=judge_error`，**不静默给分**。
 
 ### 5.3 结果解读（精度）
 
@@ -384,7 +385,7 @@ accuracy:
   sample_ids: {}              # 手选样本（诊断，优先级最高）
 
 # 运行协议（cold/temperature=0/top_p=1/无 decode guard/repeats=1/重试 1）固定，
-# 不在配置中暴露；判题依赖见 [40-install.md](40-install.md) §6 的 `.[eval]`。
+# 不在配置中暴露；判题依赖已随系统安装，见 [40-install.md](40-install.md) §6。
 ```
 
 ### 6.3 模型加载（默认配置）
@@ -575,7 +576,7 @@ CLI `run` 启动前会对照 `/v1/models`：若所选模型不在服务端，会
 | `n_isl_in_band` 偏少 / `insufficient_samples` | 该 cell 进入「（±10%过滤）」均值的样本过少（出带/窗口跳过/失败多），报告会标记 `insufficient_samples`（默认全样本列不受影响）；此时不要据此下强结论，可减少 `--samples` 外的影响/换更匹配窗口的模型，或按 actual 对齐后比较 |
 | Web 写操作返回 403 `cross-origin write rejected` | 请求带了与 `Host` 不一致的 `Origin`（浏览器跨站/反向代理改写 Host）。用控制台同源页面操作，或让本地脚本不带 `Origin` 直接调用；这是安全防护而非鉴权错误 |
 | `method=accuracy` 启动即报缺测试集 / "accuracy testset" | `dataset/test/accuracy/testset.jsonl` 未构建或 SHA 不符。先跑 `python tool/dataset/accuracy/fetch.py`（断点下载）与 `python tool/dataset/accuracy/build.py`，再用 `--check` 校验；`testset.yaml` 与 `manifest.json` 应已随仓库提交（见 [dataset/README.md](../../dataset/README.md)） |
-| 精度 run 的 `warnings` 含 "judge optional dependencies missing" | 缺 `.[eval]` 判题依赖（`nltk`/`langdetect`/`absl`/`immutabledict`/`jieba`/`rouge`）。安装 `.venv/bin/pip install -e ".[eval]"` 后重跑；缺失期间相关样本为 `status=judge_error`（计 0、留在分母），不会静默给分 |
+| 精度 run 的 `warnings` 含 "accuracy judge dependencies missing" | 判题 pip 依赖或磁盘资产缺失（模块：`nltk`/`langdetect`/`absl`/`immutabledict`/`jieba`/`rouge`；资产：NLTK punkt 数据 / IFEval checker）。先确认安装完整（`pip install -e .` / `./modelbench setup`；资产已内置，`dataset/raw` 缺失不影响判题）；缺失期间相关样本为 `status=judge_error`（计 0、留在分母），不会静默给分 |
 | 精度 `judge_error` 非 0 | 判题器异常/依赖缺失/判题契约非法：**计 0 分且保留在分母**，不是跳过。看 `records.jsonl` 的 `score.detail.reason` 与 `run.json.outcome.warnings`，修复判题依赖或数据后重跑该 run |
 | 精度样本 `skipped(over_window)` | `tokenized(prompt) + judge.max_new_tokens + 128 > 模型窗口`：超出窗口的样本**显式跳过**（不截断、不计 0 分），在 `run.json.outcome.skipped` 与错误统计中可见；换窗口更大的模型或接受该场景分母变小 |
 | Web 首次点「精度测试」估算较慢 | 首次估算要读取约 15 MB 的 `dataset/test/accuracy/testset.jsonl` 建判题族索引（之后缓存，估算变快）；不是卡死。数据未构建时卡片会提示构建命令 |

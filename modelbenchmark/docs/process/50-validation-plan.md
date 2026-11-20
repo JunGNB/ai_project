@@ -106,7 +106,7 @@ V&V 自身的附加判据：
 8. **方法分派/精度链路变化**：`application/methods.py`、`AccuracyOrchestrator`、`domain/judges/`
    判题算法/依赖、`domain/accuracy_metrics.py` 聚合/CI/配对、`accuracy_output` 投影、
    `--method`/`--noise-baseline-pp` 语义、精度 testset 或 judge 契约版本变化；
-9. 精度可选依赖（`[eval]`）版本/可得性变化，或判题器 gold 自检基线变化；
+9. 精度判题依赖/内置资产（`_vendor/`、依赖版本）变化，或判题器 gold 自检基线变化；
 10. 任何 P0 缺陷修复后。
 
 ## 7. 证据留存

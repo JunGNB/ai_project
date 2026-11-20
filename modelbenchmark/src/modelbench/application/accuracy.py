@@ -29,7 +29,12 @@ from typing import Any, Dict, List, Optional
 
 from modelbench.adapters.config.settings import ScenarioSpec
 from modelbench.application.benchmark import Orchestrator, thinking_control
-from modelbench.domain.judges import JUDGE_FAMILIES, evaluate, missing_dependencies
+from modelbench.domain.judges import (
+    JUDGE_FAMILIES,
+    evaluate,
+    missing_assets,
+    missing_dependencies,
+)
 from modelbench.domain.models import (
     ChatMessage,
     PerfMetrics,
@@ -112,19 +117,26 @@ class AccuracyOrchestrator(Orchestrator):
     def _warn_missing_judge_dependencies(self) -> None:
         """Write an explicit warning when a used judge family is unavailable.
 
-        A missing optional dependency must not silently drop the scenario from
-        the denominator: the affected samples become ``judge_error`` (0 points,
-        counted) and the run carries the package list (docs/spec/22 §3.2).
+        A missing judge dependency or on-disk asset must not silently drop the
+        scenario from the denominator: the affected samples become
+        ``judge_error`` (0 points, counted) and the run carries both lists
+        (docs/spec/22 §3.2).
         """
         families = self._judge_families()
         try:
             missing = missing_dependencies(families)
+            # NOTE: do not shadow the imported ``missing_assets`` helper here —
+            # assigning to the same name makes Python treat it as a local for the
+            # whole function and the call above raises UnboundLocalError (that
+            # bug surfaced as a "probe failed" warning in the 2026-11-20 run).
+            missing_asset_names = missing_assets(families)
         except Exception as exc:  # noqa: BLE001 - advisory probe must not abort a run
             # Never swallow the probe failure: keep the used families and put
             # the error into the persisted judge-dependency block + warning.
             self._judge_dependencies = {
                 "used": list(families),
                 "missing": [],
+                "missing_assets": [],
                 "probe_error": f"{type(exc).__name__}: {exc}",
             }
             message = (
@@ -136,14 +148,26 @@ class AccuracyOrchestrator(Orchestrator):
                 self.stats.warnings.append(message)
                 self._log(f"WARNING: {message}")
             return
-        self._judge_dependencies = {"used": list(families), "missing": list(missing)}
-        if not missing:
+        self._judge_dependencies = {
+            "used": list(families),
+            "missing": list(missing),
+            "missing_assets": list(missing_asset_names),
+        }
+        if not missing and not missing_asset_names:
             return
+        parts: List[str] = []
+        if missing:
+            parts.append("modules: " + ", ".join(missing))
+        if missing_asset_names:
+            parts.append("assets: " + ", ".join(missing_asset_names))
         message = (
-            "accuracy judge optional dependencies missing: "
-            + ", ".join(missing)
-            + "; affected samples will be status=judge_error "
-            "(install them with: pip install -e \".[eval]\")"
+            "accuracy judge dependencies missing ("
+            + "; ".join(parts)
+            + "); affected samples will be status=judge_error. Fix: reinstall "
+            "with ./modelbench setup (or pip install -e .): the judge deps are "
+            "core dependencies and the IFEval checker + English punkt data ship "
+            "inside the package; only a testset rebuild needs "
+            "python tool/dataset/accuracy/fetch.py"
         )
         if message not in self.stats.warnings:
             self.stats.warnings.append(message)

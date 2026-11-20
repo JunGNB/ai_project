@@ -214,29 +214,44 @@ $env:HTTPS_PROXY = "http://127.0.0.1:7890"
 |---|---|---|
 | `dev` | `pytest`、`pytest-timeout` | 跑测试/门禁；`setup` 默认安装 |
 | `datasets` | `pyarrow`、`tokenizers`、`jinja2` | **仅数据集构建**（`tool/dataset`）需要；`pyarrow` 读 parquet，`tokenizers`+`jinja2` 用于无 oMLX.app 时的便携 tokenizer。日常 `validate`/`web`/`run` 不需要 |
-| `eval` | `nltk`、`langdetect`、`absl-py`、`immutabledict`、`jieba`、`rouge` | **精度判题与判题自检**（`src/modelbench/domain/judges/`、`tool/system`）需要：官方 IFEval checker 依赖 `nltk`/`langdetect`/`absl`/`immutabledict`；`normalized_match` 的中文 F1/ROUGE（`f1_zh`/`rouge_zh`）需要 `jieba`/`rouge`。**运行 `./modelbench run --method accuracy` 前必须安装**；性能 run / Web / 数据集构造不需要 |
+| `eval` | 空别名 | 判题依赖（`nltk`/`langdetect`/`absl-py`/`immutabledict`/`jieba`/`rouge`）自 2026-11-19 起是**核心依赖**，普通安装即包含；保留空 `eval` 只为兼容旧的 `pip install -e ".[eval]"` 命令 |
 
-> `[eval]` 缺失不会让精度 run 直接失败，而是**显式降级**：run 启动检查测试集 manifest 声明的
-> 判题族依赖（`domain/judges/missing_dependencies`，只探测模块不 import），缺失时写
-> `run.json.outcome.warnings`（含缺失模块名与安装提示），相关样本 `status=judge_error`
+> **判题依赖与资产都已随系统提供**（不再需要手工准备）：
+>
+> 1. **pip 依赖是核心依赖**：`pip install -e .` / `./modelbench setup` 会自动安装
+>    `nltk`、`langdetect`、`absl-py`、`immutabledict`、`jieba`、`rouge`。
+> 2. **IFEval 官方 checker 代码内置在包内**：`src/modelbench/domain/judges/_vendor/instruction_following_eval/`
+>    （约 96 KB，Apache-2.0，随 wheel 一起分发），所以 `dataset/raw/ifeval` 缺失也不会再让
+>    `instruction_following` 整场景判题失败；`dataset/raw/ifeval` 若存在仍优先使用（便于固定版本）。
+> 3. **NLTK punkt 数据也内置**：checker 的句数约束需要 `punkt/english.pickle` 与
+>    `punkt_tab/english/`（合计约 668 KB），已随包分发（`_vendor/nltk_data/`），安装后
+>    **离线即可判分**，不再需要 `fetch.py` 下载这 18 MB 官方全语种数据。
+>    仅当需要重建精度测试集时，才需 `python tool/dataset/accuracy/fetch.py` 取上游 jsonl。
+>
+> 资产/依赖仍缺失时，精度 run 会**显式降级并告警**：run 启动同时探测 pip 模块
+> （`domain/judges/missing_dependencies`）与磁盘资产（`missing_assets`），缺失时写
+> `run.json.outcome.warnings`（含缺失项与修复命令），相关样本 `status=judge_error`
 > （计 0 分且保留在分母，不静默给分），报告/Web 单列计数。口径见
-> [spec/22-accuracy-test-plan.md](../spec/22-accuracy-test-plan.md) §3.2。安装后重跑即可消除；
+> [spec/22-accuracy-test-plan.md](../spec/22-accuracy-test-plan.md) §3.2。修复后重跑即可消除；
 > 不要用"跳过该场景"来规避。
 
-手动 venv 下追加安装：
+手动 venv 下的完整安装：
 
 ```bash
-.venv/bin/pip install -e ".[dev,datasets,eval]"
+.venv/bin/pip install -e ".[dev,datasets]"
+# 判题资产已内置，无需额外下载；仅重建测试集时才需要：
+# python tool/dataset/accuracy/fetch.py
 ```
 
 ```bat
-.venv\Scripts\python.exe -m pip install -e ".[dev,datasets,eval]"
+.venv\Scripts\python.exe -m pip install -e ".[dev,datasets]"
+REM 判题资产已内置，无需额外下载；仅重建测试集时才需要 fetch.py
 ```
 
 用 uv 管理的环境等价写法：
 
 ```bash
-uv pip install --python .venv/bin/python -e ".[dev,datasets,eval]"
+uv pip install --python .venv/bin/python -e ".[dev,datasets]"
 ```
 
 ## 7. 安装验证

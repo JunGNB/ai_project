@@ -64,7 +64,8 @@ $PY tool/dataset/accuracy/build.py --check       # 行数/字段/upstream_id 唯
 - **精度集已接入**：`testset.yaml` 声明 `method: accuracy`，CLI/Web 测试集列表可见；
   manifest 的 `status=wired` / `runner=accuracy` / `hidden=false`；判题族 5 类（确定性、无
   LLM/网络），运行协议固定 cold/`temperature=0`/无 decode guard/`repeats=1`。判题依赖
-  `.[eval]`（`nltk`/`langdetect`/`absl-py`/`immutabledict`/`jieba`/`rouge`），缺失时显式告警并记
+  （`nltk`/`langdetect`/`absl-py`/`immutabledict`/`jieba`/`rouge`）是**核心依赖**，官方 IFEval
+  checker 与英文 punkt 数据已内置包内，普通安装即可离线判分；仍缺失时显式告警并记
   `judge_error`（不静默给分）。口径见 [docs/spec/22-accuracy-test-plan.md](../docs/spec/22-accuracy-test-plan.md)。
 - **不混算**：精度分数不与性能指标合并；两次精度 run 只有同一 testset SHA + 同一 judge 契约
   版本才可配对比较（[docs/spec/13-testset-portability.md](../docs/spec/13-testset-portability.md) §4.2）。

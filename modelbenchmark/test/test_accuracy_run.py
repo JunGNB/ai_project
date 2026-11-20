@@ -818,3 +818,35 @@ def test_judge_error_is_counted_as_zero_and_kept(fake_server, tmp_path, monkeypa
     overall = aggregates["overall"][0]
     assert overall["n_judge_error"] == len(measured)
     assert overall["macro_score"] == pytest.approx(0.0)
+
+
+def test_judge_dependency_preflight_reports_assets_without_probe_error(tmp_path):
+    """The advisory probe must not shadow the imported ``missing_assets`` helper.
+
+    Regression: ``missing_assets = missing_assets(families)`` made Python treat
+    the name as local and raised ``UnboundLocalError``, which surfaced in the
+    2026-11-20 accuracy run as a "judge dependency probe failed" warning while
+    every sample still judged fine.  A plain probe must succeed and persist
+    used/missing/missing_assets without a probe_error.
+    """
+    from types import SimpleNamespace
+
+    from modelbench.application.accuracy import AccuracyOrchestrator
+
+    orchestrator = AccuracyOrchestrator.__new__(AccuracyOrchestrator)
+    orchestrator.cfg = SimpleNamespace(
+        datasets=SimpleNamespace(testset_dir=str(tmp_path))
+    )
+    orchestrator.stats = SimpleNamespace(warnings=[])
+    orchestrator._judge_dependencies = {}
+    orchestrator._log = lambda message: None
+
+    orchestrator._warn_missing_judge_dependencies()
+
+    deps = orchestrator._judge_dependencies
+    assert "probe_error" not in deps
+    assert isinstance(deps["missing"], list)
+    assert isinstance(deps["missing_assets"], list)
+    assert not any(
+        "probe failed" in warning for warning in orchestrator.stats.warnings
+    )

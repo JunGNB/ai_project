@@ -13,18 +13,11 @@ dependencies = [
   "psutil>=5.9",
   "numpy>=1.26",
   "openpyxl>=3.1,<4",
-]
-
-[project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-timeout>=2.3"]
-# Dataset rebuild (`tool/dataset/build_*.py`): parquet readers + the portable
-# tokenizer backend used when oMLX.app is not available (Windows/CI).
-datasets = ["pyarrow>=15.0", "tokenizers>=0.15", "jinja2>=3.1"]
-# Accuracy judging (`tool/system/judges.py`): the official IFEval checker code
-# imports absl/langdetect/nltk; LongBench's Chinese QA/ROUGE metrics need jieba
-# and the `rouge` package.  The local judge self-check also reads parquet
-# (already covered by the `datasets` extra).
-eval = [
+  # Accuracy judging is a core method: the deterministic judges must work on a
+  # plain install.  The IFEval checker imports absl/langdetect/nltk/
+  # immutabledict, and normalized_match's Chinese F1/ROUGE needs jieba/rouge.
+  # Leaving these optional used to turn whole scenarios into silent
+  # judge_error=0 scores; see CHANGELOG 2026-11-19.
   "nltk>=3.9",
   "langdetect>=1.0.9",
   "absl-py>=2.0",
@@ -32,6 +25,15 @@ eval = [
   "jieba>=0.42",
   "rouge>=1.0",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-timeout>=2.3"]
+# Dataset rebuild (`tool/dataset/build_*.py`): parquet readers + the portable
+# tokenizer backend used when oMLX.app is not available (Windows/CI).
+datasets = ["pyarrow>=15.0", "tokenizers>=0.15", "jinja2>=3.1"]
+# Kept as an empty alias for backwards compatibility: the former eval-only
+# dependencies are core now, so `pip install -e ".[eval]"` still resolves.
+eval = []
 
 
 [tool.pytest.ini_options]
@@ -53,4 +55,11 @@ include = ["modelbench*"]
 modelbench = [
   "resources/config/*.yaml",
   "interfaces/web/static/*",
+]
+# Vendored judge assets: the official IFEval checker (.py, packaged with the
+# package automatically) plus the English NLTK punkt data the checker needs.
+# Shipping both keeps accuracy judging fully offline after a plain install.
+"modelbench.domain.judges._vendor" = [
+  "nltk_data/tokenizers/punkt/*.pickle",
+  "nltk_data/tokenizers/punkt_tab/english/*",
 ]

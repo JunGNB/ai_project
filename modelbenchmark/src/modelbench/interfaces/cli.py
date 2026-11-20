@@ -469,9 +469,10 @@ def cmd_validate(args: argparse.Namespace) -> int:
         judge_info = testset_judge_families(cfg, accuracy_testset)
         families = list(judge_info.get("families") or [])
         try:
-            from modelbench.domain.judges import missing_dependencies
+            from modelbench.domain.judges import missing_assets, missing_dependencies
 
             missing_deps = missing_dependencies(families)
+            missing_assets_list = missing_assets(families)
         except Exception as exc:  # noqa: BLE001 - dependency probe is advisory
             print(f"  [warn] cannot probe accuracy judge dependencies: {exc}")
         else:
@@ -479,6 +480,13 @@ def cmd_validate(args: argparse.Namespace) -> int:
                 print(
                     "  [warn] accuracy judges missing optional dependencies "
                     f"(affected samples -> judge_error): {', '.join(missing_deps)}"
+                )
+            if missing_assets_list:
+                print(
+                    "  [warn] accuracy judges missing assets "
+                    f"(affected samples -> judge_error): {', '.join(missing_assets_list)}"
+                    " — run ./modelbench setup or "
+                    "python tool/dataset/accuracy/fetch.py --only ifeval,nltk"
                 )
         data_path = None
         for override in accuracy_testset.scenarios.values():

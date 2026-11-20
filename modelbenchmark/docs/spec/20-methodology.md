@@ -308,10 +308,11 @@ tokenizer 下可差 2 倍（实测 MiniCPM 约为 cl100k 的 0.53×），所以�
     显式报错，不静默丢弃；
   - 错误/质量计数：`n_scored`（= 有效判分分母）、`n_correct`、`n_error`、`n_timeout`、
     `n_judge_error`、`n_format_failure`、`n_skipped(over_window)`，可与分母对账。
-- **判题依赖**：`ifeval` 需要官方 checker（`absl-py`/`nltk`/`langdetect`/`immutabledict`），
-  中文 F1/ROUGE 需要 `jieba`/`rouge`，均由 `pip install -e ".[eval]"` 提供。缺失时**不静默
-  给分**：run 启动检查本次测试集实际用到的判题族，写 `run.json.outcome.warnings`（含缺包名），
-  相关样本 `judge_error`；不把缺依赖的场景排除出分母。安装见
+- **判题依赖**：`ifeval` 需要官方 checker（`absl-py`/`nltk`/`langdetect`/`immutabledict`）与英文
+  NLTK punkt 数据，中文 F1/ROUGE 需要 `jieba`/`rouge`；pip 依赖是**核心依赖**，checker 代码与
+  punkt 数据均内置在包内，安装后离线可用。缺失时**不静默给分**：run 启动检查本次
+  测试集实际用到的判题族与资产，写 `run.json.outcome.warnings`（含缺失项），相关样本
+  `judge_error`；不把缺依赖的场景排除出分母。安装见
   [../guides/40-install.md](../guides/40-install.md) §6。
 - **不混算**：精度分数不得与性能指标相乘/加权成综合分，也不与性能 run 混算；精度 run 使用
   独立 `run_id`（`__accuracy__` 段）。

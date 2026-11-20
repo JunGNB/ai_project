@@ -87,6 +87,20 @@ def main():
     failures += bad
     print(fmt % ("math_logic", len(rows), f"gold_numeric_pass bad={bad}"))
 
+    # ifeval: the official checker must load (vendored fallback included) and
+    # resolve every instruction id.  A placeholder answer may legitimately fail
+    # the instruction, but it must never become judge_error.
+    rows = SCENARIOS["instruction_following"]
+    bad = 0
+    for r in rows:
+        res = judges.evaluate(r, "This is a plain placeholder answer.")
+        if res["judge_error"]:
+            bad += 1
+            if bad <= 3:
+                print("  ifeval judge_error:", r["id"], res["error"][:200])
+    failures += bad
+    print(fmt % ("instruction_following", len(rows), f"checker_resolves bad={bad}"))
+
     # code_exec: canonical solutions must pass their own tests
     he = load_humaneval()
     mb = load_mbpp()

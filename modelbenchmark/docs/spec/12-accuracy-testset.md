@@ -485,7 +485,7 @@ knowledge_qa    250   0.512   0.487    -2.5    [-5.4, +0.3]  0.21     无显著�
 ```
 dataset/raw/                     # 上游原始文件与工具资产（只读，gitignored）
 ├── global_mmlu/{en,zh,fr,de,es,pt,ru,ja,ko,ar,hi,vi}/test.parquet
-├── ifeval/ifeval_input_data.jsonl + instruction_following_eval/  # 官方 checker
+├── ifeval/ifeval_input_data.jsonl + instruction_following_eval/  # 官方 checker（可选；包内 _vendor 已内置）
 ├── longbench_v1/data.zip + data/*.jsonl + prompts/*.json
 ├── gsm8k/main/test-*.parquet
 ├── cmath/cmath_test.jsonl
@@ -494,7 +494,8 @@ dataset/raw/                     # 上游原始文件与工具资产（只读，
 ├── bfcl/BFCL_v4_*.json + possible_answer/BFCL_v4_*.json
 ├── hotpotqa/distractor/validation-*.parquet
 ├── tokenizer/cl100k_base/{cl100k_base.tiktoken,tokenizer.json}   # 通用参考 tokenizer（blob + derive_cl100k.py 确定性派生）
-└── nltk_data/{punkt.zip,punkt_tab.zip,tokenizers/}  # 官方 IFEval checker 依赖
+└── nltk_data/{punkt.zip,punkt_tab.zip,tokenizers/}  # 可选：checker 的英文 punkt 数据已内置包内
+                                  # （_vendor/nltk_data/），此处仅用于固定版本/覆盖
 dataset/test/accuracy/           # 精度测试集（jsonl 不提交；testset.yaml + manifest 提交；method=accuracy）
 reports/dataset-build/accuracy/              # 抽样报告、难度试点等中间产物（不提交）
 ```

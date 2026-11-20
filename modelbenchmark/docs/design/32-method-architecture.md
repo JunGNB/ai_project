@@ -429,7 +429,7 @@ class Orchestrator:
 
     def _finalize_extra(self, extra: Dict[str, Any]) -> Dict[str, Any]:
         """finalize 前的证据补充。性能：原样返回；精度：附 testset 指纹
-        （`MethodProfile.testset_fingerprint`）与 judge_dependencies（used/missing）。"""
+        （`MethodProfile.testset_fingerprint`）与 judge_dependencies（used/missing/missing_assets）。"""
         return extra
 ```
 

@@ -27,6 +27,24 @@ RAW_DIR = Path(os.environ.get("MB_RAW_DIR", str(ROOT / "dataset" / "raw")))
 IFE_PKG = RAW_DIR / "ifeval"
 NLTK_DATA = RAW_DIR / "nltk_data"
 
+#: Vendored official IFEval checker + the English NLTK punkt data it needs,
+#: shipped inside the installed package.  Used when ``dataset/raw`` assets are
+#: absent so a fresh install can always judge the ``instruction_following``
+#: scenario offline (see ``_vendor/README.md``).
+VENDORED_IFE_DIR = Path(__file__).resolve().parent / "_vendor"
+VENDORED_IFE_PKG = VENDORED_IFE_DIR / "instruction_following_eval"
+VENDORED_NLTK_DATA = VENDORED_IFE_DIR / "nltk_data"
+
+#: Locations probed for the NLTK punkt tokenizer data; NLTK also has its own
+#: search path, this list only feeds the advisory preflight check.
+_NLTK_DATA_DIRS: Tuple[Path, ...] = (
+    NLTK_DATA,
+    VENDORED_NLTK_DATA,
+    Path.home() / "nltk_data",
+    Path("/usr/local/share/nltk_data"),
+    Path("/usr/share/nltk_data"),
+)
+
 #: There are exactly five judge families; anything else is a contract error.
 JUDGE_FAMILIES: Tuple[str, ...] = (
     "mc_letter",
@@ -137,19 +155,58 @@ def missing_dependencies(families: Iterable[Any]) -> List[str]:
         if not _module_available(name):
             missing.append(name)
 
-    for item in families:
-        if isinstance(item, str):
-            family, metric = item, None
-        elif isinstance(item, dict):
-            family = str(item.get("family") or "")
-            metric = item.get("metric")
-        else:  # e.g. a pydantic model / judge contract object
-            family = str(getattr(item, "family", "") or "")
-            metric = getattr(item, "metric", None)
+    for family, metric in _family_specs(families):
         if family == "normalized_match" and metric in _METRIC_DEPENDENCIES:
             deps = _METRIC_DEPENDENCIES[str(metric)]
         else:
             deps = _FAMILY_DEPENDENCIES.get(family, ())
         for dep in deps:
             _add(dep)
+    return missing
+
+
+def _family_specs(families: Iterable[Any]) -> List[Tuple[str, Optional[str]]]:
+    """Normalize family names / judge contracts into ``(family, metric)`` pairs."""
+    specs: List[Tuple[str, Optional[str]]] = []
+    for item in families:
+        if isinstance(item, str):
+            specs.append((item, None))
+        elif isinstance(item, dict):
+            specs.append((str(item.get("family") or ""), item.get("metric")))
+        else:  # e.g. a pydantic model / judge contract object
+            specs.append(
+                (
+                    str(getattr(item, "family", "") or ""),
+                    getattr(item, "metric", None),
+                )
+            )
+    return specs
+
+
+def has_nltk_punkt() -> bool:
+    """True when NLTK ``punkt``/``punkt_tab`` data is discoverable on disk."""
+    for base in _NLTK_DATA_DIRS:
+        for name in ("punkt_tab", "punkt"):
+            if (base / "tokenizers" / name).is_dir():
+                return True
+    return False
+
+
+def missing_assets(families: Iterable[Any]) -> List[str]:
+    """Return the *on-disk assets* missing for ``families`` (not pip modules).
+
+    Module probing alone is not enough: the IFEval judge also needs the checker
+    code and the NLTK punkt tokenizer data.  The checker ships vendored, but a
+    checkout that has never run ``tool/dataset/accuracy/fetch.py`` would still
+    fail inside the judge — this makes that failure visible up front.
+    """
+    missing: List[str] = []
+    names = {family for family, _ in _family_specs(families)}
+    if "ifeval" in names:
+        if not (IFE_PKG / "instruction_following_eval").is_dir() and not (
+            VENDORED_IFE_PKG.is_dir()
+        ):
+            missing.append("IFEval checker (dataset/raw/ifeval or vendored package)")
+        if not has_nltk_punkt():
+            missing.append("NLTK punkt data (dataset/raw/nltk_data)")
     return missing

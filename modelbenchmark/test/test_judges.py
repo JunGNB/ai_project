@@ -208,8 +208,15 @@ def test_tool_call_parallel_is_unordered():
 # ---------------------------------------------------------------- ifeval
 
 def test_ifeval_checker_loads_and_rejects_empty_response():
-    if not judges.IFE_PKG.is_dir():
-        pytest.skip("official IFEval checker not present in dataset/raw")
+    from modelbench.domain.judges.instruction import checker_root
+
+    try:
+        root, _label = checker_root()
+    except RuntimeError:  # pragma: no cover - vendored copy missing from wheel
+        pytest.skip("official IFEval checker not present (dataset/raw nor vendored)")
+    assert root.is_dir()
+    if not judges.has_nltk_punkt():
+        pytest.skip("NLTK punkt data missing; run tool/dataset/accuracy/fetch.py")
     ev = judges._load_ifeval()
     assert ev.instructions_registry.INSTRUCTION_DICT
     row = {
@@ -221,6 +228,51 @@ def test_ifeval_checker_loads_and_rejects_empty_response():
     }
     assert judges.evaluate(row, "")["pass"] is False
     assert judges.evaluate(row, "one two three")["pass"] is True
+
+
+def test_vendored_ifeval_checker_is_shipped_with_the_package():
+    """A plain install must never lose the instruction_following scenario."""
+    assert judges.VENDORED_IFE_PKG.is_dir()
+    for name in (
+        "evaluation_lib.py",
+        "instructions.py",
+        "instructions_registry.py",
+        "instructions_util.py",
+    ):
+        assert (judges.VENDORED_IFE_PKG / name).is_file()
+
+
+def test_missing_assets_reports_nltk_data_only_when_ifeval_is_used():
+    from modelbench.domain.judges import missing_assets
+
+    assert missing_assets([]) == []
+    if judges.has_nltk_punkt():
+        assert missing_assets(["ifeval"]) == []
+    else:
+        assert any("NLTK punkt" in item for item in missing_assets(["ifeval"]))
+    # Non-IFEval families never require the punkt data.
+    assert missing_assets(["mc_letter"]) == []
+
+
+def test_missing_assets_flags_absent_checker_and_punkt(monkeypatch, tmp_path):
+    """The advisory preflight must see missing *files*, not just missing modules."""
+    from modelbench.domain.judges import base as judge_base
+
+    monkeypatch.setattr(judge_base, "IFE_PKG", tmp_path / "ifeval")
+    monkeypatch.setattr(judge_base, "VENDORED_IFE_PKG", tmp_path / "no-vendored")
+    monkeypatch.setattr(judge_base, "_NLTK_DATA_DIRS", (tmp_path / "nltk",))
+
+    missing = judge_base.missing_assets(["ifeval"])
+    assert any("IFEval checker" in item for item in missing)
+    assert any("NLTK punkt" in item for item in missing)
+    assert judge_base.missing_assets(["mc_letter"]) == []
+
+
+def test_missing_assets_accepts_judge_contracts():
+    from modelbench.domain.judges import missing_assets
+
+    contract = {"family": "ifeval", "instruction_id_list": ["length_constraints:number_words"]}
+    assert missing_assets([contract]) == missing_assets(["ifeval"])
 
 
 def test_unknown_family_raises():

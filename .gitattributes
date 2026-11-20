@@ -1,0 +1,4 @@
+# 内置 NLTK punkt 数据是 pickle（二进制）：禁止换行转换。
+# 否则 Windows 克隆（core.autocrlf=true）检出后 pickle 被写坏，
+# 离线判题直接失败。见 modelbenchmark/src/modelbench/domain/judges/_vendor/README.md。
+modelbenchmark/src/modelbench/domain/judges/_vendor/nltk_data/** binary

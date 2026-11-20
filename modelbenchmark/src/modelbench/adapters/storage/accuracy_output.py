@@ -567,7 +567,7 @@ def render_accuracy_report(
         dep_text = "、".join(str(item) for item in dependencies)
     else:
         dep_text = str(dependencies)
-    lines.append(f"- 判题依赖（缺失的 [eval] 包等）：{dep_text or '未记录'}")
+    lines.append(f"- 判题依赖与资产（缺失的模块/磁盘资产等）：{dep_text or '未记录'}")
     if warnings:
         for warning in warnings:
             lines.append(f"- ⚠️ {warning}")
