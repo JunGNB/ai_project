@@ -127,7 +127,8 @@ Metal 上有两条完全不同的执行通路，同一颗 GPU 的吞吐差一倍
 | `runs` / `sampling.samples_per_metric` | JSON | 峰值与中位数混用会引入 +2~4% 偏差 |
 | `host.os_build` | JSON | Metal 编译器随 OS 变，同一份 MSL 可能生成不同指令 |
 
-`macgpu-fleet/collect.py compare <dir>` 会逐项检查，并对每个设备给出按 GPU 核数归一的读数。
+上表各项不一致时，读数**不得放进同一张表排序**：这些字段都写在 `result.json` 里，跨机对比前
+逐项比对。同代不同核数（binned）的机器按 GPU 核数折算算力，但**带宽不按核数折算**。
 
 ### 8.2 架构代差：哪些结论不能外推
 

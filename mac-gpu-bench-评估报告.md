@@ -76,7 +76,7 @@ v2.1 复标定读数见 `docs/records/52-v2.1-recalibration.md`。
    显式 `fma()`、8/16/32 条独立链、标量 vs float4、65k/131k/262k 线程、8 个 MMA 累加器。
    目的：区分「硬件上限」和「内核写法造成的上限」。
 4. 对 `output/results/` 里 **22 次历史运行**（去重 `latest` 软链）做统计（算力/GEMM/带宽的跨轮波动、load 相关性、`--repeat` 偏差）。
-5. 用它自己的 `--repeat 5` 连跑，再用新写的跨设备采集器跑 **3 次独立进程 × 5 轮**，得到同会话重复性。
+5. 用它自己的 `--repeat 5` 连跑，再连跑 **3 次独立进程 × 5 轮**，得到同会话重复性。
 
 ---
 
@@ -350,47 +350,7 @@ CV 0.3~1.9%，详见 `mac-gpu-bench/docs/records/52-v2.1-recalibration.md`。
 
 ## 5. 如果要拿它评估不同 Mac 设备的「实际算力与带宽」
 
-### 5.1 现成可用的一键采集
-
-我在 `macgpu-fleet/collect.py` 写了一个采集器（已在本机跑通）：
-
-```bash
-python3 macgpu-fleet/collect.py collect --bench ./mac-gpu-bench \
-        --launches 3 --repeat 5 --out ./macgpu-fleet/results
-
-# 汇总所有机器的 summary.json：
-python3 macgpu-fleet/collect.py table macgpu-fleet/results
-```
-
-它做的事（正是 macgpu 缺的那部分）：
-
-1. 采集前记录 `hw.model`、芯片、GPU 核数、内存、`sw_vers` build、`pmset` 电源/低电量/热限速、loadavg
-   （本机 `pmset -g` 不暴露 `lowpowermode`，此时该字段留空而不是当成"已关闭"）；
-2. 先跑 `selfcheck`，失败直接标记该机不可用；
-3. 跑 **3 次独立进程**（不是一次进程 `--repeat 3`），每次 5 轮；
-4. 每列取**中位数**并算轮间 **CV**，写 `summary.json` + 追加 `fleet.csv`；
-5. 自动告警：selfcheck 失败、read CV > 5%、fp16 mma CV > 3%、load > 2、LPM 未关、电池供电；
-6. `collect.py compare` 逐项检查协议（工作集/GEMM 规模/线程/repeat/schema）、OS build、binned 核数，
-   不一致直接退出码 3，并给出按 GPU 核数归一的读数。
-
-本机输出（示例）：
-
-```
-Apple M1 / Macmini9,1 / GPU 8 核 / macOS 27.0.1 (26A434)
-  selfcheck: PASS  launches=3 repeat=5
-  FP32 MMA      2.27 TFLOPS CV=0.09%
-  FP16 MMA      2.29 TFLOPS CV=0.67%
-  FP32 FMA      1.09 TFLOPS CV=0.22%
-  FP16 FMA      1.89 TFLOPS CV=0.48%
-  GEMM fp16     1.24 TFLOPS CV=0.3%
-  GEMM int8     0.31 TOPS   CV=0.33%
-  read         58.46 GB/s   CV=0.41%
-  write        51.90 GB/s   CV=2.21%
-  copy         59.27 GB/s   CV=0.75%
-  ⚠ 测试时 load_avg > 2.0
-```
-
-### 5.2 采集协议（每台机器照做）
+### 5.1 采集协议（每台机器照做）
 
 **前置条件**
 
@@ -402,7 +362,8 @@ Apple M1 / Macmini9,1 / GPU 8 核 / macOS 27.0.1 (26A434)
 **执行**
 
 1. `./macgpu selfcheck` → 必须 PASS。
-2. `python3 macgpu-fleet/collect.py collect --launches 3 --repeat 5`。
+2. 连跑 **3 次独立进程**（不是一次进程 `--repeat 3`），每次 `--repeat 5`：
+   `./macgpu run --repeat 5 --json --out run1.json`（run2/run3 同）；每列取中位数并记轮间 CV。
 3. 记录 `hw.model`（如 `Mac14,6`）与 **GPU 核数**——同一芯片有 14/18 核、30/40 核等 binned 版本，
    只写"Apple M3 Pro"无法区分，而它们带宽/算力差 20%+。
 4. 有条件再跑一次 **10 分钟持续负载**（`--mode sustained` 未实现，可用 `--repeat 20` 近似），
@@ -419,11 +380,11 @@ Apple M1 / Macmini9,1 / GPU 8 核 / macOS 27.0.1 (26A434)
 | 电源/低电量 | AC / LPM=0 |
 | 拷贝带宽 vs 读带宽 | 0.9~1.1（明显偏离说明 blit 路径异常） |
 
-### 5.3 设备清单与规格参考
+### 5.2 设备清单与规格参考
 
 下表**不是实测值**，是公开规格（带宽改为十进制 GB/s；TFLOPS 为 128 lane × 2 × 频率的推算），
 **仅作量级参考，具体以 Apple 官方规格页为准**。
-实测列请用上面的采集器填。注意：仓库自带的 `SPEC` 表把 M1 Pro/Max/Ultra 写成 204.8/409.6/819.2，
+实测列请用 `./macgpu` 的实测中位数填。注意：仓库自带的 `SPEC` 表把 M1 Pro/Max/Ultra 写成 204.8/409.6/819.2，
 是把 200/400/800 GB/s 按 1.024 放大，且子串匹配有 P0-1 的 bug——**不要直接引用它的"占规格"**。
 
 | 芯片 | GPU 核（binned） | FP32 标称 TFLOPS（满配） | 带宽 GB/s | 实测 FP16 MMA | 实测读 GB/s | 实测写 GB/s | 备注 |
@@ -448,7 +409,7 @@ Apple M1 / Macmini9,1 / GPU 8 核 / macOS 27.0.1 (26A434)
 > 这些标称值只用来判断"实测是否量级合理"（一般 MMA 达 85~90%、读带宽达 80~90%）；
 > **横向排序必须用实测中位数**，且同芯片不同 bin 要按 GPU 核数分组。
 
-### 5.4 跨代可信度：M1~M4 与 M5 之后
+### 5.3 跨代可信度：M1~M4 与 M5 之后
 
 **结论分三层：测量可信、比较有前提、外推有红线。**
 
@@ -466,7 +427,8 @@ Apple M1 / Macmini9,1 / GPU 8 核 / macOS 27.0.1 (26A434)
 1. 报告里所有比例（FP16/FP32、MMA/FMA、FMA 占矩阵指令）改为**按本机实测输出**，
    不再写死「FP16 与 FP32 同速」「FMA 只有一半」；M5 上若 FP16 是 2×，报告会如实写 2×。
 2. 规格表未收录的芯片（M5 及以后）显式告警并跳过第 6 节；binned 核数不一致时按核数折算算力并告警。
-3. `compare` 把协议差异变成硬失败，防止"工作集/线程/OS build 不同"的数字被放在一张表里排序。
+3. 跨机比较前逐项核对协议（工作集/GEMM 规模/线程/repeat/schema）与 OS build，不一致的数字
+   不得放进同一张表排序——这些字段都写在 JSON 里，可直接比对。
 4. `report.py --raw` 只输出实测表（算力 / GEMM / 带宽），跳过规格对照、roofline 与结论；
    如果你只用实测数据，这是推荐入口。终端入口也收敛为一条：`./macgpu`（无参数即全套），
    跑完直接打印「推荐数据」，不依赖报告生成；带宽线程按机器自动调优。
@@ -650,11 +612,9 @@ cd mac-gpu-bench
 ./macgpu run --repeat 5 --json --out /tmp/m1.json
 python3 tools/report.py /tmp/m1.json --eff 0.8 --bw-eff 1.0
 
-# 跨设备采集（本仓库新增，已在本机验证）
-cd ..
-python3 macgpu-fleet/collect.py collect --bench ./mac-gpu-bench --launches 3 --repeat 5
-python3 macgpu-fleet/collect.py table macgpu-fleet/results
+# 换机型复测：同一套命令连跑 3 次独立进程，每列取中位数
+for i in 1 2 3; do ./macgpu run --repeat 5 --json --out /tmp/run$i.json; done
 ```
 
 > 说明：本报告里的"实测"均为本机（Macmini9,1 / M1 / 8 核 / 16 GB / macOS 27.0.1）读数；
-> 其余机型只给了公开规格参考，需按第 5.2 节协议在对应机器上采集后填入。
+> 其余机型只给了公开规格参考，需按第 5.1 节协议在对应机器上采集后填入。
