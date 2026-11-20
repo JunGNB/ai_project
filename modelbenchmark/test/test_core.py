@@ -265,16 +265,21 @@ def test_default_selection_is_first_enabled_model():
 
 
 def test_model_load_settings_are_moe_only():
+    """Only the MoE switch may be configured, and only as a downgradable try.
+
+    Model ids are deliberately not pinned here: ``models.yaml`` is a resync of
+    ``GET /v1/models`` (docs/spec/21-test-plan.md §2), so the catalog changes
+    whenever the server's model set changes.  The invariant is the settings
+    contract: everything else stays at oMLX defaults, and expert offload (which
+    streams experts from disk and can still fail on a 24GB machine) must be
+    allowed to degrade to a warning instead of aborting the run.
+    """
     cfg = load_config()
-    models = {model.id: model for model in cfg.models}
-    # Only MoE models may enable expert offload; everything else is oMLX default.
-    assert models["qwen3.6-35B-A3B"].load.settings == {
-        "moe_expert_offload_enabled": True
-    }
-    assert models["Qwen3.8-27B-4bit"].load.settings == {}
-    assert models["MiniCPM5-1B"].load.settings == {}
+    assert cfg.models, "models.yaml must list at least one model"
     for model in cfg.models:
         assert set(model.load.settings) <= {"moe_expert_offload_enabled"}
+        if model.load.settings.get("moe_expert_offload_enabled"):
+            assert model.load.optional is True
 
 
 def test_forbidden_model_load_setting_is_rejected():
