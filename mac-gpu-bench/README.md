@@ -1,7 +1,7 @@
 # macgpu —— Mac GPU Compute & Bandwidth Benchmark
 
-在 Mac（Apple Silicon）上实测 **GPU 算力**与**内存带宽**，并据此推算模型的
-**prefill / decode** 上限。零第三方依赖：只用系统自带的 `swiftc` + Metal。
+在 Mac（Apple Silicon，M1~M5 通用）上实测 **GPU 算力**与**内存带宽**，
+直接给出评估 **prefill / decode** 需要的实测数据。零第三方依赖：只用系统自带的 `swiftc` + Metal。
 
 **测什么**：同一颗芯片上有两条完全不同的执行通路，本项目分开测——
 
@@ -9,33 +9,53 @@
 |---|---|---|
 | **Matrix** | `simdgroup_matrix` 矩阵指令，GEMM 库实际走的路 | 2.2 ~ 2.3 TFLOPS |
 | **Scalar FMA** | 普通着色器 ALU，手写算子落在这里 | 1.0 TFLOPS（fp32）/ 1.8 TFLOPS（fp16） |
-| **Real GEMM** | 手写 64×64 分块矩阵乘，看“真实内核”达成率 | fp32 0.8 / fp16 1.1 / int8 0.3 / int4 0.3 |
-| **Bandwidth** | GPU 读 / 写 / 拷贝 | ~50 GB/s（规格 68.25） |
+| **Real GEMM** | 手写 64×64 分块矩阵乘，看“真实内核”达成率 | fp32 0.8 / fp16 1.2 / int8 0.3 / int4 0.3 |
+| **Bandwidth** | GPU 读 / 写 / 拷贝 | 55~60 GB/s（规格 68.25） |
 
-## 快速开始
+数值口径：正文用 **9 次采样的中位数**（跨设备可比），同时给出峰值（最快一次）。
+每次 `run` 会先跑数值自检，结果写进 `selfcheck` 字段；失败则退出码 2、数据不采用。
+
+## 快速开始（只有一个入口）
 
 ```bash
 cd mac-gpu-bench
-
-./macgpu run --repeat 3   # 全套测试（约 10~15 秒）
-make report               # 生成 output/reports/REPORT.md
-./macgpu selfcheck        # 数值自检，不过则退出码 2
-make test                 # 冒烟测试（编译→实测→自检→文档一致→报告）
-make docs                 # 文档与实现一致性校验
+./macgpu              # 默认 3 轮
+./macgpu --repeat 10  # 想更稳就多跑几轮（每轮约 10 秒）
 ```
 
-第一次运行自动编译（3~5 秒）。机器上有其他任务时用 `--repeat 3`：带宽对负载很敏感。
+就这一条。它会：编译 → 数值自检 → 算力 / GEMM / 带宽实测（3 轮）→
+在终端打印 **[4] 推荐数据**，并把完整 JSON 写到 `output/results/<时间戳>/result.json`。
+
+```
+[4] 推荐数据 / Recommended — 跨设备对比只用这一节（每轮 9 次采样取中位数）
+    ★ prefill   FP16 Matrix      2.25 TFLOPS
+    ★ decode    GPU read         58.0 GB/s
+    环境：热状态 nominal · 电源 ac · 负载 1.44 · 自检 12/12 PASS · 带宽已饱和
+```
+
+**不需要记别的命令。** 下面这些只有排查或自动化时才用：
+
+| 命令 | 什么时候用 |
+|---|---|
+| `./macgpu info` | 只想看芯片 / GPU 核数 / 内存 / OS |
+| `./macgpu selfcheck` | 怀疑数值不对，单独验证内核 |
+| `make report` | 想把 JSON 转成 Markdown（可选，不影响测量） |
+| `make test` / `make docs` | 改代码后自检 |
+
+第一次运行自动编译（约 3~5 秒），全程约 40 秒。带宽对后台负载敏感：
+跑之前退掉浏览器视频 / Xcode / Docker；`./macgpu` 已内置并发锁。
 
 ## 三条关键结论（M1 实测）
 
-**1. 只有矩阵指令能跑满 GPU。** `simdgroup_matrix` 实测 2.2~2.3 TFLOPS，是规格 2.6 的 85%；
+**1. 只有矩阵指令能跑满 GPU。** `simdgroup_matrix` 实测 2.2~2.4 TFLOPS，是规格 2.6 的 85~90%；
 **FP16 与 FP32 同速，没有“FP16 双倍”**。
 
-**2. 普通 FMA 着色器只有一半。** fp32 1.0 TFLOPS / fp16 1.8 TFLOPS（half2 打包带来的 1.7 倍）。
-不调矩阵指令的算子，prefill 天花板就在这里。
+**2. 不用矩阵指令：fp32 掉一半，fp16 还能到八成。** fp32 1.0 TFLOPS（矩阵指令的 48%）/
+fp16 1.8 TFLOPS（85%，half2 打包带来的 1.7 倍）。不调矩阵指令的算子，prefill 天花板就在这里。
 
-**3. 量化不提算力，只省带宽。** Metal 没有 int8/int4 tensor 指令，int8/int4 GEMM 都只有
-0.3 TOPS（FP16 峰值的 1/7）。收益在 decode：权重 2 → 0.5 字节/参数，token/s 直接翻倍。
+**3. 量化不提算力，只省带宽。** Metal 没有 int8/int4 tensor 指令：纯整型 ALU 实测 0.61 TOPS
+（FP16 的 1/3），int8/int4 GEMM 都只有 0.3 TOPS（FP16 峰值的 1/7）。收益在 decode：
+权重 2 → 0.5 字节/参数，token/s 直接翻倍。
 
 ## 为什么结果可信
 
@@ -44,6 +64,9 @@ make docs                 # 文档与实现一致性校验
 | 向量分量被当死代码删除 | 只写 `.x` → FP32 虚高 4 倍（3.86 vs 0.97） | 整条向量写回 + 与 CPU 参考逐元素比对 |
 | 循环被折叠成常数加法 | int8 微基准虚高 100 倍（84 TOPS） | 放弃微基准，改测真实 int8 GEMM |
 | 缓冲区被内存压缩 | 带宽虚高到 89~121 GB/s | 测试前填充不可压缩数据 |
+| 命令缓冲执行失败 | 0 秒 → 上亿 TFLOPS，且被“取最快”保留 | 检查 `status/error`、耗时下限、物理上界 |
+| 环境不同却直接比 | 低电量/电池/热降频让读数差 10~40% | 记录 OS build/热状态/电源/负载/git sha，报告告警 |
+| 固定线程喂不饱大 GPU | 大核数机器被当成“带宽低” | 每次 run 自动用 2× 线程复测；未饱和就自动切换，`bandwidth_saturation` 记录依据 |
 
 `./macgpu selfcheck` 覆盖以上全部：fp32/fp16/int8 GEMM 与 CPU 参考的误差、每个峰值内核的
 数值、带宽量级。`make docs` 再把「文档里写的口径」和「代码里的内核/字段」对齐。

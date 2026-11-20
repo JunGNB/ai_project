@@ -90,7 +90,10 @@ def check_kernels():
 
 
 def check_schema():
-    """契约文档声明的字段集合 == 真实 result.json 的字段集合。"""
+    """契约文档声明的字段集合 == 真实 result.json 的字段集合。
+
+    字段或顶层键末尾加 `?` 表示可选：存在时必须带上声明的子字段，不存在不算错。
+    """
     issues = []
     if not os.path.isfile(LATEST):
         return issues  # 还没有跑过：跳过（make run 后再校验）
@@ -99,17 +102,30 @@ def check_schema():
     if not block:
         return ["design/21-output-contract.md 缺少 ```schema 字段声明块"]
 
-    declared = {}
+    declared, optional_keys, optional_fields = {}, set(), {}
     for line in block.group(1).splitlines():
         m = SCHEMA_LINE_RE.match(line.strip())
-        if m:
-            name, is_list, fields = m.group(1), m.group(2), m.group(3)
-            declared[name] = {f.strip() for f in fields.split(",") if f.strip()}
+        if not m:
+            continue
+        name, _is_list, fields = m.group(1), m.group(2), m.group(3)
+        if name.endswith("?"):
+            name = name[:-1]
+            optional_keys.add(name)
+        req, opt = set(), set()
+        for f in (x.strip() for x in fields.split(",")):
+            if not f:
+                continue
+            if f.endswith("?"):
+                opt.add(f[:-1])
+            else:
+                req.add(f)
+        declared[name] = req | opt
+        optional_fields[name] = opt | (declared[name] if name in optional_keys else set())
 
     data = json.load(open(LATEST, encoding="utf-8"))
     actual = set(data)
-    for name, fields in declared.items():
-        if name.endswith("[]") or name == "top-level":
+    for name in declared:
+        if name.endswith("[]") or name == "top-level" or name in optional_keys:
             continue
         if name not in actual:
             issues.append(f"契约声明了顶层字段 {name}，但 result.json 里没有")
@@ -117,7 +133,7 @@ def check_schema():
     if top is not None:
         for k in sorted(actual - top):
             issues.append(f"result.json 有未声明的顶层字段 {k}")
-        for k in sorted(top - actual):
+        for k in sorted((top - optional_fields.get("top-level", set())) - actual):
             issues.append(f"契约声明了顶层字段 {k}，实际缺失")
 
     for name, payload in [("compute", data.get("compute") or []),
@@ -129,8 +145,19 @@ def check_schema():
         got = set(payload[0])
         for k in sorted(got - want):
             issues.append(f"{name}[] 有未声明字段 {k}")
-        for k in sorted(want - got):
+        for k in sorted((want - optional_fields.get(name + "[]", set())) - got):
             issues.append(f"{name}[] 声明了字段 {k}，实际缺失")
+
+    # 可选对象：存在时校验其字段
+    for key in optional_keys:
+        if key not in data:
+            continue
+        got = set(data[key] if isinstance(data[key], dict) else {})
+        want = declared.get(key, set())
+        for k in sorted(got - want):
+            issues.append(f"{key} 有未声明字段 {k}")
+        for k in sorted(want - got):
+            issues.append(f"{key} 声明了字段 {k}，实际缺失")
     return issues
 
 

@@ -25,7 +25,7 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.path.join(ROOT, "macgpu")
 RESULTS = os.path.join(ROOT, "output", "results")
-SERVER_VERSION = "2.0.0"
+SERVER_VERSION = "2.1.0"
 
 TOOLS = [
     {
@@ -54,6 +54,8 @@ TOOLS = [
                 },
                 "gemm_size": {"type": "integer", "description": "GEMM 边长，64 的倍数，默认 2048"},
                 "size_mb": {"type": "integer", "description": "带宽缓冲区 MB，默认 256"},
+                "repeat": {"type": "integer", "description": "重复轮数，默认 5（跨设备比较建议 >=3）"},
+                "skip_selfcheck": {"type": "boolean", "description": "跳过数值自检（不建议）"},
                 "timeout_s": {"type": "integer", "description": "超时秒数，默认 300"},
             },
             "additionalProperties": False,
@@ -77,7 +79,7 @@ TOOLS = [
             "properties": {
                 "result_path": {"type": "string", "description": "result.json 路径，默认最新一次"},
                 "ctx": {"type": "integer", "description": "decode 估算的上下文长度，默认 2048"},
-                "eff": {"type": "number", "description": "计算效率假设，默认 0.4"},
+                "eff": {"type": "number", "description": "prefill 效率，默认 0.8（MLX/MPS），手写内核用 0.4"},
             },
             "additionalProperties": False,
         },
@@ -102,17 +104,40 @@ def result_dirs():
 
 
 def summarize(data):
+    """按键 (dtype, path) 保留两条通路。
+
+    旧实现用 {m["dtype"]: ...}：同一精度有 mma 和 fma 两条，后者会覆盖前者，
+    Agent 看到的 "fp16 = 1.9" 其实是 FMA 通路，矩阵指令峰值 2.3 完全丢失。
+    """
+    host = data["host"]
     return {
-        "host": f"{data['host']['chip']} / {data['host']['model']} / {data['host']['memory_gb']:.0f}GB",
+        "host": f"{host['chip']} / {host['model']} / {host['memory_gb']:.0f}GB",
+        "os_build": host.get("os_build"),
+        "power": {"source": host.get("power_source"),
+                  "low_power_mode": host.get("low_power_mode"),
+                  "thermal_state": host.get("thermal_state"),
+                  "load_avg_1m": host.get("load_avg_1m")},
+        "selfcheck": (data.get("selfcheck") or {}).get("passed"),
+        "git_sha": (data.get("tool") or {}).get("git_sha"),
         "gpu_cores": data["gpu"].get("core_count"),
         "compute": {
-            m["dtype"]: {"value": round(m["value"], 3), "unit": m["unit"],
-                         "tmacs": round(m["macs_per_sec"] / 1e12, 3)}
+            f"{m['dtype']}/{m.get('path', 'fma')}": {
+                "peak": round(m["value"], 3),
+                "median": round(m.get("value_median", m["value"]), 3),
+                "unit": m["unit"],
+                "tmacs_median": round(m.get("macs_per_sec_median", m["macs_per_sec"]) / 1e12, 3),
+            }
             for m in data.get("compute", [])
         },
-        "gemm": {m["dtype"]: {"tflops": round(m["tflops"], 3), "size": m["size"]}
+        "gemm": {m["dtype"]: {"median": round(m.get("tflops_median", m["tflops"]), 3),
+                              "peak": round(m["tflops"], 3),
+                              "unit": m.get("unit", "TFLOPS"), "size": m["size"]}
                  for m in data.get("gemm", [])},
-        "bandwidth": {m["name"]: round(m["gbps"], 2) for m in data.get("bandwidth", [])},
+        "bandwidth": {m["name"]: {"median": round(m.get("gbps_median", m["gbps"]), 2),
+                                  "peak": round(m["gbps"], 2),
+                                  "min": round(m.get("gbps_min", m["gbps"]), 2)}
+                      for m in data.get("bandwidth", [])},
+        "sampling": data.get("sampling"),
         "generated_at": data["generated_at"],
     }
 
@@ -121,13 +146,16 @@ def tool_run_benchmark(arguments):
     tests = arguments.get("tests") or ["compute", "gemm", "bandwidth"]
     stamp = time.strftime("%Y%m%d-%H%M%S")
     out_path = os.path.join(RESULTS, stamp, "result.json")
-    cmd = ["run", "--json", "--tests", ",".join(tests), "--out", out_path]
+    cmd = ["run", "--json", "--tests", ",".join(tests), "--out", out_path,
+           "--repeat", str(int(arguments.get("repeat", 5)))]
     if arguments.get("dtypes"):
         cmd += ["--dtypes", ",".join(arguments["dtypes"])]
     if arguments.get("gemm_size"):
         cmd += ["--gemm-size", str(arguments["gemm_size"])]
     if arguments.get("size_mb"):
         cmd += ["--size-mb", str(arguments["size_mb"])]
+    if arguments.get("skip_selfcheck"):
+        cmd += ["--no-selfcheck"]
     stdout = call_cli(cmd, timeout=int(arguments.get("timeout_s", 300)))
     data = json.loads(stdout)
     return json.dumps({"result_path": out_path, **summarize(data)}, ensure_ascii=False, indent=2)
@@ -151,9 +179,14 @@ def tool_list_results(_arguments):
         rows.append({
             "path": path,
             "generated_at": data["generated_at"],
+            "version": data.get("version"),
             "machine": f"{data['host']['chip']} {data['host']['memory_gb']:.0f}GB",
-            "fp32_tflops": next((round(m["value"], 2) for m in data["compute"] if m["dtype"] == "fp32"), None),
-            "bandwidth_gbs": next((round(m["gbps"], 1) for m in data["bandwidth"] if m["name"] == "gpu_read"), None),
+            "selfcheck": (data.get("selfcheck") or {}).get("passed"),
+            "fp32_mma_tflops": next((round(m.get("value_median", m["value"]), 2)
+                                     for m in data["compute"]
+                                     if m["dtype"] == "fp32" and m.get("path") == "mma"), None),
+            "read_gbs": next((round(m.get("gbps_median", m["gbps"]), 1)
+                              for m in data["bandwidth"] if m["name"] == "gpu_read"), None),
         })
     return json.dumps(rows, ensure_ascii=False, indent=2)
 

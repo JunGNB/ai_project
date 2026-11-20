@@ -160,6 +160,24 @@ kernel void gemm_f16(device const half* A [[buffer(0)]], device const half* B [[
     gemm_tile<half>(A, B, C, N, tgid.y * 64u, tgid.x * 64u, As, Bs, tpos.y * 16u + tpos.x);
 }
 
+// ---------------------------------------------------------------- INT8 整数 ALU
+// 结构与 peak_f32 完全一致，只把 FMA 换成 int32 乘加（IMAD），
+// 用来回答「不用 tensor 通路时，整型 ALU 的真实吞吐是多少」。
+kernel void peak_i8(device uint4* out [[buffer(0)]],
+                    constant uint& iters [[buffer(1)]],
+                    device const uint* seed [[buffer(2)]],
+                    uint gid [[thread_position_in_grid]]) {
+    uint k1 = seed[0], k2 = seed[1];
+    uint4 a0 = uint4(gid + 1u), a1 = uint4(gid + 2u), a2 = uint4(gid + 3u), a3 = uint4(gid + 5u);
+    uint4 b0 = uint4(gid * 3u + 1u), b1 = uint4(gid * 5u + 1u),
+          b2 = uint4(gid * 7u + 1u), b3 = uint4(gid * 11u + 1u);
+    for (uint i = 0; i < iters; ++i) {
+        a0 = a0 * k1 + k2; a1 = a1 * k1 + k2; a2 = a2 * k1 + k2; a3 = a3 * k1 + k2;
+        b0 = b0 * k2 + k1; b1 = b1 * k2 + k1; b2 = b2 * k2 + k1; b3 = b3 * k2 + k1;
+    }
+    out[gid] = a0 + a1 + a2 + a3 + b0 + b1 + b2 + b3;
+}
+
 // ---------------------------------------------------------------- INT8 GEMM
 // 量化推理在 Metal 上的真实路径：int8 输入、int32 累加。没有任何 tensor 指令可用。
 template <typename T, typename ACC>

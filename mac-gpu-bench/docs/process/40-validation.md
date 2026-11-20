@@ -14,18 +14,27 @@
 
 ## 2. selfcheck 覆盖范围
 
-`./macgpu selfcheck` 逐项与 CPU 参考比对，不通过则退出码 2：
+`./macgpu selfcheck` 逐项与 CPU 参考比对，不通过则退出码 2；`run` 也会先跑同一套自检，
+结果写进 `result.json` 的 `selfcheck` 字段，失败时 `run` 以退出码 2 结束（`--no-selfcheck` 可跳过）。
 
 | 检查项 | 判据 |
 |---|---|
-| `gemm_i8` 128³ | 与 CPU 整数矩阵乘**完全相等**（误差 0） |
-| `gemm_f32` / `gemm_f16` 128³ | 最大误差在阈值内 |
-| `peak_mma_f32` / `peak_mma_f16` | 若干轮迭代后与 CPU 复算的 A·B 比对（相对误差 < 1e-3 / 5e-2） |
-| `peak_f32` / `peak_f16` | 按同样的 FMA 链在 CPU 复算后比对（< 1e-4 / 5e-2） |
+| `gemm_i8` / `gemm_i4` 128³ | 与 CPU 整数矩阵乘**完全相等**（误差 0） |
+| `gemm_f32` / `gemm_f16` 128³ | 输入用非二进制精确数（0.0731/0.0419），相对误差 ≤ 2e-3 / 2e-2 |
+| `peak_mma_f32` / `peak_mma_f16` | 累加器**显式清零**后与 CPU 复算的 A·B 比对（相对误差 ≤ 1e-4 / 2e-2） |
+| `peak_f32` / `peak_f16` | 按同样的 FMA 链在 CPU 复算后比对（≤ 1e-4 / 2e-2） |
 | 带宽三项 | 量级落在 5~5000 GB/s |
 
 阈值取「数值精度」和「实现错误」之间的空隙：相对误差 1e-6 是 float32 的正常水平，
 一旦计数错 4 倍，误差会变成 0.75 量级，不可能漏过。
+
+v2.1 之前这三处会**假通过**，已修：
+
+- 峰值内核的累加器缓冲区未清零，CPU 参考却假设初值为 0；
+- fp16 自检跑 96 次迭代，半精度累加误差贴到 5e-2 阈值（实测 3.8e-2）；
+- fp32/fp16 GEMM 用 0.25/0.5 这类二进制精确值，误差恒为 0，等于没检。
+
+现在 fp16 自检的典型误差是 2e-3 ~ 6e-3（阈值 2e-2），留了 3 倍以上余量。
 
 ## 3. 文档一致性（make docs）
 
@@ -46,7 +55,7 @@
 1. 从零编译通过。
 2. `info --json` 字段完整、GPU 核心数 > 0。
 3. 小规模实测（GEMM 256³、带宽 32 MB）数值落在合理区间，`schema` 与 `compute` 结构正确。
-4. `selfcheck` 全通过。
+4. `selfcheck` 全通过（含 `run` 内嵌的自检与 `selfcheck.passed == true`）。
 5. MCP 握手 + `tools/list` + `machine_info`。
 6. 报告生成且包含关键章节。
 
@@ -61,7 +70,10 @@
 
 ## 6. 什么时候数字不可信
 
-- `host.load_avg_1m` > 1.5：带宽可能偏低 10~20%，算力受影响较小。
-- `selfcheck` 失败：先修内核，不要看 `run` 的结果。
-- 单次 `run`（未 `--repeat`）：取最优次数不足，抖动大。
-- 与另一台机器比较：必须同为 Apple Silicon 且负载相当，Intel Mac 的 Metal 后端差异过大。
+- `selfcheck.passed == false`：先修内核，不要看 `run` 的结果（`run` 本身会以退出码 2 结束）。
+- `host.thermal_state != nominal`：已降频，绝对值偏低。
+- `host.low_power_mode == "1"` 或 `host.power_source == "battery"`：频率/功耗受限。
+- `host.load_avg_1m` > 2.0：带宽可能偏低 10~20%，算力受影响较小。
+- 单次 `run`（未 `--repeat`）：取最优次数不足，M1 上 `--repeat 1` 比 `--repeat 10` 低约 4%。
+- 与另一台机器比较：必须同为 Apple Silicon、同一 `--size-mb` / `--gemm-size` / `--repeat`，
+  且按 **GPU 核数** 分组（同芯片有 binned 版本）。Intel Mac 的 Metal 后端差异过大，直接退出。

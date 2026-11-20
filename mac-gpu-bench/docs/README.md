@@ -16,6 +16,7 @@
 | [process/40-validation.md](process/40-validation.md) | current | 怎么验证：selfcheck 覆盖范围、三个已踩过的坑、验收清单 | 改自检项/验收标准 |
 | [records/50-m1-baseline.md](records/50-m1-baseline.md) | record | M1 / 8 核 GPU / 16 GB 的一次基线读数（历史记录，不随代码更新） | 仅追加新记录 |
 | [records/51-mlx-crosscheck.md](records/51-mlx-crosscheck.md) | record | 用 oMLX 真实 4-bit 模型校核 roofline 预测，给出效率系数（历史记录） | 仅追加新记录 |
+| [records/52-v2.1-recalibration.md](records/52-v2.1-recalibration.md) | record | v2.1 修复清单与 M1 复标定读数（中位数/峰值/CV） | 仅追加新记录 |
 
 ## 术语
 

@@ -40,7 +40,7 @@ echo "[3/6] 小规模实测"
 python3 - "$TMP/run.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
-assert d["schema"] == "macgpu/v1"
+assert d["schema"].startswith("macgpu/"), d["schema"]
 comp = {(m["dtype"], m["path"]): m for m in d["compute"]}
 assert 0.05 < comp[("fp32", "mma")]["value"] < 500, comp[("fp32", "mma")]["value"]
 assert 0.05 < comp[("fp32", "fma")]["value"] < 500, comp[("fp32", "fma")]["value"]

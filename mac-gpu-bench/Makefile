@@ -9,9 +9,9 @@ $(BIN): $(SRC)
 	@swiftc -O -whole-module-optimization $(SRC) -o $(BIN).tmp && mv $(BIN).tmp $(BIN)
 	@echo "built $(BIN)"
 
-# 完整测试：3 轮取最优（机器有后台负载时更稳）
+# 唯一入口：全套测试（= ./macgpu）
 run: $(BIN)
-	@./macgpu run --repeat 3
+	@./macgpu
 
 # 用最近一次结果重新生成报告
 report:
