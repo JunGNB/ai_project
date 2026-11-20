@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# macgpu —— Mac GPU Compute & Bandwidth Benchmark 入口
+# 按需编译（只依赖 macOS 自带的 swiftc + Metal 运行时），所有中间产物落在 output/
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export MACGPU_HOME="${MACGPU_HOME:-$ROOT}"
+
+OUT="$ROOT/output/build"
+BIN="$OUT/macgpu"
+SRCS=("$ROOT"/src/*.swift)
+
+if ! command -v swiftc >/dev/null 2>&1; then
+  echo "错误: 找不到 swiftc，请先安装 Xcode Command Line Tools: xcode-select --install" >&2
+  exit 1
+fi
+
+need_build=0
+if [[ ! -x "$BIN" ]]; then
+  need_build=1
+else
+  for f in "${SRCS[@]}"; do
+    [[ "$f" -nt "$BIN" ]] && need_build=1
+  done
+fi
+
+if [[ "$need_build" == "1" ]]; then
+  mkdir -p "$OUT"
+  echo "compiling (about 3-5s) ..." >&2
+  if ! swiftc -O -whole-module-optimization "${SRCS[@]}" -o "$BIN.tmp" 2>"$OUT/build.log"; then
+    echo "编译失败，日志见 $OUT/build.log" >&2
+    tail -40 "$OUT/build.log" >&2
+    exit 1
+  fi
+  mv "$BIN.tmp" "$BIN"
+fi
+
+exec "$BIN" "$@"
