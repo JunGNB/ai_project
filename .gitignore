@@ -2,11 +2,4 @@
 **/.DS_Store
 
 # 内部工程文件：只保留在本地源目录，不进入本仓库
-# （加在仓库根而非 modelbenchmark/ 下，因为后者每次同步会被源目录版本覆盖）
-modelbenchmark/AGENTS.md
-modelbenchmark/harness/
 modelbenchmark/.github/
-modelbenchmark/docs/design/30-architecture.md
-
-# 大体积测试数据（约 298 MB），不入库
-modelbenchmark/M4PRO_testdata2/
